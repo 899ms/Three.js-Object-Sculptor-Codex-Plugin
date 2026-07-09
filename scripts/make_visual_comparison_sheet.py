@@ -245,7 +245,7 @@ def create_sheet(
         "layout": "left=reference,right=render",
         "panelWidth": panel_w,
         "panelHeight": panel_h,
-        "note": "Send this image to AI vision for visualMatchScore/layerScores; this script does not score.",
+        "note": "Send this image to AI vision for global, layer, and semantic feature scores; this script does not score.",
     }
 
 

@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from visual_feature_gate import feature_gate_failures
+
 
 DEFAULT_PASS_ORDER = [
     "blockout",
@@ -80,7 +82,7 @@ def visual_evidence(entry: dict[str, Any]) -> dict[str, Any]:
     return visual if isinstance(visual, dict) else {}
 
 
-def review_completes_pass(entry: dict[str, Any], pass_id: str) -> bool:
+def review_completes_pass(spec: dict[str, Any], entry: dict[str, Any], pass_id: str) -> bool:
     if entry.get("passId") != pass_id or entry.get("action") != "continue":
         return False
     if pass_id in VISUAL_PASS_IDS:
@@ -91,6 +93,8 @@ def review_completes_pass(entry: dict[str, Any], pass_id: str) -> bool:
         threshold = entry.get("visualAcceptanceThreshold", 0.7)
         if not has_number(score) or not has_number(threshold) or float(score) < float(threshold):
             return False
+        if feature_gate_failures(spec, entry, pass_id):
+            return False
     return True
 
 
@@ -100,7 +104,10 @@ def completed_passes(spec: dict[str, Any], ids: list[str]) -> list[str]:
         return []
     completed: list[str] = []
     for pass_id in ids:
-        if any(isinstance(entry, dict) and review_completes_pass(entry, pass_id) for entry in history):
+        if any(
+            isinstance(entry, dict) and review_completes_pass(spec, entry, pass_id)
+            for entry in history
+        ):
             completed.append(pass_id)
         else:
             break
@@ -122,6 +129,7 @@ def next_required_evidence(spec: dict[str, Any], pass_id: str) -> list[str]:
         evidence.append("browser render screenshot from the Codex in-app Browser")
         evidence.append("side-by-side reference/render comparison sheet for AI vision review")
         evidence.append("AI vision score at or above the visual acceptance threshold")
+        evidence.append("all critical semantic feature scores from the shared image pair at or above their thresholds")
         evidence.append("self-correction review appended with action=continue before the next pass")
     return evidence
 

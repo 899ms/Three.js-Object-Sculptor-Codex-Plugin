@@ -9,6 +9,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from visual_feature_gate import feature_gate_failures
+
 
 VALID_ACTIONS = {"continue", "refine-spec", "refine-code", "request-input", "stop"}
 VISUAL_PASS_IDS = {
@@ -43,6 +45,17 @@ def load_spec(path: Path) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("spec must be a JSON object")
     return payload
+
+
+def load_json_argument(value: str | None, label: str) -> object | None:
+    if not value:
+        return None
+    candidate = Path(value).expanduser()
+    text = candidate.read_text(encoding="utf-8") if candidate.is_file() else value
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label} must be valid inline JSON or a JSON file path") from exc
 
 
 def clamp_score(value: float) -> float:
@@ -123,7 +136,7 @@ def pass_specific_evidence(pass_id: str) -> list[str]:
     return []
 
 
-def review_completes_pass(entry: dict, pass_id: str) -> bool:
+def review_completes_pass(spec: dict, entry: dict, pass_id: str) -> bool:
     if entry.get("passId") != pass_id or entry.get("action") != "continue":
         return False
     visual = entry.get("visualEvidence")
@@ -138,6 +151,8 @@ def review_completes_pass(entry: dict, pass_id: str) -> bool:
             return False
         if not (isinstance(visual, dict) and visual.get("comparisonImage")):
             return False
+        if feature_gate_failures(spec, entry, pass_id):
+            return False
     return True
 
 
@@ -147,7 +162,10 @@ def sync_pipeline(spec: dict) -> None:
     completed: list[str] = []
     if isinstance(history, list):
         for pass_id in ids:
-            if any(isinstance(entry, dict) and review_completes_pass(entry, pass_id) for entry in history):
+            if any(
+                isinstance(entry, dict) and review_completes_pass(spec, entry, pass_id)
+                for entry in history
+            ):
                 completed.append(pass_id)
             else:
                 break
@@ -158,6 +176,8 @@ def sync_pipeline(spec: dict) -> None:
         required.extend(
             [
                 "browser render screenshot from the Codex in-app Browser",
+                "single side-by-side full reference/render comparison sheet",
+                "all critical semantic feature scores at or above their thresholds",
                 "self-correction review appended with action=continue before the next pass",
             ]
         )
@@ -195,6 +215,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--comparison-image", help="Side-by-side reference/render contact sheet reviewed by AI vision")
     parser.add_argument("--ai-vision-score", type=float, help="AI vision visual match score from 0 to 1")
     parser.add_argument("--layer-scores-json", help="JSON object with AI vision layer scores, e.g. silhouette/material/lighting")
+    parser.add_argument("--feature-reviews-json", help="JSON array or file path containing per-feature scores from the same full image pair")
     parser.add_argument("--ai-vision-notes", help="AI vision critique explaining the score and mismatch root causes")
     parser.add_argument("--visual-threshold", type=float, help="Override visual acceptance threshold for this review")
     parser.add_argument("--camera-view", help="Camera/viewpoint label, e.g. front, three-quarter, side, close-up")
@@ -226,7 +247,7 @@ def main(argv: list[str]) -> int:
     threshold = clamp_score(args.visual_threshold) if args.visual_threshold is not None else visual_acceptance_threshold(spec)
     layer_scores = None
     if args.layer_scores_json:
-        layer_scores = json.loads(args.layer_scores_json)
+        layer_scores = load_json_argument(args.layer_scores_json, "--layer-scores-json")
         if not isinstance(layer_scores, dict):
             raise ValueError("--layer-scores-json must be a JSON object")
         for key, value in layer_scores.items():
@@ -238,6 +259,21 @@ def main(argv: list[str]) -> int:
         raise ValueError("--ai-vision-score must be from 0 to 1")
     if args.visual_threshold is not None and not 0 <= args.visual_threshold <= 1:
         raise ValueError("--visual-threshold must be from 0 to 1")
+    feature_reviews = load_json_argument(args.feature_reviews_json, "--feature-reviews-json")
+    if feature_reviews is None:
+        feature_reviews = []
+    if not isinstance(feature_reviews, list):
+        raise ValueError("--feature-reviews-json must be a JSON array")
+    for index, review in enumerate(feature_reviews):
+        if not isinstance(review, dict):
+            raise ValueError(f"feature review {index} must be an object")
+        if not isinstance(review.get("id"), str) or not review["id"].strip():
+            raise ValueError(f"feature review {index}.id is required")
+        score = review.get("score")
+        if score is not None and (
+            not isinstance(score, (int, float)) or not 0 <= float(score) <= 1
+        ):
+            raise ValueError(f"feature review {index}.score must be from 0 to 1")
     if args.pass_id in VISUAL_PASS_IDS and args.action == "continue":
         if not args.comparison_image:
             raise ValueError(
@@ -277,6 +313,7 @@ def main(argv: list[str]) -> int:
         "aiVisionScore": clamp_score(args.ai_vision_score) if args.ai_vision_score is not None else None,
         "visualAcceptanceThreshold": threshold,
         "layerScores": layer_scores or {},
+        "featureReviews": feature_reviews,
         "action": args.action,
         "summary": args.summary,
         "matched": split_items(args.matched),
@@ -285,6 +322,12 @@ def main(argv: list[str]) -> int:
         "codeFixes": split_items(args.code_fixes),
         "evidence": split_items(args.evidence),
     }
+    if args.pass_id in VISUAL_PASS_IDS and args.action == "continue":
+        feature_failures = feature_gate_failures(spec, entry, args.pass_id)
+        if feature_failures:
+            raise ValueError(
+                "feature-level AI vision gate failed: " + "; ".join(feature_failures)
+            )
 
     has_visual_evidence = any(
         [
@@ -318,6 +361,7 @@ def main(argv: list[str]) -> int:
                 "aiVisionScore": entry["aiVisionScore"],
                 "visualAcceptanceThreshold": entry["visualAcceptanceThreshold"],
                 "layerScores": entry["layerScores"],
+                "featureReviews": entry["featureReviews"],
                 **visual_evidence,
             }
         )

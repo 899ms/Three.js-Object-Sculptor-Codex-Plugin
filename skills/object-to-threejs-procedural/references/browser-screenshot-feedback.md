@@ -18,6 +18,10 @@ Create a side-by-side review image after capture:
 
 The script only aligns and packages evidence. It must not calculate the acceptance score. Codex AI vision must inspect `comparison.png`.
 
+Use the same full image pair to score at most five critical semantic features per pass. A feature is a subsystem such as a hull, cabin system, roof system, limb assembly, face, control panel, or sail-and-rigging system. It is not an individual mesh and does not need a separate crop. Score up to three uncertain important features only when adaptive escalation is useful.
+
+The starter spec contains generic review targets only as placeholders. Replace them with object-specific systems discovered during pre-spec assessment; otherwise strict quality validation should not pass a moderate or complex object.
+
 ## Compare By Layer
 
 Review screenshot evidence in this order:
@@ -38,7 +42,7 @@ Review screenshot evidence in this order:
 - If the source image does not reveal enough geometry or material information, choose `request-input`.
 - If the screenshot matches the pass acceptance criteria and does not hide future risk, choose `continue`.
 
-`continue` is allowed only when the AI vision score meets `selfCorrectLoop.visualAcceptance.threshold`, normally `0.7`. A numeric or pixel-difference script may help diagnose alignment, but it cannot approve the pass.
+`continue` is allowed only when the global AI vision score meets `selfCorrectLoop.visualAcceptance.threshold`, normally `0.7`, and every critical semantic feature meets its own threshold. A numeric or pixel-difference script may help diagnose alignment, but it cannot approve the pass.
 
 ## AI Vision Scorecard
 
@@ -52,6 +56,14 @@ Score each applicable layer from `0` to `1`, then assign one overall score based
 
 Do not hide a critical failed layer inside a high average. If a layer is essential to the current pass and remains visibly wrong, choose `refine-spec` or `refine-code` even when the arithmetic mean is above threshold.
 
+## Feature Tiers
+
+- `critical`: identity-defining, user-prioritized, visually salient, or high-risk subsystem. Must be visible in the full pair and pass independently.
+- `important`: useful secondary subsystem. Review only suspicious items; the reviewed average must meet the configured threshold.
+- `detail`: micro detail. Record mismatch notes and defer to refinement unless the user promotes it.
+
+Repeated parts should be one target when they form one recognizable system. For example, review three cabins as `cabin-system`, not three separate cabin targets.
+
 ## Evidence Format
 
 Record screenshot evidence with:
@@ -64,5 +76,6 @@ Record screenshot evidence with:
 - `aiVisionScore`: overall score from `0` to `1`.
 - `layerScores`: per-layer scores from the scorecard.
 - `aiVisionNotes`: concrete matched features, mismatches, root causes, and next correction.
+- `featureReviews`: feature ID, score, visibility in the shared pair, and focused notes.
 
 Never use screenshots as decoration only. They are the ground truth for the self-correction loop.

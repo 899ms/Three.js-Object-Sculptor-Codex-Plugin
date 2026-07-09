@@ -47,19 +47,20 @@ These scripts live at the plugin root, not inside this skill folder. From this `
 - `../../scripts/sculpt_pass_orchestrator.py sync object-sculpt-spec.json --in-place` refreshes `sculptPipeline` from `reviewHistory`.
 - `../../scripts/generate_threejs_factory.py object-sculpt-spec.json --out src/createObjectModel.ts` creates a TypeScript Three.js factory for the current unlocked build pass only.
 - `../../scripts/generate_threejs_factory.py object-sculpt-spec.json --pass-id structural-pass --out src/createObjectModel.ts` creates a deeper pass only after earlier passes were reviewed with `action=continue`.
-- `../../scripts/make_visual_comparison_sheet.py --reference <image> --render <screenshot> --out <comparison.png> --json` creates the side-by-side evidence image that AI vision must inspect. It deliberately does not calculate similarity or approve a pass.
-- `../../scripts/append_sculpt_review.py object-sculpt-spec.json --pass-id <pass> --fidelity <0-1> --action <continue|refine-spec|refine-code|request-input|stop> --summary "..." --render-screenshot <path> --comparison-image <path> --ai-vision-score <0-1> --layer-scores-json '{"silhouetteProportion":0.8}' --ai-vision-notes "..." --camera-view <view> --in-place` records each self-correction review plus AI vision evidence.
+- `../../scripts/make_visual_comparison_sheet.py --reference <image> --render <screenshot> --out <comparison.png> --json` creates one full reference/render comparison pair. AI vision scores the global result and every selected semantic feature from this same pair.
+- `../../scripts/append_sculpt_review.py object-sculpt-spec.json --pass-id <pass> --fidelity <0-1> --action <continue|refine-spec|refine-code|request-input|stop> --summary "..." --render-screenshot <path> --comparison-image <path> --ai-vision-score <0-1> --layer-scores-json '{"silhouetteProportion":0.8}' --feature-reviews-json <reviews.json> --ai-vision-notes "..." --camera-view <view> --in-place` records each self-correction review plus global and feature-level AI vision evidence.
 
 Prefer this loop for implementation tasks:
 
 1. Probe the image if it is local.
 2. Run the Pre-Spec Assessment Gate: classify the object softly, score complexity, and write the quality contract before authoring the full spec.
 3. Create or revise `ObjectSculptSpec` from the completed assessment and quality contract.
+   Replace generic starter `featureReviewTargets` with the object's actual identity-defining semantic systems before strict validation. Keep at most five critical and three important targets per pass.
 4. When material fidelity matters and a source image is available, run `extract_reference_pbr.py` for each important material crop/region before material-pass. Treat confidence below `0.7` as a stop/refine-input signal, not as a pass.
 5. Validate the spec with normal validation, then run `--strict-quality` before code generation.
 6. Generate a factory skeleton only after the strict quality gate passes or after explicitly documenting accepted fidelity limits.
 7. Hand-refine geometry, materials, animation anchors, and destruction anchors one pass at a time. Do not generate or implement a deeper pass until `sculpt_pass_orchestrator.py check` passes for that pass.
-8. After each visual pass, capture a browser screenshot, create a side-by-side comparison sheet, inspect that sheet with AI vision, then update `reviewHistory` with the overall score, layer scores, and mismatch critique.
+8. After each visual pass, capture a browser screenshot, create one full reference/render comparison pair, inspect it once with AI vision, then update `reviewHistory` with overall, layer, and semantic feature scores.
 9. Run project typecheck/build and browser visual review; use the Codex in-app Browser screenshot tool first. Do not install or download Playwright/Chromium just for this skill unless the user explicitly requests that route.
 
 ## 3D Terminology Discipline
@@ -264,6 +265,11 @@ layerScores:
   formDetail: 0..1
   materialSurface: 0..1
   lightingCamera: 0..1
+featureReviews:
+  - id:
+    score: 0..1
+    visible: true
+    notes:
 ```
 
 Decision rules:
@@ -290,17 +296,23 @@ Use this order:
 
 1. Render the current model in the browser or project preview.
 2. Capture a screenshot at the relevant review viewpoint from `qualityTargets.reviewViewpoints`.
-3. Create the comparison artifact with `../../scripts/make_visual_comparison_sheet.py --reference <image> --render <screenshot> --out <comparison.png>`.
-4. Inspect the comparison image with Codex AI vision and score it by layer:
+3. Select semantic review targets for this pass:
+   - `critical`: at most five identity-defining or high-risk systems; every one must pass independently.
+   - `important`: review adaptively, at most three suspicious systems; their reviewed average must pass.
+   - `detail`: note mismatches without blocking the pass.
+   Group repeated parts into one semantic system. Do not create a target for every mesh.
+4. Create one comparison artifact with `../../scripts/make_visual_comparison_sheet.py --reference <image> --render <screenshot> --out <comparison.png>`.
+5. Inspect the comparison image with Codex AI vision and score it by layer:
    - silhouette/proportion
    - component placement and hierarchy
    - local geometry features
    - material albedo, roughness, metalness, normal/bump/displacement
    - lighting, shadows, exposure, and camera angle
-5. Classify each mismatch as a spec gap, code gap, rendering/lighting gap, reference ambiguity, or performance tradeoff.
-6. Record the screenshot pair, comparison image, overall AI vision score, layer scores, and critique in `reviewHistory.visualEvidence` and `visualEvidence`.
+6. From that same full image pair, score every critical semantic feature independently. A failed critical feature fails the pass even when the global score is high.
+7. Classify each mismatch as a spec gap, code gap, rendering/lighting gap, reference ambiguity, or performance tradeoff.
+8. Record the screenshot pair, comparison image, overall AI vision score, layer scores, feature scores, and critique in `reviewHistory.visualEvidence` and `visualEvidence`.
 
-Default to the Codex in-app Browser screenshot tool when available. Playwright/Chromium is not the default validation path for this skill; do not install or download a browser runtime merely to get screenshots unless the user explicitly asks for that route. If no screenshot can be captured, no comparison sheet exists, AI vision has not reviewed it, or the score is below `selfCorrectLoop.visualAcceptance.threshold`, do not choose `continue`; choose `refine-spec`, `refine-code`, `request-input`, or explain the blocker.
+Default to the Codex in-app Browser screenshot tool when available. Playwright/Chromium is not the default validation path for this skill; do not install or download a browser runtime merely to get screenshots unless the user explicitly asks for that route. If no screenshot can be captured, no comparison sheet exists, AI vision has not reviewed it, the global score is below threshold, or any critical semantic feature is below its threshold, do not choose `continue`; choose `refine-spec`, `refine-code`, `request-input`, or explain the blocker.
 
 Minimum gates:
 
@@ -322,9 +334,9 @@ Before each implementation pass:
 2. Run `../../scripts/sculpt_pass_orchestrator.py check object-sculpt-spec.json --pass-id <pass>`.
 3. Generate or edit only the unlocked pass.
 4. Render in the Codex in-app Browser and capture screenshot evidence.
-5. Build a side-by-side evidence image with `../../scripts/make_visual_comparison_sheet.py`.
-6. Inspect it with AI vision and record overall/layer scores plus concrete mismatch notes.
-7. Append review with `../../scripts/append_sculpt_review.py ... --pass-id <pass> --action continue --render-screenshot <path> --comparison-image <path> --ai-vision-score <0-1> --layer-scores-json '<json>' --ai-vision-notes "..." --camera-view <view> --in-place`.
+5. Build one full reference/render comparison sheet with `../../scripts/make_visual_comparison_sheet.py`.
+6. Inspect it once with AI vision and record overall, layer, and critical semantic feature scores plus concrete mismatch notes.
+7. Append review with `../../scripts/append_sculpt_review.py ... --pass-id <pass> --action continue --render-screenshot <path> --comparison-image <path> --ai-vision-score <0-1> --layer-scores-json '<json>' --feature-reviews-json <reviews.json> --ai-vision-notes "..." --camera-view <view> --in-place`.
 8. Run `../../scripts/sculpt_pass_orchestrator.py sync object-sculpt-spec.json --in-place` when review history was edited manually.
 
 The default generator is pass-gated. Calling `generate_threejs_factory.py` without `--pass-id` uses `sculptPipeline.currentPass`. Calling it with a future `--pass-id` must fail until prior passes are completed. This is intentional: first sculpt the blockout, then structure, then form, then material and surface detail.

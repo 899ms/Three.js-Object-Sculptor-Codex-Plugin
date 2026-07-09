@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from visual_feature_gate import feature_gate_failures, feature_review_policy
+
 
 REQUIRED_TOP_LEVEL = {
     "targetName": str,
@@ -877,6 +879,44 @@ def validate_self_correct_loop(spec: dict[str, Any], errors: list[str], warnings
             "selfCorrectLoop.visualAcceptance.requiredLayerScores",
             errors,
         )
+        feature_policy = visual_acceptance.get("featureReviewPolicy")
+        if feature_policy is None:
+            warnings.append("quality: visualAcceptance.featureReviewPolicy is missing")
+        elif not isinstance(feature_policy, dict):
+            errors.append("selfCorrectLoop.visualAcceptance.featureReviewPolicy must be an object")
+        else:
+            for field in (
+                "enabled",
+                "adaptiveEscalation",
+                "singleImagePairOnly",
+            ):
+                value = feature_policy.get(field)
+                if value is not None and not isinstance(value, bool):
+                    errors.append(
+                        f"selfCorrectLoop.visualAcceptance.featureReviewPolicy.{field} must be boolean"
+                    )
+            for field in ("maxCriticalFeaturesPerPass", "maxImportantFeaturesPerPass"):
+                value = feature_policy.get(field)
+                if value is not None:
+                    validate_nonnegative_int(
+                        value,
+                        f"selfCorrectLoop.visualAcceptance.featureReviewPolicy.{field}",
+                        errors,
+                    )
+            for field in ("criticalDefaultThreshold", "importantAverageThreshold"):
+                value = feature_policy.get(field)
+                if value is not None:
+                    validate_unit_interval(
+                        value,
+                        f"selfCorrectLoop.visualAcceptance.featureReviewPolicy.{field}",
+                        errors,
+                    )
+            for field in ("reviewUnit", "selectionRule"):
+                value = feature_policy.get(field)
+                if value is not None and not isinstance(value, str):
+                    errors.append(
+                        f"selfCorrectLoop.visualAcceptance.featureReviewPolicy.{field} must be a string"
+                    )
     policy = loop.get("screenshotPolicy")
     if policy is None:
         warnings.append("selfCorrectLoop.screenshotPolicy is missing; visual review may drift without screenshots")
@@ -933,6 +973,137 @@ def validate_visual_evidence_item(item: Any, label: str, errors: list[str]) -> N
                     errors.append(f"{label}.layerScores.{key} must be a number from 0 to 1")
 
 
+def validate_feature_review_targets(
+    spec: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    targets = spec.get("featureReviewTargets")
+    policy = feature_review_policy(spec)
+    if targets is None:
+        if policy.get("enabled") is True:
+            errors.append("featureReviewTargets must be an array when feature review is enabled")
+        else:
+            warnings.append("quality: featureReviewTargets is missing; feature-level visual gating is disabled")
+        return
+    if not isinstance(targets, list):
+        errors.append("featureReviewTargets must be an array")
+        return
+    if not targets:
+        warnings.append("quality: featureReviewTargets is empty; component-level visual gaps can hide in the overall score")
+        return
+    ids: set[str] = set()
+    critical_by_pass: dict[str, int] = {}
+    important_by_pass: dict[str, int] = {}
+    for index, target in enumerate(targets):
+        label = f"featureReviewTargets[{index}]"
+        if not isinstance(target, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        target_id = target.get("id")
+        if not isinstance(target_id, str) or not target_id.strip():
+            errors.append(f"{label}.id is required")
+        elif target_id in ids:
+            errors.append(f"duplicate feature review target id {target_id!r}")
+        else:
+            ids.add(target_id)
+        if not isinstance(target.get("name"), str) or not target["name"].strip():
+            errors.append(f"{label}.name is required")
+        tier = target.get("tier")
+        if tier not in {"critical", "important", "detail"}:
+            errors.append(f"{label}.tier must be critical, important, or detail")
+        validate_string_array(target.get("passIds"), f"{label}.passIds", errors)
+        validate_string_array(target.get("componentRefs"), f"{label}.componentRefs", errors)
+        validate_string_array(target.get("evidenceRefs"), f"{label}.evidenceRefs", errors)
+        minimum = target.get("minimumScore")
+        if minimum is not None:
+            validate_unit_interval(minimum, f"{label}.minimumScore", errors)
+        for field in ("mustPass",):
+            value = target.get(field)
+            if value is not None and not isinstance(value, bool):
+                errors.append(f"{label}.{field} must be boolean")
+        if tier == "critical" or target.get("mustPass") is True:
+            pass_ids = target.get("passIds", [])
+            if isinstance(pass_ids, list):
+                for pass_id in pass_ids:
+                    if isinstance(pass_id, str):
+                        critical_by_pass[pass_id] = critical_by_pass.get(pass_id, 0) + 1
+        elif tier == "important":
+            pass_ids = target.get("passIds", [])
+            if isinstance(pass_ids, list):
+                for pass_id in pass_ids:
+                    if isinstance(pass_id, str):
+                        important_by_pass[pass_id] = important_by_pass.get(pass_id, 0) + 1
+    maximum = policy.get("maxCriticalFeaturesPerPass", 5)
+    if is_number(maximum):
+        for pass_id, count in critical_by_pass.items():
+            if count > int(maximum):
+                errors.append(
+                    f"pass {pass_id!r} has {count} critical feature targets; "
+                    f"maximum is {int(maximum)}"
+                )
+    important_maximum = policy.get("maxImportantFeaturesPerPass", 3)
+    if is_number(important_maximum):
+        for pass_id, count in important_by_pass.items():
+            if count > int(important_maximum):
+                errors.append(
+                    f"pass {pass_id!r} has {count} important feature targets; "
+                    f"maximum is {int(important_maximum)}"
+                )
+    assessment = spec.get("preSpecAssessment")
+    complexity = (
+        assessment.get("complexity", {}).get("tier")
+        if isinstance(assessment, dict) and isinstance(assessment.get("complexity"), dict)
+        else None
+    )
+    starter_ids = {
+        "overall-silhouette",
+        "primary-structure",
+        "reference-material-system",
+    }
+    if complexity in {"moderate", "complex", "ultra-complex"} and ids.issubset(starter_ids):
+        warnings.append(
+            "quality: replace generic starter featureReviewTargets with object-specific "
+            "identity-defining semantic systems before strict validation"
+        )
+
+
+def validate_feature_reviews(
+    entry: dict[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    reviews = entry.get("featureReviews")
+    if reviews is None:
+        return
+    if not isinstance(reviews, list):
+        errors.append(f"{label}.featureReviews must be an array")
+        return
+    ids: set[str] = set()
+    for index, review in enumerate(reviews):
+        item_label = f"{label}.featureReviews[{index}]"
+        if not isinstance(review, dict):
+            errors.append(f"{item_label} must be an object")
+            continue
+        feature_id = review.get("id")
+        if not isinstance(feature_id, str) or not feature_id.strip():
+            errors.append(f"{item_label}.id is required")
+        elif feature_id in ids:
+            errors.append(f"{label}.featureReviews has duplicate id {feature_id!r}")
+        else:
+            ids.add(feature_id)
+        score = review.get("score")
+        if score is not None:
+            validate_unit_interval(score, f"{item_label}.score", errors)
+        for field in ("notes",):
+            value = review.get(field)
+            if value is not None and not isinstance(value, str):
+                errors.append(f"{item_label}.{field} must be a string")
+        visible = review.get("visible")
+        if visible is not None and not isinstance(visible, bool):
+            errors.append(f"{item_label}.visible must be boolean")
+
+
 def validate_review_history(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
     history = spec.get("reviewHistory", [])
     if history is None:
@@ -955,6 +1126,7 @@ def validate_review_history(spec: dict[str, Any], errors: list[str], warnings: l
         visual = entry.get("visualEvidence")
         if visual is not None:
             validate_visual_evidence_item(visual, f"reviewHistory[{index}].visualEvidence", errors)
+        validate_feature_reviews(entry, f"reviewHistory[{index}]", errors)
         pass_id = entry.get("passId")
         if (
             pass_id in VISUAL_PASS_IDS
@@ -1000,6 +1172,11 @@ def validate_review_history(spec: dict[str, Any], errors: list[str], warnings: l
                                 f"quality: reviewHistory[{index}] layerScores missing: "
                                 + ", ".join(missing_layers)
                             )
+            failures = feature_gate_failures(spec, entry, str(pass_id))
+            for failure in failures:
+                warnings.append(
+                    f"quality: reviewHistory[{index}] feature gate failed: {failure}"
+                )
 
 
 def validate_visual_evidence_history(spec: dict[str, Any], errors: list[str]) -> None:
@@ -1049,12 +1226,27 @@ def validate_build_passes(spec: dict[str, Any], errors: list[str], warnings: lis
     return ids
 
 
-def review_completes_pass(entry: dict[str, Any], pass_id: str) -> bool:
+def review_completes_pass(
+    spec: dict[str, Any],
+    entry: dict[str, Any],
+    pass_id: str,
+) -> bool:
     if entry.get("passId") != pass_id or entry.get("action") != "continue":
         return False
     visual = entry.get("visualEvidence")
-    if pass_id in VISUAL_PASS_IDS and not (isinstance(visual, dict) and visual.get("renderScreenshot")):
-        return False
+    if pass_id in VISUAL_PASS_IDS:
+        if not (
+            isinstance(visual, dict)
+            and visual.get("renderScreenshot")
+            and visual.get("comparisonImage")
+        ):
+            return False
+        score = entry.get("aiVisionScore")
+        threshold = entry.get("visualAcceptanceThreshold", 0.7)
+        if not is_number(score) or not is_number(threshold) or float(score) < float(threshold):
+            return False
+        if feature_gate_failures(spec, entry, pass_id):
+            return False
     return True
 
 
@@ -1064,7 +1256,10 @@ def completed_passes_from_history(spec: dict[str, Any], pass_ids: list[str]) -> 
         return []
     completed: list[str] = []
     for pass_id in pass_ids:
-        if any(isinstance(entry, dict) and review_completes_pass(entry, pass_id) for entry in history):
+        if any(
+            isinstance(entry, dict) and review_completes_pass(spec, entry, pass_id)
+            for entry in history
+        ):
             completed.append(pass_id)
         else:
             break
@@ -1306,6 +1501,7 @@ def validate_spec(spec: dict[str, Any]) -> tuple[list[str], list[str]]:
     validate_quality_contract(spec, errors, warnings)
     validate_action_readiness(spec, errors, warnings)
     validate_self_correct_loop(spec, errors, warnings)
+    validate_feature_review_targets(spec, errors, warnings)
     validate_review_history(spec, errors, warnings)
     validate_visual_evidence_history(spec, errors)
     build_pass_ids = validate_build_passes(spec, errors, warnings)
