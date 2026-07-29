@@ -14,6 +14,7 @@ from sculpt_capabilities import OPERATOR_TO_PACK, PACK_BY_ID
 from sculpt_contract import (
     CORRECTION_OPERATIONS,
     load_spec_file,
+    pipeline_status,
     resolve_correction_parameter,
     review_target_catalog,
     write_spec_atomic,
@@ -123,7 +124,12 @@ def _combine(before: Any, value: Any, operation: str) -> Any:
     raise ValueError(f"{operation} is unsupported for {type(before).__name__}")
 
 
-def correction_failures(spec: Mapping[str, Any], batch: Any) -> list[str]:
+def correction_failures(
+    spec: Mapping[str, Any],
+    batch: Any,
+    *,
+    active_phase: str | None = None,
+) -> list[str]:
     if not isinstance(batch, Mapping):
         return ["correction batch must be an object"]
     failures: list[str] = []
@@ -213,6 +219,7 @@ def correction_failures(spec: Mapping[str, Any], batch: Any) -> list[str]:
                 "impactAssessment": batch.get("impactAssessment"),
             },
             catalog,
+            expected_active_phase=active_phase,
         )
     )
     return failures
@@ -221,9 +228,11 @@ def correction_failures(spec: Mapping[str, Any], batch: Any) -> list[str]:
 def apply_correction_batch(
     spec: Mapping[str, Any],
     batch: Mapping[str, Any],
+    *,
+    active_phase: str | None = None,
 ) -> dict[str, Any]:
     challenger = copy.deepcopy(dict(spec))
-    failures = correction_failures(challenger, batch)
+    failures = correction_failures(challenger, batch, active_phase=active_phase)
     if failures:
         raise ValueError("; ".join(failures))
     catalog = review_target_catalog(challenger)
@@ -268,10 +277,11 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     spec = load_spec_file(args.spec.expanduser().resolve())
     batch = json.loads(args.batch.expanduser().resolve().read_text(encoding="utf-8"))
+    active_phase = str(pipeline_status(spec).get("currentPass") or "")
     output = args.out.expanduser().resolve()
     if output == args.spec.expanduser().resolve():
         raise ValueError("--out must be a separate challenger path; champion mutation is forbidden")
-    failures = correction_failures(spec, batch)
+    failures = correction_failures(spec, batch, active_phase=active_phase)
     if failures:
         challenger = copy.deepcopy(spec)
         plan = challenger.setdefault("capabilityPlan", {})
@@ -304,7 +314,7 @@ def main(argv: list[str]) -> int:
             )
         )
         return 1
-    challenger = apply_correction_batch(spec, batch)
+    challenger = apply_correction_batch(spec, batch, active_phase=active_phase)
     write_spec_atomic(output, challenger)
     print(
         json.dumps(

@@ -236,7 +236,8 @@ def make_phase_execution_contract() -> dict[str, Any]:
                 "The active phase must review its own and every earlier phase's visible "
                 "quality, and may improve any earlier phase when evidence exposes a "
                 "defect or clear opportunity. Assess impact first, edit only a "
-                "challenger, and promote only when the whole cumulative result is "
+                "challenger, record predicted effects and mitigations for affected "
+                "later phases, and promote only when the whole cumulative result is "
                 "better or unchanged; rollback only when the challenger visibly regresses."
             ),
         },

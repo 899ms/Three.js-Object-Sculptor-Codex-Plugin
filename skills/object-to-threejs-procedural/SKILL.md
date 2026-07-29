@@ -139,7 +139,7 @@ Goal: apply object-class knowledge even when the user did not ask for animation.
 For the current phase:
 
 1. Obtain `sculpt context` once.
-2. Before editing, write one bounded impact assessment for the complete correction batch: exact target IDs and allowed parameter paths, protected component IDs, structural invariants, expected effect, possible side effects, risk, rollback checkpoint, and `safe-to-apply`. Reject or narrow the batch if it can alter untargeted structure. A `strategy-reset` must explicitly set `strategyChange: true`; an ordinary refinement must set it to `false`.
+2. Before editing, write one bounded impact assessment for the complete correction batch: canonical `activePhase`, exact target IDs and allowed parameter paths, protected component IDs, structural invariants, expected effect, possible side effects, structured `downstreamImpact` entries, risk, rollback checkpoint, and `safe-to-apply`. Each downstream entry names a phase strictly later than `activePhase`, its predicted effect, mitigation performed now, and the future check that can verify the prediction. Reject or narrow the batch if it can alter untargeted structure or leaves a material downstream risk without mitigation. A `strategy-reset` must explicitly set `strategyChange: true`; an ordinary refinement must set it to `false`.
 3. Apply the assessed correction batch—owned by the active phase or repairing an earlier phase—only to a challenger; never mutate the champion checkpoint.
 4. Run one fail-fast phase validation/build and one application build sufficient to render. Do not full-typecheck between individual edits.
 5. Capture the required render(s).
@@ -200,9 +200,11 @@ Apply all corrections in one atomic batch before rendering again.
 Before that batch is executable, its `impactAssessment` must prove that it is local and recoverable:
 
 - `targetIds` exactly equal the correction targets and `allowedPaths` exactly equal their parameter paths;
+- `activePhase` is the canonical current phase (`blockout`, `form`, `lookdev`, or `interaction`);
 - `protectedComponentIds` identify neighboring/accepted components that must not change;
 - `structuralInvariants` state the hierarchy, attachments, proportions, or motion relationships that must survive;
 - `expectedEffect`, `possibleSideEffects`, `risk`, and `rollbackCheckpoint` make the blast radius explicit;
+- `downstreamImpact` is a non-empty array whose entries provide a `phase` strictly later than `activePhase`, plus `prediction`, `currentMitigation`, and `futureVerification`; it analyzes later-phase compatibility without authoring later-phase fields;
 - only `verdict: safe-to-apply` proceeds. The builder must narrow/reject an unsafe proposal before touching code or spec.
 
 ## Champion and rollback policy

@@ -595,7 +595,13 @@ def perceptual_review_failures(
         # module-load cycle while keeping review and execution on one validator.
         from sculpt_corrections import correction_failures
 
-        failures.extend(correction_failures(spec, batch))
+        failures.extend(
+            correction_failures(
+                spec,
+                batch,
+                active_phase=str(entry.get("passId") or ""),
+            )
+        )
     return list(dict.fromkeys(failures))
 
 

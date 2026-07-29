@@ -33,6 +33,17 @@ from sculpt_contract import (  # noqa: E402
 )
 
 
+def downstream_impact(phase: str = "finalization") -> list[dict[str, str]]:
+    return [
+        {
+            "phase": phase,
+            "prediction": "The correction may affect the later integrated artifact.",
+            "currentMitigation": "Keep the edit inside the declared targets and paths.",
+            "futureVerification": "Run the later phase build and regression checks.",
+        }
+    ]
+
+
 class PerceptualPipelineTests(unittest.TestCase):
     def test_new_spec_declares_perceptual_objective_and_evidence_authority(self) -> None:
         spec = make_spec("Glass Machine", None, complexity="simple")
@@ -230,11 +241,13 @@ class PerceptualPipelineTests(unittest.TestCase):
             "version": 1,
             "batchId": "prefer-smaa",
             "impactAssessment": {
+                "activePhase": "blockout",
                 "targetIds": ["render-pipeline"],
                 "allowedPaths": ["antiAliasing.mode"],
                 "protectedComponentIds": [],
                 "expectedEffect": "Use the quality AA path for review renders.",
                 "possibleSideEffects": ["GPU frame time may increase."],
+                "downstreamImpact": downstream_impact("lookdev"),
                 "structuralInvariants": ["Object geometry and hierarchy remain unchanged."],
                 "risk": "low",
                 "rollbackCheckpoint": "Restore the active render contract.",
@@ -307,11 +320,13 @@ class PerceptualPipelineTests(unittest.TestCase):
             "version": 1,
             "batchId": "wider-housing",
             "impactAssessment": {
+                "activePhase": "form",
                 "targetIds": [root["id"]],
                 "allowedPaths": ["transform.scale[0]"],
                 "protectedComponentIds": [],
                 "expectedEffect": "Widen only the primary machine housing silhouette.",
                 "possibleSideEffects": ["The housing contact spacing may change."],
+                "downstreamImpact": downstream_impact("interaction"),
                 "structuralInvariants": ["Hierarchy and attachments remain unchanged."],
                 "risk": "medium",
                 "rollbackCheckpoint": "Restore the active phase champion.",
@@ -354,11 +369,13 @@ class PerceptualPipelineTests(unittest.TestCase):
             "version": 1,
             "batchId": "rougher-metal",
             "impactAssessment": {
+                "activePhase": "lookdev",
                 "targetIds": [material["id"]],
                 "allowedPaths": ["roughness.base"],
                 "protectedComponentIds": [root["id"]],
                 "expectedEffect": "Reduce the overly mirror-like metal highlight.",
                 "possibleSideEffects": ["Reflection contrast may decrease."],
+                "downstreamImpact": downstream_impact(),
                 "structuralInvariants": ["Geometry and attachments remain unchanged."],
                 "risk": "low",
                 "rollbackCheckpoint": "Restore the active phase champion.",
@@ -394,11 +411,13 @@ class PerceptualPipelineTests(unittest.TestCase):
             "artifactType": ARTIFACT_TYPE,
             "version": 1,
             "impactAssessment": {
+                "activePhase": "form",
                 "targetIds": [root["id"]],
                 "allowedPaths": ["transform.scale[0]"],
                 "protectedComponentIds": [],
                 "expectedEffect": "Attempt the declared unsupported correction.",
                 "possibleSideEffects": [],
+                "downstreamImpact": downstream_impact(),
                 "structuralInvariants": ["Hierarchy remains unchanged."],
                 "risk": "medium",
                 "rollbackCheckpoint": "Restore the active phase champion.",
@@ -449,11 +468,13 @@ class PerceptualPipelineTests(unittest.TestCase):
             "artifactType": ARTIFACT_TYPE,
             "version": 1,
             "impactAssessment": {
+                "activePhase": "form",
                 "targetIds": [root["id"]],
                 "allowedPaths": ["transform.rotation[0]"],
                 "protectedComponentIds": [],
                 "expectedEffect": "Incorrectly attempt to rotate a machine as an eye.",
                 "possibleSideEffects": [],
+                "downstreamImpact": downstream_impact(),
                 "structuralInvariants": ["Hierarchy remains unchanged."],
                 "risk": "medium",
                 "rollbackCheckpoint": "Restore the active phase champion.",
@@ -533,11 +554,13 @@ class PerceptualPipelineTests(unittest.TestCase):
             "falsifyingView": "reference",
         }
         assessment = {
+            "activePhase": "form",
             "targetIds": [root["id"]],
             "allowedPaths": ["transform.scale[0]"],
             "protectedComponentIds": [],
             "expectedEffect": "Widen only the primary machine housing silhouette.",
             "possibleSideEffects": ["The housing contact spacing may change."],
+            "downstreamImpact": downstream_impact("interaction"),
             "structuralInvariants": ["Hierarchy and attachments remain unchanged."],
             "risk": "medium",
             "rollbackCheckpoint": "Restore the active phase champion.",
@@ -566,11 +589,36 @@ class PerceptualPipelineTests(unittest.TestCase):
         }
 
         batch = correction_batch_from_verdict(verdict)
+        unassessed = copy.deepcopy(batch)
+        unassessed["impactAssessment"].pop("downstreamImpact")
 
         self.assertEqual(batch["corrections"][0]["packId"], "hard-surface-machinery")
         self.assertEqual(batch["corrections"][0]["operatorId"], "retune-panel-proportion")
-        self.assertEqual(correction_failures(spec, batch), [])
-        challenger = apply_correction_batch(spec, batch)
+        failures = correction_failures(spec, unassessed)
+        self.assertTrue(
+            any("downstreamImpact must be a non-empty array" in item for item in failures),
+            failures,
+        )
+        with self.assertRaisesRegex(ValueError, "downstreamImpact"):
+            apply_correction_batch(spec, unassessed)
+        phase_mismatch = correction_failures(
+            spec,
+            batch,
+            active_phase="blockout",
+        )
+        self.assertTrue(
+            any(
+                "must match the active correction phase" in item
+                for item in phase_mismatch
+            ),
+            phase_mismatch,
+        )
+        original = copy.deepcopy(spec)
+        with self.assertRaisesRegex(ValueError, "must match the active correction phase"):
+            apply_correction_batch(spec, batch, active_phase="blockout")
+        self.assertEqual(spec, original)
+        self.assertEqual(correction_failures(spec, batch, active_phase="form"), [])
+        challenger = apply_correction_batch(spec, batch, active_phase="form")
         self.assertAlmostEqual(challenger["componentTree"][0]["transform"]["scale"][0], 1.1)
 
 

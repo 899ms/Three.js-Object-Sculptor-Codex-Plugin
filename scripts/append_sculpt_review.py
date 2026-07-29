@@ -931,7 +931,10 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--impact-assessment-json",
-        help="Required pre-edit impact assessment for a legacy manual correction plan.",
+        help=(
+            "Required pre-edit impact assessment for a legacy manual correction plan, "
+            "including activePhase and structured later-phase downstreamImpact entries."
+        ),
     )
 
     parser.add_argument(
@@ -1435,6 +1438,7 @@ def main(argv: list[str]) -> int:
                 "impactAssessment": impact_assessment,
             },
             review_target_catalog(spec),
+            expected_active_phase=args.pass_id,
         )
         if impact_failures:
             raise ValueError("; ".join(impact_failures))

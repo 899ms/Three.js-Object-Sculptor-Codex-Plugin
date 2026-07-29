@@ -75,6 +75,14 @@ REVIEW_ACTIONS = {
     "stop",
 }
 BLOCKING_SEVERITIES = {"critical", "major"}
+DOWNSTREAM_IMPACT_PHASE_ORDER = (
+    "blockout",
+    "form",
+    "lookdev",
+    "interaction",
+    "finalization",
+)
+ACTIVE_IMPACT_PHASES = frozenset(DOWNSTREAM_IMPACT_PHASE_ORDER[:-1])
 ISSUE_FAILURE_CLASSES = {
     "topology",
     "geometry",
@@ -794,7 +802,13 @@ def review_contract_failures(
             isinstance(item, str) and item for item in root_causes
         ):
             failures.append("strategy-reset requires rootCauseKeys")
-    failures.extend(impact_assessment_failures(verdict, target_catalog))
+    failures.extend(
+        impact_assessment_failures(
+            verdict,
+            target_catalog,
+            expected_active_phase=blind_scout_phase,
+        )
+    )
     if action == "request-input":
         required_evidence = verdict.get("requiredEvidence")
         if not isinstance(required_evidence, list) or not required_evidence:
@@ -876,6 +890,8 @@ def review_contract_failures(
 def impact_assessment_failures(
     verdict: Mapping[str, Any],
     target_catalog: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    expected_active_phase: str | None = None,
 ) -> list[str]:
     """Reject unbounded edits before they can mutate a challenger."""
 
@@ -890,6 +906,27 @@ def impact_assessment_failures(
         failures.append("impactAssessment.verdict must be safe-to-apply")
     if assessment.get("risk") not in {"low", "medium", "high"}:
         failures.append("impactAssessment.risk must be low, medium, or high")
+    active_phase = assessment.get("activePhase")
+    if active_phase not in ACTIVE_IMPACT_PHASES:
+        failures.append(
+            "impactAssessment.activePhase must be one of: "
+            + ", ".join(sorted(ACTIVE_IMPACT_PHASES))
+        )
+    canonical_expected_phase = (
+        blind_scout_phase_id(expected_active_phase)
+        if isinstance(expected_active_phase, str) and expected_active_phase.strip()
+        else None
+    )
+    if canonical_expected_phase is not None:
+        if canonical_expected_phase not in ACTIVE_IMPACT_PHASES:
+            failures.append(
+                f"active correction phase {canonical_expected_phase!r} is unsupported"
+            )
+        elif active_phase != canonical_expected_phase:
+            failures.append(
+                "impactAssessment.activePhase must match the active correction phase "
+                f"{canonical_expected_phase!r}"
+            )
     for field in ("expectedEffect", "rollbackCheckpoint"):
         if not isinstance(assessment.get(field), str) or len(
             str(assessment.get(field) or "").strip()
@@ -910,6 +947,37 @@ def impact_assessment_failures(
                 f"impactAssessment.{field} must be "
                 + ("an array of strings" if allow_empty else "a non-empty array of strings")
             )
+    downstream_impact = assessment.get("downstreamImpact")
+    if not isinstance(downstream_impact, list) or not downstream_impact:
+        failures.append("impactAssessment.downstreamImpact must be a non-empty array")
+    else:
+        for index, item in enumerate(downstream_impact):
+            label = f"impactAssessment.downstreamImpact[{index}]"
+            if not isinstance(item, Mapping):
+                failures.append(f"{label} must be an object")
+                continue
+            downstream_phase = item.get("phase")
+            if downstream_phase not in DOWNSTREAM_IMPACT_PHASE_ORDER:
+                failures.append(
+                    f"{label}.phase must be one of: "
+                    + ", ".join(DOWNSTREAM_IMPACT_PHASE_ORDER)
+                )
+            elif active_phase in ACTIVE_IMPACT_PHASES and (
+                DOWNSTREAM_IMPACT_PHASE_ORDER.index(downstream_phase)
+                <= DOWNSTREAM_IMPACT_PHASE_ORDER.index(active_phase)
+            ):
+                failures.append(
+                    f"{label}.phase must be later than impactAssessment.activePhase "
+                    f"{active_phase!r}"
+                )
+            for field in (
+                "prediction",
+                "currentMitigation",
+                "futureVerification",
+            ):
+                value = item.get(field)
+                if not isinstance(value, str) or len(value.strip()) < 8:
+                    failures.append(f"{label}.{field} must be concrete")
     target_ids = {
         str(item) for item in assessment.get("targetIds", [])
         if isinstance(item, str) and item
@@ -3066,7 +3134,11 @@ def review_module(
     if perceptual.get("enforcementMode") == "strict" and correction_batch:
         from sculpt_corrections import correction_failures
 
-        typed_failures = correction_failures(resolved_spec, correction_batch)
+        typed_failures = correction_failures(
+            resolved_spec,
+            correction_batch,
+            active_phase=preview_phase,
+        )
         if typed_failures:
             raise ValueError(
                 "invalid typed perceptual correction batch: "

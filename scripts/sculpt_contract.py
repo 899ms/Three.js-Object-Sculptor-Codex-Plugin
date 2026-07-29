@@ -4056,8 +4056,9 @@ def sync_pipeline(spec: dict[str, Any]) -> dict[str, Any]:
             "rule": (
                 "The active phase must review its own and every earlier phase's visible "
                 "quality, and may improve earlier work when evidence exposes a defect "
-                "or clear opportunity. Assess impact first, edit only a challenger, "
-                "and promote only when the cumulative result is better or unchanged."
+                "or clear opportunity. Assess impact first, including predicted effects "
+                "and mitigations for affected later phases, edit only a challenger, and "
+                "promote only when the cumulative result is better or unchanged."
             ),
         }
         execution["visualScout"] = blind_scout_execution_contract()

@@ -87,6 +87,17 @@ from sculpt_view_hypotheses import (  # noqa: E402
 from validate_sculpt_spec import main as validate_main  # noqa: E402
 
 
+def downstream_impact(phase: str = "finalization") -> list[dict[str, str]]:
+    return [
+        {
+            "phase": phase,
+            "prediction": "The correction may affect the later integrated artifact.",
+            "currentMitigation": "Keep the edit inside the declared targets and paths.",
+            "futureVerification": "Run the later phase build and regression checks.",
+        }
+    ]
+
+
 def fill_global_contract(manifest: dict) -> None:
     spec = manifest["globalSpec"]
     visual_module_ids = ("core", "hero", "identity", "placeholder", "addon")
@@ -603,6 +614,15 @@ class ModularWorkflowTests(unittest.TestCase):
         reviewed_module_id = (
             provenance.get("moduleId") if isinstance(provenance, dict) else "hero"
         )
+        reviewed_module_path = (
+            self.root
+            / f"{self.manifest_path.stem}.modules"
+            / f"{reviewed_module_id or 'hero'}.json"
+        )
+        reviewed_module = json.loads(
+            reviewed_module_path.read_text(encoding="utf-8")
+        )
+        active_phase = module_preview_pass(reviewed_module)
         sanity_component_id = f"{reviewed_module_id or 'hero'}-body"
         payload = {
             "artifactType": "threejs-sculpt-module-review",
@@ -669,6 +689,7 @@ class ModularWorkflowTests(unittest.TestCase):
         }
         if action in REFINEMENT_ACTIONS:
             payload["impactAssessment"] = {
+                "activePhase": active_phase,
                 "targetIds": list(dict.fromkeys(
                     correction["target"] for correction in normalized_corrections
                 )),
@@ -678,6 +699,7 @@ class ModularWorkflowTests(unittest.TestCase):
                 "protectedComponentIds": [],
                 "expectedEffect": "Apply only the bounded reviewer corrections.",
                 "possibleSideEffects": ["The edited local region may change visually."],
+                "downstreamImpact": downstream_impact(),
                 "structuralInvariants": [
                     "Untargeted component geometry, hierarchy, and attachments remain unchanged."
                 ],
@@ -688,11 +710,13 @@ class ModularWorkflowTests(unittest.TestCase):
             }
         elif action == "strategy-reset":
             payload["impactAssessment"] = {
+                "activePhase": active_phase,
                 "targetIds": ["root"],
                 "allowedPaths": ["representation.strategy"],
                 "protectedComponentIds": [],
                 "expectedEffect": "Replace only the failed representation strategy.",
                 "possibleSideEffects": ["The target silhouette may change materially."],
+                "downstreamImpact": downstream_impact(),
                 "structuralInvariants": [
                     "Accepted identity, component inventory, and attachment semantics remain unchanged."
                 ],
@@ -878,6 +902,7 @@ class ModularWorkflowTests(unittest.TestCase):
         )
 
         verdict["impactAssessment"] = {
+            "activePhase": "form",
             "targetIds": ["root"],
             "allowedPaths": ["implementation.body.scale"],
             "protectedComponentIds": ["tail"],
@@ -895,7 +920,48 @@ class ModularWorkflowTests(unittest.TestCase):
             "component": {"root": {}, "tail": {}},
             "material": {},
         }
+        missing_downstream = impact_assessment_failures(verdict, catalog)
+        self.assertTrue(
+            any("downstreamImpact must be a non-empty array" in item for item in missing_downstream),
+            missing_downstream,
+        )
+        empty_downstream = copy.deepcopy(verdict)
+        empty_downstream["impactAssessment"]["downstreamImpact"] = []
+        failures = impact_assessment_failures(empty_downstream, catalog)
+        self.assertTrue(
+            any("downstreamImpact must be a non-empty array" in item for item in failures),
+            failures,
+        )
+
+        verdict["impactAssessment"]["downstreamImpact"] = [
+            {
+                "phase": "interaction",
+                "prediction": "Changing the body scale may reduce motion clearance.",
+                "currentMitigation": "Keep the edit inside the declared body scale path.",
+                "futureVerification": "Test the representative and extreme motion states.",
+            }
+        ]
         self.assertEqual(impact_assessment_failures(verdict, catalog), [])
+        self.assertEqual(
+            impact_assessment_failures(
+                verdict,
+                catalog,
+                expected_active_phase="form-refinement",
+            ),
+            [],
+        )
+        phase_mismatch = impact_assessment_failures(
+            verdict,
+            catalog,
+            expected_active_phase="blockout",
+        )
+        self.assertTrue(
+            any(
+                "must match the active correction phase" in item
+                for item in phase_mismatch
+            ),
+            phase_mismatch,
+        )
 
         unsafe = copy.deepcopy(verdict)
         unsafe["impactAssessment"]["allowedPaths"].append(
@@ -905,6 +971,30 @@ class ModularWorkflowTests(unittest.TestCase):
         failures = impact_assessment_failures(unsafe, catalog)
         self.assertTrue(any("exactly match" in item for item in failures), failures)
         self.assertTrue(any("protect and modify" in item for item in failures), failures)
+
+        malformed_downstream = copy.deepcopy(verdict)
+        malformed_downstream["impactAssessment"]["downstreamImpact"][0]["phase"] = "unknown"
+        failures = impact_assessment_failures(malformed_downstream, catalog)
+        self.assertTrue(
+            any("downstreamImpact[0].phase" in item for item in failures),
+            failures,
+        )
+        non_downstream = copy.deepcopy(verdict)
+        non_downstream["impactAssessment"]["downstreamImpact"][0]["phase"] = "form"
+        failures = impact_assessment_failures(non_downstream, catalog)
+        self.assertTrue(
+            any("must be later than" in item for item in failures),
+            failures,
+        )
+        for field in ("prediction", "currentMitigation", "futureVerification"):
+            with self.subTest(downstream_field=field):
+                incomplete_downstream = copy.deepcopy(verdict)
+                incomplete_downstream["impactAssessment"]["downstreamImpact"][0].pop(field)
+                failures = impact_assessment_failures(incomplete_downstream, catalog)
+                self.assertTrue(
+                    any(f"downstreamImpact[0].{field}" in item for item in failures),
+                    failures,
+                )
 
         strategy_reset = {
             "action": "strategy-reset",
@@ -1641,11 +1731,13 @@ class ModularWorkflowTests(unittest.TestCase):
             }
             if action in REFINEMENT_ACTIONS:
                 verdict["impactAssessment"] = {
+                    "activePhase": "blockout",
                     "targetIds": ["root"],
                     "allowedPaths": ["implementation.createSculptModel.profile"],
                     "protectedComponentIds": [],
                     "expectedEffect": "Correct only the assembled contour profile.",
                     "possibleSideEffects": ["The primary silhouette may change."],
+                    "downstreamImpact": downstream_impact(),
                     "structuralInvariants": [
                         "Component hierarchy and attachment relationships remain unchanged."
                     ],
@@ -1656,11 +1748,13 @@ class ModularWorkflowTests(unittest.TestCase):
                 }
             elif action == "strategy-reset":
                 verdict["impactAssessment"] = {
+                    "activePhase": "blockout",
                     "targetIds": ["root"],
                     "allowedPaths": ["representation.strategy"],
                     "protectedComponentIds": [],
                     "expectedEffect": "Replace only the failed contour representation.",
                     "possibleSideEffects": ["The primary silhouette may change materially."],
+                    "downstreamImpact": downstream_impact(),
                     "structuralInvariants": [
                         "Component inventory and attachment semantics remain unchanged."
                     ],
@@ -2026,11 +2120,13 @@ class ModularWorkflowTests(unittest.TestCase):
             "resolvedIssueIds": [],
             "resolvedRootCauseKeys": [],
             "impactAssessment": {
+                "activePhase": "blockout",
                 "targetIds": ["root"],
                 "allowedPaths": ["implementation.createSculptModel.profile"],
                 "protectedComponentIds": [],
                 "expectedEffect": "Replace only the assembled contour profile.",
                 "possibleSideEffects": ["The primary silhouette may change."],
+                "downstreamImpact": downstream_impact(),
                 "structuralInvariants": [
                     "Component hierarchy and attachment relationships remain unchanged."
                 ],

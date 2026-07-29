@@ -58,6 +58,17 @@ from sculpt_view_hypotheses import register_views  # noqa: E402
 from validate_sculpt_spec import load_spec, validate_spec  # noqa: E402
 
 
+def downstream_impact(phase: str = "finalization") -> list[dict[str, str]]:
+    return [
+        {
+            "phase": phase,
+            "prediction": "The correction may affect the later integrated artifact.",
+            "currentMitigation": "Keep the edit inside the declared targets and paths.",
+            "futureVerification": "Run the later phase build and regression checks.",
+        }
+    ]
+
+
 def fill_pre_spec(spec: dict) -> None:
     object_class = spec["preSpecAssessment"]["objectClass"]
     object_class.update(
@@ -1253,11 +1264,13 @@ class StateContractTests(unittest.TestCase):
                         "--impact-assessment-json",
                         json.dumps(
                             {
+                                "activePhase": "blockout",
                                 "targetIds": ["root"],
                                 "allowedPaths": ["implementation.transform.scale"],
                                 "protectedComponentIds": [],
                                 "expectedEffect": "Increase only the root framing scale.",
                                 "possibleSideEffects": ["Frame-edge clearance may tighten."],
+                                "downstreamImpact": downstream_impact("form"),
                                 "structuralInvariants": [
                                     "Component hierarchy and local proportions remain unchanged."
                                 ],
@@ -1293,11 +1306,13 @@ class StateContractTests(unittest.TestCase):
                 "--impact-assessment-json",
                 json.dumps(
                     {
+                        "activePhase": "blockout",
                         "targetIds": ["root"],
                         "allowedPaths": ["implementation.transform.scale"],
                         "protectedComponentIds": [],
                         "expectedEffect": "Increase only the root framing scale.",
                         "possibleSideEffects": ["Frame-edge clearance may tighten."],
+                        "downstreamImpact": downstream_impact("form"),
                         "structuralInvariants": [
                             "Component hierarchy and local proportions remain unchanged."
                         ],
