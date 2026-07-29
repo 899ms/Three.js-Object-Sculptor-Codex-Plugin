@@ -254,7 +254,7 @@ def make_phase_execution_contract() -> dict[str, Any]:
             "maximumNonVisualOperationsBeforeRender": 2,
             "visualProgressRequired": True,
             "comparisonRequired": True,
-            "comparisonAuthority": "prepared-target-with-original-identity-guardrail",
+            "comparisonAuthority": "source-image-only",
             "maximumConsecutiveNonImprovements": 3,
             "rollbackTarget": "highest-scoring-compatible-champion",
             "strategyChangeAfterExhaustion": True,
@@ -541,7 +541,17 @@ def make_spec(
     declared_simplifications: list[str] | None = None,
     approval_mode: str = "phase-by-phase",
     perceptual_enforcement: str = "advisory",
+    planning_sheet_layout: str = "standard",
 ) -> dict[str, Any]:
+    if planning_sheet_layout not in {"standard", "exploded"}:
+        raise ValueError("planning_sheet_layout must be standard or exploded")
+    if planning_sheet_layout == "exploded" and complexity not in {"complex", "ultra"}:
+        raise ValueError(
+            "exploded planning sheets are only supported for complex or ultra assemblies"
+        )
+    hypothesis_first_view = (
+        "exploded" if planning_sheet_layout == "exploded" else "three-quarter"
+    )
     pre_spec = make_pre_spec_assessment(target_name, complexity, intended_use)
     quality_contract = make_quality_contract(complexity, quality_profile)
     detail_decomposition_contract = make_detail_decomposition_contract()
@@ -573,6 +583,7 @@ def make_spec(
         intended_use,
         quality_profile,
         interaction_required=interactive,
+        hypothesis_first_view=hypothesis_first_view,
     )
     pass_ids = [item["id"] for item in passes]
     visual_pass_ids = [item["id"] for item in passes if item["evidenceType"] == "visual"]
@@ -607,7 +618,6 @@ def make_spec(
             )
         reference_preparation = {
             "version": 2,
-            "originalImage": "",
             "subjectBackgroundSeparation": "not-applicable",
             "preparationTrigger": "not-applicable",
             "requiredSkill": "imagegen",
@@ -617,7 +627,6 @@ def make_spec(
             "outputBackground": "not-applicable",
             "whiteBackgroundValidated": False,
             "subjectContrastValidated": False,
-            "identityGuardrailValidated": False,
             "modificationPolicy": {
                 "mode": "none",
                 "allowedChanges": [],
@@ -626,7 +635,6 @@ def make_spec(
             },
             "comparisonPolicy": {
                 "reconstructionTarget": "sourceImage",
-                "identityGuardrail": "originalImage",
             },
             "usageRule": "No reference image is available.",
         }
@@ -665,12 +673,13 @@ def make_spec(
             "background-mixing",
             "excessive-complexity",
             "low-source-quality",
+            "real-object-photo",
             "combined",
         }
         if imagegen_trigger and imagegen_trigger not in valid_triggers:
             raise ValueError(
                 "imagegen_trigger must be background-mixing, excessive-complexity, "
-                "low-source-quality, or combined"
+                "low-source-quality, real-object-photo, or combined"
             )
 
         imagegen_requested = background_removal_mode is not None
@@ -687,24 +696,16 @@ def make_spec(
             raise ValueError("imagegen_trigger requires an ImageGen preparation mode")
 
         if imagegen_requested:
-            if not original_image:
-                raise ValueError(
-                    "original_image is required when ImageGen prepares the reconstruction target"
-                )
-            if original_image == image:
-                raise ValueError(
-                    "image must be the generated white-background output, not original_image"
-                )
             if imagegen_trigger is None:
                 raise ValueError(
                     "imagegen_trigger is required when a clear-background reference is regenerated"
                 )
             if (
                 background_removal_mode == "white-background-cleanup"
-                and imagegen_trigger == "excessive-complexity"
+                and imagegen_trigger in {"excessive-complexity", "real-object-photo"}
             ):
                 raise ValueError(
-                    "excessive-complexity requires white-background-simplification"
+                    f"{imagegen_trigger} requires white-background-simplification"
                 )
             if (
                 background_removal_mode == "white-background-simplification"
@@ -717,10 +718,6 @@ def make_spec(
             mode = background_removal_mode
             prepared = True
         elif reference_background in {"clear", "absent"}:
-            if original_image and original_image != image:
-                raise ValueError(
-                    "original_image must equal image when no background removal is required"
-                )
             method = "not-required"
             mode = "not-applicable"
             prepared = False
@@ -735,7 +732,6 @@ def make_spec(
         simplification = mode == "white-background-simplification"
         reference_preparation = {
             "version": 2,
-            "originalImage": original_image or image,
             "subjectBackgroundSeparation": reference_background,
             "preparationTrigger": imagegen_trigger or (
                 "unassessed" if reference_background == "unassessed" else "not-required"
@@ -749,7 +745,6 @@ def make_spec(
             ),
             "whiteBackgroundValidated": prepared,
             "subjectContrastValidated": prepared,
-            "identityGuardrailValidated": prepared,
             "modificationPolicy": {
                 "mode": "bounded-simplification" if simplification else (
                     "cleanup-only" if prepared else "none"
@@ -760,6 +755,7 @@ def make_spec(
                         "reduce compression noise and non-signature surface noise",
                         "merge or omit tiny repeated details that do not affect silhouette or material zones",
                         "regularize ambiguous minor geometry for practical procedural construction",
+                        "convert difficult real-world surface variation into clean buildable 3D masses",
                     ]
                     if simplification
                     else (
@@ -786,14 +782,14 @@ def make_spec(
             },
             "comparisonPolicy": {
                 "reconstructionTarget": "sourceImage",
-                "identityGuardrail": "originalImage",
             },
             "usageRule": (
                 "Use the original directly when its subject boundary is clear, including a "
                 "white or strongly contrasting background, and reconstruction is manageable. "
                 "Use ImageGen with a solid white output when the subject mixes with the background, "
-                "the source is too poor, or the object is impractically complex. sourceImage is the "
-                "active reconstruction target; originalImage remains the identity and macro-form guardrail."
+                "the source is too poor, the object is impractically complex, or a real-object "
+                "photo needs a buildable 3D-style simplification. sourceImage is the sole "
+                "reconstruction and acceptance target."
             ),
         }
 
@@ -809,6 +805,7 @@ def make_spec(
             complexity,
             quality_profile,
             image,
+            planning_sheet_layout,
         ),
         "suitability": "conditional",
         "scoreScale": {
@@ -1126,7 +1123,7 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--original-image",
-        help="Original image retained as the identity guardrail when --image is ImageGen-prepared.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--imagegen-preparation-mode",
@@ -1140,8 +1137,17 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--imagegen-trigger",
-        choices=("background-mixing", "excessive-complexity", "low-source-quality", "combined"),
-        help="Why ImageGen preparation is required; complexity/quality may trigger it even with a clear background.",
+        choices=(
+            "background-mixing",
+            "excessive-complexity",
+            "low-source-quality",
+            "real-object-photo",
+            "combined",
+        ),
+        help=(
+            "Why ImageGen preparation is required; real-object-photo selects a "
+            "buildable 3D-style simplification."
+        ),
     )
     parser.add_argument(
         "--declared-simplification",
@@ -1153,6 +1159,15 @@ def main(argv: list[str]) -> int:
         "--complexity",
         choices=("simple", "moderate", "complex", "ultra"),
         default="moderate",
+    )
+    parser.add_argument(
+        "--planning-sheet-layout",
+        choices=("standard", "exploded"),
+        default="standard",
+        help=(
+            "Use exploded only for complex/ultra assemblies whose internal or separable "
+            "parts are easier to reconstruct when shown apart."
+        ),
     )
     parser.add_argument(
         "--intended-use",
@@ -1212,6 +1227,7 @@ def main(argv: list[str]) -> int:
             args.declared_simplification,
             args.approval_mode,
             args.perceptual_enforcement,
+            args.planning_sheet_layout,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         parser.error(str(exc))

@@ -354,7 +354,7 @@ def blind_scout_execution_contract() -> dict[str, Any]:
         "independence": "fresh-context-distinct-from-builder-and-primary-reviewer",
         "execution": "parallel-with-primary-reviewer",
         "inputAllowlist": [
-            "originalImage",
+            "sourceImage",
             "currentRender",
             "previousRender",
             "sideBySideComparison",
@@ -1356,11 +1356,17 @@ def complexity_minimums(complexity: str) -> dict[str, int]:
     return copy.deepcopy(presets.get(complexity, presets["moderate"]))
 
 
-def adaptive_hypothesis_views(complexity: str, quality_profile: str) -> list[str]:
+def adaptive_hypothesis_views(
+    complexity: str,
+    quality_profile: str,
+    first_view: str = "three-quarter",
+) -> list[str]:
     """Return the smallest cross-view set that can expose front-only geometry."""
+    if first_view not in {"three-quarter", "exploded"}:
+        raise ValueError("first hypothesis view must be three-quarter or exploded")
     views = ["side"]
     if quality_profile == "reference-fidelity" or complexity in {"moderate", "complex", "ultra"}:
-        views.insert(0, "three-quarter")
+        views.insert(0, first_view)
     if complexity in {"complex", "ultra"}:
         views.append("back")
     return views
@@ -1405,6 +1411,7 @@ def build_pass_plan(
     quality_profile: str = "balanced",
     *,
     interaction_required: bool | None = None,
+    hypothesis_first_view: str = "three-quarter",
 ) -> list[dict[str, Any]]:
     """Return the quality-first pipeline.
 
@@ -1413,7 +1420,11 @@ def build_pass_plan(
     is a separate optional audit and never a modeling pass.
     """
     reference_fidelity = quality_profile == "reference-fidelity"
-    diagnostic_views = adaptive_hypothesis_views(complexity, quality_profile)
+    diagnostic_views = adaptive_hypothesis_views(
+        complexity,
+        quality_profile,
+        hypothesis_first_view,
+    )
     strict = 0.84 if reference_fidelity else 0.72
     blockout_layers = {
         "silhouette": 0.85 if reference_fidelity else 0.72,
@@ -1576,6 +1587,15 @@ def interaction_required(spec: Mapping[str, Any]) -> bool:
     return isinstance(readiness, Mapping) and readiness.get("enabled") is True
 
 
+def _hypothesis_first_view(spec: Mapping[str, Any]) -> str:
+    policy = spec.get("viewHypothesisPolicy")
+    if isinstance(policy, Mapping) and policy.get("layoutId") == (
+        "assembly-exploded-2x2-v1"
+    ):
+        return "exploded"
+    return "three-quarter"
+
+
 def pass_order(spec: dict[str, Any]) -> list[str]:
     ids = [
         str(item["id"])
@@ -1590,6 +1610,7 @@ def pass_order(spec: dict[str, Any]) -> list[str]:
                 None,
                 str(spec.get("qualityProfile") or "balanced"),
                 interaction_required=interaction_required(spec),
+                hypothesis_first_view=_hypothesis_first_view(spec),
             )
         ]
         retired = {"structure", "structural-pass", "optimization", "optimization-pass"}
@@ -1625,6 +1646,7 @@ def effective_pass_config(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
                 None,
                 str(spec.get("qualityProfile") or "balanced"),
                 interaction_required=interaction_required(spec),
+                hypothesis_first_view=_hypothesis_first_view(spec),
             )
             if item.get("id") == pass_id
         ),
@@ -3203,7 +3225,7 @@ def phase_work_packet(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
                 "The active phase must review and may improve any earlier phase "
                 "through an exact impact-assessed correction batch applied to a "
                 "challenger. A passed phase is a baseline, not frozen. Compare "
-                "original/current/previous renders and veto only visible whole-result "
+                "source/current/previous renders and veto only visible whole-result "
                 "regression; future-phase work remains forbidden."
             ),
             "stableCoreFields": copy.deepcopy(execution.get("stableCoreFields", [])),
@@ -3231,7 +3253,7 @@ def phase_work_packet(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
             "visibleProgressRequired": True,
             "comparisonAuthority": execution.get("cycle", {}).get(
                 "comparisonAuthority",
-                "prepared-target-with-original-identity-guardrail",
+                "source-image-only",
             ),
             "multiViewPresentation": "single-2x2-sheet",
             "administrativeWorkCountsAsProgress": False,
@@ -3333,7 +3355,7 @@ def prior_pass_regression_failures(
         for metric, before in before_quality.items():
             if simplified_visual_gate_enabled(spec, str(entry.get("passId") or "")):
                 # The current workflow delegates visual regression to the
-                # original/current/previous image comparison and blind scout.
+                # source/current/previous image comparison and blind scout.
                 continue
             metric_tolerance = tolerance
             after = after_quality.get(metric)
@@ -4095,6 +4117,7 @@ def sync_pipeline(spec: dict[str, Any]) -> dict[str, Any]:
             None,
             str(spec.get("qualityProfile") or "balanced"),
             interaction_required=interaction_required(spec),
+            hypothesis_first_view=_hypothesis_first_view(spec),
         )
         spec["buildPasses"] = [
             {**copy.deepcopy(configured.get(str(item["id"]), {})), **item}

@@ -24,20 +24,44 @@ VIEW_HYPOTHESIS_ARTIFACT_TYPE = "threejs-sculpt-view-hypotheses"
 VIEW_HYPOTHESIS_VERSION = 2
 SUPPORTED_VIEW_HYPOTHESIS_VERSIONS = {1, VIEW_HYPOTHESIS_VERSION}
 DEFAULT_PROMPT_VERSION = "identity-turnaround-2x2-v1"
-SPATIAL_VIEW_IDS = {"three-quarter", "side", "back"}
-TURNAROUND_VIEW_IDS = {*SPATIAL_VIEW_IDS, "front"}
-TURNAROUND_LAYOUT_ID = "identity-turnaround-2x2-v1"
+STANDARD_LAYOUT_ID = "identity-turnaround-2x2-v1"
+EXPLODED_LAYOUT_ID = "assembly-exploded-2x2-v1"
+TURNAROUND_LAYOUT_ID = STANDARD_LAYOUT_ID
 TURNAROUND_LAYOUT = (
     ("three-quarter", "side"),
     ("back", "front"),
 )
+EXPLODED_LAYOUT = (
+    ("exploded", "side"),
+    ("back", "front"),
+)
+PLANNING_SHEET_LAYOUTS = {
+    STANDARD_LAYOUT_ID: TURNAROUND_LAYOUT,
+    EXPLODED_LAYOUT_ID: EXPLODED_LAYOUT,
+}
+SPATIAL_VIEW_IDS = {"three-quarter", "exploded", "side", "back"}
+TURNAROUND_VIEW_IDS = {*SPATIAL_VIEW_IDS, "front"}
+
+
+def _planning_layout(layout_id: str) -> tuple[tuple[str, str], tuple[str, str]]:
+    try:
+        return PLANNING_SHEET_LAYOUTS[layout_id]
+    except KeyError as exc:
+        raise ValueError(f"unsupported 2x2 planning layout: {layout_id}") from exc
 
 
 def make_view_hypothesis_policy(
     complexity: str,
     quality_profile: str,
     source_image: str | None,
+    layout_mode: str = "standard",
 ) -> dict[str, Any]:
+    if layout_mode not in {"standard", "exploded"}:
+        raise ValueError("view hypothesis layout_mode must be standard or exploded")
+    layout_id = (
+        EXPLODED_LAYOUT_ID if layout_mode == "exploded" else STANDARD_LAYOUT_ID
+    )
+    first_view = "exploded" if layout_mode == "exploded" else "three-quarter"
     has_source = bool(source_image)
     return {
         # Resolve hidden-view evidence before the first Blockout build so a
@@ -64,15 +88,31 @@ def make_view_hypothesis_policy(
         ],
         "generator": "built-in-imagegen",
         "promptVersion": DEFAULT_PROMPT_VERSION,
-        "layoutId": TURNAROUND_LAYOUT_ID,
-        "requiredViews": adaptive_hypothesis_views(complexity, quality_profile),
+        "layoutId": layout_id,
+        "layoutMode": layout_mode,
+        "requiredViews": adaptive_hypothesis_views(
+            complexity,
+            quality_profile,
+            first_view,
+        ),
         "allowedUse": "planning-veto",
         "acceptanceAuthority": False,
         "generationContract": (
-            "Before the first Blockout build, invoke the imagegen skill once. Preserve the "
-            "exact object identity, proportions, parts, materials, and scale; "
-            "generate one edge-to-edge 2x2 neutral-background turnaround ordered "
-            "three-quarter|side over back|front; do not add labels, gutters, redesigns, or parts."
+            (
+                "Before the first Blockout build, invoke the imagegen skill once. "
+                "Generate one edge-to-edge 2x2 neutral-background assembly planning sheet "
+                "ordered exploded|side over back|front. Only the top-left tile is exploded; "
+                "the other three keep the object assembled. Separate only source-supported "
+                "major components while preserving orientation and assembly order; do not "
+                "invent parts, labels, gutters, or redesigns."
+            )
+            if layout_mode == "exploded"
+            else (
+                "Before the first Blockout build, invoke the imagegen skill once. Preserve the "
+                "exact object identity, proportions, parts, materials, and scale; "
+                "generate one edge-to-edge 2x2 neutral-background turnaround ordered "
+                "three-quarter|side over back|front; do not add labels, gutters, redesigns, or parts."
+            )
         ),
         "manifestPath": "",
         "manifestSha256": "",
@@ -121,18 +161,23 @@ def _parse_view(value: str, root: Path) -> tuple[str, Path]:
     view_id = view_id.strip()
     if not separator or view_id not in SPATIAL_VIEW_IDS:
         raise ValueError(
-            "--view must use three-quarter=PATH, side=PATH, or back=PATH"
+            "--view must use exploded=PATH, three-quarter=PATH, side=PATH, or back=PATH"
         )
     return view_id, _resolve_local_path(root, path_value.strip(), f"view {view_id!r}")
 
 
-def _turnaround_rectangles(width: int, height: int) -> dict[str, dict[str, int]]:
+def _turnaround_rectangles(
+    width: int,
+    height: int,
+    layout_id: str = STANDARD_LAYOUT_ID,
+) -> dict[str, dict[str, int]]:
     if width < 2 or height < 2 or width % 2 or height % 2:
         raise ValueError(
             "2x2 turnaround must have even width and height so every tile has exact provenance"
         )
     tile_width = width // 2
     tile_height = height // 2
+    layout = _planning_layout(layout_id)
     return {
         view_id: {
             "x": column * tile_width,
@@ -140,13 +185,18 @@ def _turnaround_rectangles(width: int, height: int) -> dict[str, dict[str, int]]
             "width": tile_width,
             "height": tile_height,
         }
-        for row, view_row in enumerate(TURNAROUND_LAYOUT)
+        for row, view_row in enumerate(layout)
         for column, view_id in enumerate(view_row)
     }
 
 
-def _turnaround_layout_manifest(width: int, height: int) -> list[dict[str, Any]]:
-    rectangles = _turnaround_rectangles(width, height)
+def _turnaround_layout_manifest(
+    width: int,
+    height: int,
+    layout_id: str = STANDARD_LAYOUT_ID,
+) -> list[dict[str, Any]]:
+    layout = _planning_layout(layout_id)
+    rectangles = _turnaround_rectangles(width, height, layout_id)
     return [
         {
             "viewId": view_id,
@@ -154,7 +204,7 @@ def _turnaround_layout_manifest(width: int, height: int) -> list[dict[str, Any]]
             "column": column,
             "tileRect": rectangles[view_id],
         }
-        for row, view_row in enumerate(TURNAROUND_LAYOUT)
+        for row, view_row in enumerate(layout)
         for column, view_id in enumerate(view_row)
     ]
 
@@ -162,9 +212,10 @@ def _turnaround_layout_manifest(width: int, height: int) -> list[dict[str, Any]]
 def _write_turnaround_tiles(
     sheet_path: Path,
     output_manifest: Path,
+    layout_id: str,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     width, height, pixels = load_image_rgba(sheet_path)
-    rectangles = _turnaround_rectangles(width, height)
+    rectangles = _turnaround_rectangles(width, height, layout_id)
     sheet_hash = file_sha256(sheet_path)
     views: dict[str, dict[str, Any]] = {}
     for view_id, rectangle in rectangles.items():
@@ -203,8 +254,8 @@ def _write_turnaround_tiles(
         "turnaroundImage": str(sheet_path),
         "turnaroundSha256": sheet_hash,
         "turnaroundDimensions": {"width": width, "height": height},
-        "layoutId": TURNAROUND_LAYOUT_ID,
-        "layout": _turnaround_layout_manifest(width, height),
+        "layoutId": layout_id,
+        "layout": _turnaround_layout_manifest(width, height, layout_id),
     }
     return views, root_provenance
 
@@ -274,6 +325,12 @@ def hypothesis_manifest_failures(
         )
     if manifest.get("promptVersion") != policy.get("promptVersion"):
         failures.append("view hypothesis prompt version is stale")
+    manifest_layout_id = (
+        str(manifest.get("layoutId"))
+        if manifest_version == VIEW_HYPOTHESIS_VERSION
+        and isinstance(manifest.get("layoutId"), str)
+        else None
+    )
     if (
         policy.get("activationMode")
         in {
@@ -304,12 +361,6 @@ def hypothesis_manifest_failures(
         source_hash = file_sha256(source_path)
         if manifest.get("sourceSha256") != source_hash:
             failures.append("view hypotheses are stale for the current source image")
-        manifest_layout_id = (
-            str(manifest.get("layoutId"))
-            if manifest_version == VIEW_HYPOTHESIS_VERSION
-            and isinstance(manifest.get("layoutId"), str)
-            else None
-        )
         if manifest.get("cacheKey") != _cache_key(
             source_hash,
             str(policy.get("promptVersion") or ""),
@@ -322,9 +373,12 @@ def hypothesis_manifest_failures(
     turnaround_width = 0
     turnaround_height = 0
     expected_rectangles: dict[str, dict[str, int]] = {}
+    expected_layout = TURNAROUND_LAYOUT
     if manifest_version == VIEW_HYPOTHESIS_VERSION:
-        if manifest.get("layoutId") != TURNAROUND_LAYOUT_ID:
+        if manifest_layout_id not in PLANNING_SHEET_LAYOUTS:
             failures.append("view hypothesis 2x2 layout id is invalid")
+            manifest_layout_id = STANDARD_LAYOUT_ID
+        expected_layout = _planning_layout(manifest_layout_id)
         if policy.get("layoutId") != manifest.get("layoutId"):
             failures.append("view hypothesis policy layout is stale")
         try:
@@ -346,8 +400,14 @@ def hypothesis_manifest_failures(
                 "height": turnaround_dimensions[1],
             }:
                 failures.append("view hypothesis turnaround dimensions are invalid")
-            expected_rectangles = _turnaround_rectangles(*turnaround_dimensions)
-            if manifest.get("layout") != _turnaround_layout_manifest(*turnaround_dimensions):
+            expected_rectangles = _turnaround_rectangles(
+                *turnaround_dimensions,
+                manifest_layout_id,
+            )
+            if manifest.get("layout") != _turnaround_layout_manifest(
+                *turnaround_dimensions,
+                manifest_layout_id,
+            ):
                 failures.append("view hypothesis turnaround layout is invalid")
         except (OSError, ValueError) as exc:
             failures.append(str(exc))
@@ -362,7 +422,7 @@ def hypothesis_manifest_failures(
             continue
         view_id = view.get("viewId")
         allowed_view_ids = (
-            TURNAROUND_VIEW_IDS
+            {item for row in expected_layout for item in row}
             if manifest_version == VIEW_HYPOTHESIS_VERSION
             else SPATIAL_VIEW_IDS
         )
@@ -441,7 +501,8 @@ def hypothesis_manifest_failures(
         if view.get("origin") != "synthetic-hypothesis" or view.get("allowedUse") != "planning-veto":
             failures.append(f"view hypothesis {view_id!r} must remain synthetic planning-veto evidence")
     if manifest_version == VIEW_HYPOTHESIS_VERSION:
-        missing_turnaround_tiles = TURNAROUND_VIEW_IDS - set(by_id)
+        required_tiles = {item for row in expected_layout for item in row}
+        missing_turnaround_tiles = required_tiles - set(by_id)
         if missing_turnaround_tiles:
             failures.append(
                 "missing registered 2x2 turnaround tiles: "
@@ -550,7 +611,10 @@ def register_views(
         if sheet_path is not None
         else None
     )
-    layout_id = TURNAROUND_LAYOUT_ID if selected_sheet is not None else None
+    selected_layout_id = str(policy.get("layoutId") or STANDARD_LAYOUT_ID)
+    if selected_sheet is not None:
+        _planning_layout(selected_layout_id)
+    layout_id = selected_layout_id if selected_sheet is not None else None
     cache_key = _cache_key(source_hash, selected_prompt, layout_id)
     output = _manifest_path(path, cache_key)
     required = set(_required_views(spec))
@@ -567,7 +631,7 @@ def register_views(
         ):
             raise ValueError("existing view hypothesis cache has incompatible provenance")
         if selected_sheet is not None and (
-            existing.get("layoutId") != TURNAROUND_LAYOUT_ID
+            existing.get("layoutId") != selected_layout_id
             or existing.get("turnaroundSha256") != file_sha256(selected_sheet)
         ):
             raise ValueError(
@@ -625,6 +689,7 @@ def register_views(
             existing_views, root_provenance = _write_turnaround_tiles(
                 selected_sheet,
                 output,
+                selected_layout_id,
             )
         else:
             root_provenance = {
@@ -664,7 +729,11 @@ def register_views(
             "registration is incomplete; provide generated views: " + ", ".join(sorted(missing))
         )
     view_order = (
-        [view_id for view_row in TURNAROUND_LAYOUT for view_id in view_row]
+        [
+            view_id
+            for view_row in _planning_layout(selected_layout_id)
+            for view_id in view_row
+        ]
         if selected_sheet is not None
         else sorted(existing_views)
     )
@@ -716,6 +785,7 @@ def register_views(
         "manifest": str(output),
         "registeredViews": sorted(existing_views),
         "requiredViews": sorted(required),
+        "layoutId": layout_id or "",
         "turnaroundImage": root_provenance.get("turnaroundImage", ""),
         "turnaroundSha256": root_provenance.get("turnaroundSha256", ""),
     }
@@ -767,8 +837,7 @@ def main(argv: list[str]) -> int:
         "--sheet",
         type=Path,
         help=(
-            "One fixed edge-to-edge 2x2 turnaround ordered "
-            "three-quarter|side over back|front"
+            "One edge-to-edge 2x2 sheet matching the spec's standard or exploded layout"
         ),
     )
     register.add_argument("--prompt-version")

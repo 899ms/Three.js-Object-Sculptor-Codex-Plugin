@@ -4,9 +4,9 @@ Use this reference while filling the integrated `preSpecAssessment` created by `
 
 ## Reference preparation gate
 
-Assess two independent conditions before describing geometry: subject/background separation, and whether source detail/quality is practical to reconstruct. Use the original directly when its boundary is readable and its construction is manageable; a white, neutral, transparent, or strongly contrasting background is acceptable. Use the `imagegen` skill when the subject mixes with its background, source defects obscure construction, or complexity would make direct procedural reconstruction impractical. ImageGen must produce a clean solid-white background with strong contrast, not transparency.
+Assess two independent conditions before describing geometry: subject/background separation, and whether source detail/quality is practical to reconstruct. Use the supplied image directly when its boundary is readable and its construction is manageable; a white, neutral, transparent, or strongly contrasting background is acceptable. Use the `imagegen` skill when the subject mixes with its background, source defects obscure construction, complexity would make direct procedural reconstruction impractical, or a real-object photo needs a cleaner buildable 3D-style target. ImageGen must produce a clean solid-white background with strong contrast, not transparency.
 
-The generated reference may simplify only declared non-signature microdetail, surface noise, tiny repeated detail, or ambiguous minor geometry. It must preserve object identity/class, macro silhouette and proportions, major component count/placement/attachments, signature features, dominant material/color zones, pose, and viewpoint. Store the generated result as `sourceImage`; retain the original as `originalImage`. Review fidelity against `sourceImage` and veto identity or macro-form drift against `originalImage`. An `unassessed` preparation, unvalidated white background, undeclared simplification, or missing identity guardrail blocks strict quality.
+The generated reference may simplify declared non-signature microdetail, surface noise, tiny repeated detail, ambiguous minor geometry, and difficult real-world surface variation into clean buildable masses. It must preserve the recognizable class, macro silhouette and proportions, major component layout, signature features, dominant material/color zones, pose, and viewpoint in the generated target. Store the result as `sourceImage`; it becomes the sole reconstruction and acceptance reference. An `unassessed` preparation, unvalidated white background, or undeclared simplification blocks strict quality.
 
 Do not use fixed domain profiles. Assess the object from observed traits, complexity, and target fidelity.
 
@@ -72,7 +72,7 @@ Before generating code, define exactly what makes the model good enough:
 - required repeated systems and their distribution rules
 - required material layers and local overrides
 - screenshot viewpoints required for visual comparison; package two to four views in one 2x2 sheet
-- one ImageGen 2x2 turnaround for hidden-form planning by default; skip only for an explicitly assessed `simple` object with strong evidenced bilateral, radial, or axial symmetry
+- one ImageGen 2x2 planning sheet for hidden-form planning by default; use an exploded first tile for a complex/ultra assembly with separable or internal parts, and skip only for an explicitly assessed `simple` object with strong evidenced bilateral, radial, or axial symmetry
 - failure modes that should block `continue`
 
 Good feature groups are specific to the image:

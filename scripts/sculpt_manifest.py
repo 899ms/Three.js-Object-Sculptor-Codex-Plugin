@@ -195,7 +195,17 @@ def make_module(
     configured_diagnostics = (
         policy.get("requiredViews") if hypotheses_enabled else None
     )
-    canonical_diagnostics = adaptive_hypothesis_views(str(complexity_tier), quality_profile)
+    first_view = (
+        "exploded"
+        if isinstance(policy, dict)
+        and policy.get("layoutId") == "assembly-exploded-2x2-v1"
+        else "three-quarter"
+    )
+    canonical_diagnostics = adaptive_hypothesis_views(
+        str(complexity_tier),
+        quality_profile,
+        first_view,
+    )
     selected_diagnostics = (
         [item for item in configured_diagnostics if isinstance(item, str) and item]
         if isinstance(configured_diagnostics, list)

@@ -444,7 +444,6 @@ def validate_reference_preparation_v2(
     has_source = has_non_empty_detail(source_image)
     required_types = {
         "version": int,
-        "originalImage": str,
         "subjectBackgroundSeparation": str,
         "preparationTrigger": str,
         "requiredSkill": str,
@@ -454,7 +453,6 @@ def validate_reference_preparation_v2(
         "outputBackground": str,
         "whiteBackgroundValidated": bool,
         "subjectContrastValidated": bool,
-        "identityGuardrailValidated": bool,
         "modificationPolicy": dict,
         "comparisonPolicy": dict,
         "usageRule": str,
@@ -479,13 +477,17 @@ def validate_reference_preparation_v2(
         errors.append("referencePreparation.outputImage must equal spec.sourceImage")
 
     comparison = preparation.get("comparisonPolicy")
-    if isinstance(comparison, dict) and comparison != {
-        "reconstructionTarget": "sourceImage",
-        "identityGuardrail": "originalImage",
-    }:
+    accepted_comparison_policies = (
+        {"reconstructionTarget": "sourceImage"},
+        {
+            "reconstructionTarget": "sourceImage",
+            "identityGuardrail": "originalImage",
+        },
+    )
+    if isinstance(comparison, dict) and comparison not in accepted_comparison_policies:
         errors.append(
-            "referencePreparation.comparisonPolicy must use sourceImage as reconstructionTarget "
-            "and originalImage as identityGuardrail"
+            "referencePreparation.comparisonPolicy must use sourceImage as its "
+            "reconstruction target"
         )
 
     if not has_source:
@@ -499,9 +501,6 @@ def validate_reference_preparation_v2(
             )
         return
 
-    original = preparation.get("originalImage")
-    if not isinstance(original, str) or not original.strip():
-        errors.append("referencePreparation.originalImage is required when sourceImage is present")
     if background == "unassessed":
         warnings.append(
             "quality: reference preparation is unassessed; classify both subject/background "
@@ -523,10 +522,6 @@ def validate_reference_preparation_v2(
         if preparation.get("preparationTrigger") != "not-required":
             errors.append(
                 "referencePreparation.preparationTrigger must be 'not-required' when ImageGen is skipped"
-            )
-        if original != source_image:
-            errors.append(
-                "sourceImage must equal referencePreparation.originalImage when ImageGen is skipped"
             )
         if preparation.get("imagegenMode") != "not-applicable":
             errors.append(
@@ -554,12 +549,13 @@ def validate_reference_preparation_v2(
         "background-mixing",
         "excessive-complexity",
         "low-source-quality",
+        "real-object-photo",
         "combined",
     }
     if trigger not in valid_triggers:
         errors.append(
             "referencePreparation.preparationTrigger must identify background-mixing, "
-            "excessive-complexity, low-source-quality, or combined"
+            "excessive-complexity, low-source-quality, real-object-photo, or combined"
         )
     mode = preparation.get("imagegenMode")
     if mode not in {
@@ -569,16 +565,18 @@ def validate_reference_preparation_v2(
         errors.append(
             "referencePreparation.imagegenMode must use a solid-white ImageGen preparation mode"
         )
-    if original == source_image:
+    if trigger in {"excessive-complexity", "real-object-photo"} and mode != (
+        "white-background-simplification"
+    ):
         errors.append(
-            "sourceImage must be the generated white-background output, not originalImage"
+            f"referencePreparation trigger {trigger!r} requires "
+            "white-background-simplification"
         )
     if preparation.get("outputBackground") != "solid-white":
         errors.append("referencePreparation.outputBackground must be 'solid-white'")
     for field in (
         "whiteBackgroundValidated",
         "subjectContrastValidated",
-        "identityGuardrailValidated",
     ):
         if preparation.get(field) is not True:
             errors.append(
@@ -812,17 +810,22 @@ def validate_view_hypothesis_policy(
     if not isinstance(policy.get("promptVersion"), str) or not policy["promptVersion"].strip():
         errors.append("viewHypothesisPolicy.promptVersion is required")
     layout_id = policy.get("layoutId")
-    if layout_id not in {None, "", "identity-turnaround-2x2-v1"}:
+    supported_layout_ids = {
+        "identity-turnaround-2x2-v1",
+        "assembly-exploded-2x2-v1",
+    }
+    if layout_id not in {None, "", *supported_layout_ids}:
         errors.append(
-            "viewHypothesisPolicy.layoutId must be 'identity-turnaround-2x2-v1' when present"
+            "viewHypothesisPolicy.layoutId must select a supported 2x2 planning layout"
         )
+    first_view = "exploded" if layout_id == "assembly-exploded-2x2-v1" else "three-quarter"
     views = policy.get("requiredViews")
     if not isinstance(views, list) or not views or not all(
-        isinstance(item, str) and item in {"three-quarter", "side", "back"}
+        isinstance(item, str) and item in {"three-quarter", "exploded", "side", "back"}
         for item in views
     ):
         errors.append(
-            "viewHypothesisPolicy.requiredViews must contain three-quarter, side, or back"
+            "viewHypothesisPolicy.requiredViews must contain exploded, three-quarter, side, or back"
         )
     elif len(set(views)) != len(views):
         errors.append("viewHypothesisPolicy.requiredViews contains duplicates")
@@ -830,10 +833,15 @@ def validate_view_hypothesis_policy(
         assessment = spec.get("preSpecAssessment")
         complexity = assessment.get("complexity") if isinstance(assessment, dict) else None
         tier = complexity.get("tier") if isinstance(complexity, dict) else "moderate"
+        if first_view == "exploded" and str(tier) not in {"complex", "ultra"}:
+            errors.append(
+                "exploded planning sheets require a complex or ultra assembly"
+            )
         minimum = set(
             adaptive_hypothesis_views(
                 str(tier),
                 str(spec.get("qualityProfile") or "balanced"),
+                first_view,
             )
         )
         missing = minimum - set(views)
@@ -2790,14 +2798,18 @@ def validate_phase_execution_contract(
             {
                 "observed-reference",
                 "prepared-target-with-original-identity-guardrail",
+                "source-image-only",
             }
             if version == 1
-            else {"prepared-target-with-original-identity-guardrail"}
+            else {
+                "prepared-target-with-original-identity-guardrail",
+                "source-image-only",
+            }
         )
         if comparison_authority not in accepted_authorities:
             errors.append(
                 "phaseExecutionContract.cycle.comparisonAuthority must be "
-                "'prepared-target-with-original-identity-guardrail' "
+                "'source-image-only' "
                 "(legacy version 1 may use 'observed-reference')"
             )
         if cycle.get("maximumConsecutiveNonImprovements") != 3:
@@ -2813,12 +2825,16 @@ def validate_phase_execution_contract(
     elif not isinstance(visual_scout, dict):
         errors.append("phaseExecutionContract.visualScout must be an object")
     else:
-        expected_allowlist = [
-            "originalImage",
-            "currentRender",
-            "previousRender",
-            "sideBySideComparison",
-            *([] if version in {2, 3} else ["phaseId", "phaseRubric"]),
+        phase_inputs = [] if version in {2, 3} else ["phaseId", "phaseRubric"]
+        accepted_allowlists = [
+            [
+                reference_name,
+                "currentRender",
+                "previousRender",
+                "sideBySideComparison",
+                *phase_inputs,
+            ]
+            for reference_name in ("sourceImage", "originalImage")
         ]
         required_denials = {
             "spec",
@@ -2840,9 +2856,10 @@ def validate_phase_execution_contract(
                 "phaseExecutionContract.visualScout.execution must be "
                 "'parallel-with-primary-reviewer'"
             )
-        if visual_scout.get("inputAllowlist") != expected_allowlist:
+        if visual_scout.get("inputAllowlist") not in accepted_allowlists:
             errors.append(
                 "phaseExecutionContract.visualScout.inputAllowlist must contain only "
+                "sourceImage (or legacy originalImage), "
                 "the canonical image inputs"
                 + (
                     ""

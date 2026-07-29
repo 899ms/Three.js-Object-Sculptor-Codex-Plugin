@@ -61,23 +61,63 @@ class PerceptualPipelineTests(unittest.TestCase):
         )
         self.assertEqual(validate_perceptual_contract(spec), [])
 
-    def test_imagegen_prepared_target_keeps_original_as_identity_veto(self) -> None:
+    def test_imagegen_prepared_target_uses_source_as_sole_authority(self) -> None:
         spec = make_spec(
             "Prepared Machine",
             "prepared.png",
             complexity="complex",
             reference_background="clear",
-            original_image="original.png",
             background_removal_mode="white-background-simplification",
             imagegen_trigger="excessive-complexity",
             declared_simplifications=["non-signature micro bolts"],
         )
 
         authority = spec["evidenceAuthority"]
+        self.assertEqual(authority["version"], 2)
         self.assertEqual(authority["acceptanceTarget"]["path"], "prepared.png")
         self.assertTrue(authority["acceptanceTarget"]["prepared"])
-        self.assertEqual(authority["identityGuardrail"]["path"], "original.png")
-        self.assertEqual(authority["identityGuardrail"]["role"], "identity-veto")
+        self.assertNotIn("identityGuardrail", authority)
+        self.assertNotIn("originalImage", spec["referencePreparation"])
+
+    def test_legacy_identity_guardrail_contract_remains_readable(self) -> None:
+        spec = make_spec(
+            "Legacy prepared machine",
+            "prepared.png",
+            complexity="complex",
+            reference_background="clear",
+            background_removal_mode="white-background-simplification",
+            imagegen_trigger="excessive-complexity",
+            declared_simplifications=["micro detail"],
+        )
+        spec["referencePreparation"].update(
+            {
+                "originalImage": "original.png",
+                "identityGuardrailValidated": True,
+                "comparisonPolicy": {
+                    "reconstructionTarget": "sourceImage",
+                    "identityGuardrail": "originalImage",
+                },
+            }
+        )
+        spec["evidenceAuthority"] = {
+            "version": 1,
+            "acceptanceTarget": {
+                "role": "acceptance-target",
+                "path": "prepared.png",
+                "prepared": True,
+            },
+            "identityGuardrail": {
+                "role": "identity-veto",
+                "path": "original.png",
+            },
+            "syntheticTurnaround": {
+                "role": "planning-veto",
+                "source": "viewHypothesisPolicy",
+                "mayApproveFidelity": False,
+            },
+        }
+
+        self.assertEqual(validate_perceptual_contract(spec), [])
 
     def test_capability_packs_compose_on_one_component(self) -> None:
         spec = make_spec("Composite Prop", None, complexity="simple")
@@ -506,17 +546,16 @@ class PerceptualPipelineTests(unittest.TestCase):
             "prepared.png",
             complexity="complex",
             reference_background="clear",
-            original_image="original.png",
             background_removal_mode="white-background-simplification",
             imagegen_trigger="excessive-complexity",
             declared_simplifications=["micro detail"],
         )
         spec["evidenceAuthority"]["acceptanceTarget"]["path"] = "synthetic.png"
-        spec["evidenceAuthority"]["identityGuardrail"]["path"] = ""
+        spec["evidenceAuthority"]["syntheticTurnaround"]["mayApproveFidelity"] = True
 
         failures = validate_perceptual_contract(spec)
         self.assertTrue(any("acceptanceTarget.path" in item for item in failures))
-        self.assertTrue(any("identityGuardrail.path" in item for item in failures))
+        self.assertTrue(any("mayApproveFidelity" in item for item in failures))
 
     def test_strict_review_requires_assessed_viewing_contract(self) -> None:
         spec = make_spec(

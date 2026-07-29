@@ -28,10 +28,10 @@ Use the progressive single-spec layout by default:
 python3 ../../scripts/sculpt.py init "Object Name" \
   --image <usable-original-or-white-background-prepared-reference> \
   --reference-separation <clear|mixed|absent> \
-  [--original-image <original-before-imagegen>] \
   [--imagegen-preparation-mode <white-background-cleanup|white-background-simplification>] \
-  [--imagegen-trigger <background-mixing|excessive-complexity|low-source-quality|combined>] \
+  [--imagegen-trigger <background-mixing|excessive-complexity|low-source-quality|real-object-photo|combined>] \
   [--declared-simplification <exact-detail-family>] \
+  [--planning-sheet-layout <standard|exploded>] \
   --complexity <simple|moderate|complex|ultra> \
   [--quality-profile <balanced|reference-fidelity>] \
   --out object-sculpt.json
@@ -46,11 +46,11 @@ Use `--layout modular` only when a subsystem is independently buildable and the 
 Require at least one inspectable image. Assess both subject/background separation and whether the source is practical to reconstruct:
 
 - Use the original directly when its complete boundary is readable and its detail/quality is practical for procedural reconstruction. White, neutral, transparent, or strongly contrasting backgrounds are acceptable.
-- Invoke the `imagegen` skill once when the subject blends into the background, the source quality obscures construction, or the object is impractically complex. These triggers apply independently; a clear background does not exempt an over-complex source.
+- Invoke the `imagegen` skill once when the subject blends into the background, the source quality obscures construction, the object is impractically complex, or a real-object photo needs a cleaner buildable 3D-style reference. These triggers apply independently.
 - ImageGen must output a clean solid-white background with strong subject contrast. Do not request or validate alpha transparency.
-- Use `white-background-cleanup` for separation/edge cleanup. Use `white-background-simplification` only for reconstruction-blocking complexity or quality, and declare every intentionally simplified detail family.
-- Bounded edits may clarify ambiguous edges, remove noise, regularize minor ambiguous geometry, and merge or omit non-signature microdetail. They must preserve object class, recognizable identity, primary silhouette, macro proportions, major component count/placement/attachments, signature features, dominant color/material zones, pose, and primary viewpoint.
-- The generated image becomes `sourceImage` and the active reconstruction target. Retain the original as `originalImage`; every acceptance review compares against the prepared target and separately vetoes identity or macro-form drift against the original.
+- Use `white-background-cleanup` for separation/edge cleanup. Use `white-background-simplification` for reconstruction-blocking complexity, quality, or difficult real-world surface variation, and declare every intentionally simplified detail family.
+- Bounded edits may clarify ambiguous edges, remove noise, regularize minor geometry, convert difficult photoreal surface variation into clean buildable 3D masses, and merge or omit non-signature microdetail. Preserve the recognizable class, primary silhouette, macro proportions, major component layout, signature features, pose, and primary viewpoint in the generated target.
+- The generated image becomes `sourceImage` and the sole reconstruction and acceptance target. Do not retain or send the pre-generation image as an acceptance guardrail.
 - `unassessed` preparation is a strict-quality blocker.
 
 Default new work to `reference-fidelity`. Use `balanced` only when the user explicitly accepts a lower visual bar.
@@ -66,7 +66,7 @@ Always-loaded stable core:
 - primary silhouette, proportions, landmarks, and negative spaces;
 - stable semantic IDs and macro hierarchy;
 - bounded assumptions and known risks;
-- prepared reconstruction-target authority plus original-image identity guardrail.
+- `sourceImage` as the sole reconstruction and acceptance authority.
 - `viewingContract.renderPipeline`, including explicit and runtime-verifiable
   anti-aliasing for every rendered phase.
 
@@ -77,7 +77,7 @@ Phase-owned fields:
 - `lookdev`: materials, colors, rigidity, roughness/gloss, microrelief, PBR maps, lighting, contact shadow.
 - `interaction`: motion assessment, exact moving component IDs, pivots, axes, limits/rates, motion clearance, runtime evidence.
 
-IDs remain stable. Edit authority and review scope are cumulative: the active phase must inspect its own and every earlier phase's visible quality, and may improve earlier work when the richer current render exposes a real defect or clear opportunity. Thus Lookdev may repair geometry/Form and Interaction may repair geometry or materials. A passed phase is a baseline, not a frozen result; only future-phase work remains forbidden. Every earlier-phase repair must use the same exact-ID/path impact assessment, challenger checkpoint, original/current/previous visual comparison, whole-result regression veto, rollback, and human approval as current-phase work. A phase delta may not silently reuse IDs or overwrite a stable-core fact; if observed evidence falsifies a core fact, record the reason.
+IDs remain stable. Edit authority and review scope are cumulative: the active phase must inspect its own and every earlier phase's visible quality, and may improve earlier work when the richer current render exposes a real defect or clear opportunity. Thus Lookdev may repair geometry/Form and Interaction may repair geometry or materials. A passed phase is a baseline, not a frozen result; only future-phase work remains forbidden. Every earlier-phase repair must use the same exact-ID/path impact assessment, challenger checkpoint, source/current/previous visual comparison, whole-result regression veto, rollback, and human approval as current-phase work. A phase delta may not silently reuse IDs or overwrite a stable-core fact; if observed evidence falsifies a core fact, record the reason.
 
 Use the concise current-phase packet instead of reopening the whole spec:
 
@@ -94,7 +94,7 @@ Read `workPacket.contextProjection`, edit only `specDeltaContract.editablePaths`
 Goal: converge the complete object's observed primary-view silhouette and macro proportions as quickly as possible.
 
 - Build the whole silhouette-coupled object or one foundation assembly, not a body-only crop judged against the full object.
-- Before the first build, resolve `viewHypothesisPolicy`. For every source-backed `moderate`, `complex`, or `ultra` object—and any asymmetric, articulated, occluded, or uncertain object—invoke `$imagegen` once to create one edge-to-edge 2x2 turnaround ordered `three-quarter | side` over `back | front`, display/register that sheet, and use it only as planning-veto evidence.
+- Before the first build, resolve `viewHypothesisPolicy`. Use the standard 2x2 order `three-quarter | side` over `back | front`. For a `complex` or `ultra` assembly with separable or internal components, use `exploded | side` over `back | front`; only the first tile is exploded and the other views remain assembled. Display/register the sheet and use it only as planning-veto evidence.
 - Skip the 2x2 only when the object is classified `simple`, strong bilateral/radial/axial symmetry is visible, confidence is at least `0.8`, and the evidence and reason are recorded.
 - Use the observed primary view as the acceptance authority.
 - Do not create recursive detail plans, PBR maps, motion pivots, or runtime receipts here.
@@ -110,10 +110,10 @@ Every repeated or attached system must declare parent/socket plus `contact`, `ov
 
 Consume the registered Blockout-preparation 2x2; do not regenerate it unless provenance is invalid or the user explicitly changes the reconstruction target.
 
-- The registered sheet is one cached edge-to-edge 2x2 ImageGen turnaround ordered `three-quarter | side` over `back | front`.
+- The registered sheet is one cached edge-to-edge 2x2 ImageGen planning sheet using either the standard order or, for a complex/ultra assembly, `exploded | side` over `back | front`.
 - Skip it only when the assessed complexity tier is `simple` **and** observed evidence supports strong bilateral, radial, or axial symmetry with confidence at least `0.8`. Record the symmetry type, evidence refs, and reason in `skipAssessment`.
 - Moderate, complex, ultra, asymmetric, articulated, occluded, or uncertain objects always require the 2x2 turnaround. Separate sequential ImageGen views do not satisfy the default policy.
-- Synthetic views are `planning-veto` only. They can expose implausible depth but can never approve fidelity or replace the original.
+- Synthetic views are `planning-veto` only. They can expose implausible depth or assembly structure but can never approve fidelity or replace `sourceImage`.
 
 ### Lookdev
 
@@ -143,7 +143,7 @@ For the current phase:
 3. Apply the assessed correction batch—owned by the active phase or repairing an earlier phase—only to a challenger; never mutate the champion checkpoint.
 4. Run one fail-fast phase validation/build and one application build sufficient to render. Do not full-typecheck between individual edits.
 5. Capture the required render(s).
-6. Create one exact active-reference/render comparison. For ImageGen-prepared input, include the original identity guardrail in reviewer evidence. For two to four views, present one 2x2 sheet rather than sequential images.
+6. Create one exact `sourceImage`/render comparison. For two to four views, present one 2x2 sheet rather than sequential images.
 7. Run deterministic preflight; if valid, run the blind visual scout and primary independent reviewer concurrently from the same immutable image evidence.
 8. Let the system promote, refine, rollback, or change strategy atomically.
 9. After a system gate passes, advance automatically under `final-only`; on the
@@ -157,11 +157,11 @@ Batch validation and generation. Repeat a command only after its inputs changed 
 
 ## Review contract
 
-Every visual checkpoint requires the current render and exact side-by-side comparison with `sourceImage`. When `sourceImage` is ImageGen-prepared, the reviewer must also inspect `originalImage` as an identity/macro-form guardrail and veto unauthorized drift. This prepared primary reference is distinct from synthetic turnaround views: turnarounds may appear only in a separately labeled planning sheet and never approve acceptance.
+Every visual checkpoint requires the current render and exact side-by-side comparison with `sourceImage`. It is the sole acceptance reference. Synthetic planning views may appear only in a separately labeled planning sheet and never approve acceptance.
 
 Use two distinct review roles:
 
-- The blind visual scout receives only `originalImage`, `currentRender`, `previousRender` when a prior checkpoint exists, their exact side-by-side comparison, the active `phaseId`, and that phase's compact visual rubric. It must not receive the spec, phase packet, IDs, parameters, scores, builder defense, or primary verdict. It performs a mandatory earlier-quality sweep first, then the active-phase review, and must inspect every rubric check before deciding. Those checks explicitly cover excessive reference deviation, visible assembly/contact/attachment alignment, reference-relative balance or intentional asymmetry, missing/invented/malformed signature detail, and material/surface response that is visibly simpler or less plausible than the reference. It may `reject` a major/critical issue owned by the active phase (`phaseScope: current`) or any earlier phase (`phaseScope: protected`, a backward-compatible token meaning prior quality scope, not a frozen layer). Earlier phases may also produce non-blocking improvement directions. A small numeric score drop alone is not a rejection reason; score regression must be corroborated by the visual comparison. Blockout judges silhouette/framing/macro proportion/major parts; Form adds structure/shape/attachments/balance/signature detail and can improve Blockout; Lookdev adds color/material/surface/lighting/grounding and can improve Blockout/Form; Interaction adds motion/clearance/runtime states and can improve all earlier phases. Only future-phase issues are `deferred` and cannot reject. The scout scans the full rubric but returns at most three highest-impact directions, and assigns no scores, IDs, parameter paths, or numeric fixes.
+- The blind visual scout receives only `sourceImage`, `currentRender`, `previousRender` when a prior checkpoint exists, their exact side-by-side comparison, the active `phaseId`, and that phase's compact visual rubric. It must not receive the spec, phase packet, IDs, parameters, scores, builder defense, or primary verdict. It performs a mandatory earlier-quality sweep first, then the active-phase review, and must inspect every rubric check before deciding. Those checks explicitly cover excessive reference deviation, visible assembly/contact/attachment alignment, reference-relative balance or intentional asymmetry, missing/invented/malformed signature detail, and material/surface response that is visibly simpler or less plausible than the reference. It may `reject` a major/critical issue owned by the active phase (`phaseScope: current`) or any earlier phase (`phaseScope: protected`, a backward-compatible token meaning prior quality scope, not a frozen layer). Earlier phases may also produce non-blocking improvement directions. A small numeric score drop alone is not a rejection reason; score regression must be corroborated by the visual comparison. Blockout judges silhouette/framing/macro proportion/major parts; Form adds structure/shape/attachments/balance/signature detail and can improve Blockout; Lookdev adds color/material/surface/lighting/grounding and can improve Blockout/Form; Interaction adds motion/clearance/runtime states and can improve all earlier phases. Only future-phase issues are `deferred` and cannot reject. The scout scans the full rubric but returns at most three highest-impact directions, and assigns no scores, IDs, parameter paths, or numeric fixes.
 - The primary independent reviewer receives the raw reference, current render/comparison, phase packet, and all IDs editable in the cumulative current-or-earlier scope—never the builder's proposed score or defense. It must review in the same order: first map remaining or improvable earlier-phase geometry/structure/lookdev defects to exact IDs and corrections, then review the active phase. It supplies one composite shape-similarity score and exact component corrections. It may not approve merely because the active-phase work is good while an obvious earlier-phase defect remains. The system gate requires composite score `>=0.70` and blind-scout `approve`; explicit user approval remains the final phase gate.
 
 The scout supplements rather than replaces the primary reviewer. Use a fresh context distinct from both builder and primary reviewer so spec assumptions cannot contaminate its purely visual diagnosis.
@@ -212,7 +212,7 @@ Before that batch is executable, its `impactAssessment` must prove that it is lo
 Checkpoint `spec + code + generated output + render + comparison + scores` together.
 
 - Seed the first valid scored candidate as the system phase champion. It remains `awaiting-user-approval` until the user approves it.
-- Promote when the AI similarity gate and blind scout pass; keep the highest-scoring compatible champion. Decide visual regression from the original/current/previous image comparison, never from a pixel-overlap score.
+- Promote when the AI similarity gate and blind scout pass; keep the highest-scoring compatible champion. Decide visual regression from the source/current/previous image comparison, never from a pixel-overlap score.
 - A challenger that fails the three-signal gate remains in audit history; restore the highest-scoring compatible champion transactionally.
 - A reviewer `stop` does not bypass comparison: score the rendered challenger and restore the champion on regression.
 - Three consecutive non-improvements exhaust the strategy. Keep the champion, record one `strategy-reset`, and materially change representation before another render.

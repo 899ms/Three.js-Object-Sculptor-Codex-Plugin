@@ -443,7 +443,7 @@ class PassPlanTests(unittest.TestCase):
         self.assertEqual(
             scout["inputAllowlist"],
             [
-                "originalImage",
+                "sourceImage",
                 "currentRender",
                 "previousRender",
                 "sideBySideComparison",
@@ -698,6 +698,53 @@ class PassPlanTests(unittest.TestCase):
             self.assertEqual(registered["decision"], "required")
             self.assertTrue(registered["enabled"])
 
+    def test_complex_assembly_can_register_exploded_planning_sheet(self) -> None:
+        with self.assertRaisesRegex(ValueError, "complex or ultra"):
+            make_spec(
+                "Simple prop",
+                "source.png",
+                complexity="simple",
+                reference_background="clear",
+                planning_sheet_layout="exploded",
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            sheet = root / "assembly-planning-2x2.png"
+            write_png_rgb(source, 8, 8, [(40, 90, 180)] * 64)
+            write_png_rgb(sheet, 16, 16, [(55, 105, 190)] * 256)
+            spec_path = root / "spec.json"
+            spec = make_spec(
+                "Layered machine",
+                str(source),
+                complexity="complex",
+                reference_background="clear",
+                planning_sheet_layout="exploded",
+            )
+            write_spec_atomic(spec_path, spec)
+
+            result = register_views(spec_path, [], sheet_path=sheet)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["layoutId"], "assembly-exploded-2x2-v1")
+            manifest = json.loads(
+                Path(result["manifest"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                {view["viewId"] for view in manifest["views"]},
+                {"exploded", "side", "back", "front"},
+            )
+            registered = load_spec(spec_path)
+            self.assertIn(
+                "exploded",
+                registered["viewHypothesisPolicy"]["requiredViews"],
+            )
+            form = next(
+                item for item in registered["buildPasses"] if item["id"] == "form"
+            )
+            self.assertIn("exploded", form["diagnosticViews"])
+            self.assertNotIn("three-quarter", form["diagnosticViews"])
+
     def test_small_score_regression_requires_blind_scout_visual_regression(self) -> None:
         baseline = {
             "overallScore": 0.80,
@@ -762,7 +809,6 @@ class PassPlanTests(unittest.TestCase):
             "prepared-white.png",
             complexity="simple",
             reference_background="mixed",
-            original_image="original.png",
             background_removal_mode="white-background-cleanup",
         )
         errors, warnings = validate_spec(prepared)
@@ -788,7 +834,6 @@ class PassPlanTests(unittest.TestCase):
             "simplified-white.png",
             complexity="ultra",
             reference_background="clear",
-            original_image="dense-original.png",
             background_removal_mode="white-background-simplification",
             imagegen_trigger="excessive-complexity",
             declared_simplifications=[
@@ -806,9 +851,41 @@ class PassPlanTests(unittest.TestCase):
             "bounded-simplification",
         )
         self.assertEqual(
-            simplified["referencePreparation"]["comparisonPolicy"]["identityGuardrail"],
-            "originalImage",
+            simplified["referencePreparation"]["comparisonPolicy"],
+            {"reconstructionTarget": "sourceImage"},
         )
+        self.assertNotIn("originalImage", simplified["referencePreparation"])
+
+        real_photo = make_spec(
+            "Organic chair",
+            "buildable-chair.png",
+            complexity="complex",
+            reference_background="clear",
+            background_removal_mode="white-background-simplification",
+            imagegen_trigger="real-object-photo",
+            declared_simplifications=[
+                "regularize irregular upholstery into buildable cushion masses",
+            ],
+        )
+        errors, _ = validate_spec(real_photo)
+        self.assertFalse(
+            [item for item in errors if "referencePreparation" in item],
+            errors,
+        )
+        self.assertNotIn("originalImage", real_photo["referencePreparation"])
+        self.assertNotIn("identityGuardrail", real_photo["evidenceAuthority"])
+        with self.assertRaisesRegex(
+            ValueError,
+            "real-object-photo requires white-background-simplification",
+        ):
+            make_spec(
+                "Organic chair",
+                "cleanup-only.png",
+                complexity="complex",
+                reference_background="clear",
+                background_removal_mode="white-background-cleanup",
+                imagegen_trigger="real-object-photo",
+            )
         self.assertEqual(
             visual_evidence_authority_failures(
                 {

@@ -2,7 +2,7 @@
 
 Turn the object in an attached image into a quality-gated, animation-ready procedural Three.js model built entirely with code.
 
-Three.js Object Sculptor is a Codex plugin for rebuilding the visible object in a user-provided attachment image as a code-only Three.js model. It does not try to do photogrammetry, download an art pack, or extract a perfect mesh from one image. Instead, it guides Codex through a sculpting workflow: validate the image, describe the object precisely, decompose it into geometry and material systems, build from blockout to detail, wire an animation-friendly hierarchy, then compare the browser render against the original reference.
+Three.js Object Sculptor is a Codex plugin for rebuilding the visible object in a user-provided or ImageGen-prepared `sourceImage` as a code-only Three.js model. It does not try to do photogrammetry, download an art pack, or extract a perfect mesh from one image. Instead, it guides Codex through a sculpting workflow: validate the image, describe the object precisely, decompose it into geometry and material systems, build from blockout to detail, wire an animation-friendly hierarchy, then compare the browser render against the active source reference.
 
 ## Demo
 
@@ -49,7 +49,7 @@ This botanical study reconstructs a complex ancient tree with procedural curves,
 - Defaults CLI-created specs to one final artifact-bound user approval; the
   stricter phase-by-phase approval mode remains available when required.
 - Validates whether an image is suitable for procedural 3D reconstruction.
-- Uses ImageGen to create a high-contrast solid-white reconstruction target when the object blends into its background, source quality is poor, or direct reconstruction is impractically complex. Bounded simplification may remove only declared non-signature detail; the original remains an identity and macro-form guardrail.
+- Uses ImageGen to create a high-contrast solid-white reconstruction target when the object blends into its background, source quality is poor, direct reconstruction is impractically complex, or a real-object photo needs a cleaner buildable 3D-style reference. The generated `sourceImage` becomes the sole reconstruction and acceptance target.
 - Integrates the pre-spec complexity assessment into the main `ObjectSculptSpec` before code generation.
 - Writes an `ObjectSculptSpec` with component hierarchy, materials, lighting, pivots, sockets, animation anchors, destruction anchors, and quality targets.
 - New specs default to one progressive phase-local contract so Blockout can render before Form, PBR, interaction, receipts, or final provenance are authored. Modular v4 manifests remain opt-in for independently isolatable subsystems.
@@ -72,7 +72,7 @@ This botanical study reconstructs a complex ancient tree with procedural curves,
 - Runs an independent, phase-scoped blind visual scout from image evidence plus only the active `phaseId` and compact visual rubric. It must scan every rubric check—including excessive reference deviation, misaligned or implausible connections, reference-relative balance, signature-detail plausibility, and material/surface fidelity—before reporting at most three highest-impact directions. Passed phases remain improvable rather than frozen; major defects in either current or earlier work can reject, while future-phase issues are deferred. It is a binary gate (`approve`/`reject`) and never receives spec IDs/parameters/scores.
 - Keeps the primary reviewer for composite scoring and exact component corrections, then requires explicit user approval before the next phase.
 - Requires explicit user approval after deterministic checks and both AI review layers pass each active phase; change requests must identify the visual region, problem, and expected direction before refinement.
-- Numeric image-overlap metrics do not participate in acceptance or rollback. Visual regression is decided from the original/current/previous image comparison.
+- Numeric image-overlap metrics do not participate in acceptance or rollback. Visual regression is decided from the source/current/previous image comparison.
 - Supports reference-derived procedural PBR evidence: albedo, roughness estimate, height, normal, and AO maps.
 - Emits a disposable PMREM look-dev environment from an external
   equirectangular texture or a procedural studio fallback, applies anisotropy
@@ -88,7 +88,7 @@ This botanical study reconstructs a complex ancient tree with procedural curves,
 - Recreate reference objects as browser-friendly procedural assets without relying on downloaded meshes or external art packs.
 - Generate a structured object spec before implementation, so Codex understands geometry, materials, lighting, local surface features, and interaction readiness.
 - Create destructible or transformable objects by planning detachable parts, fracture seams, colliders, and effect emitters before the model is coded.
-- Compare the rendered model against the original attachment with AI vision and block progress when critical features do not match.
+- Compare the rendered model against `sourceImage` with AI vision and block progress when critical features do not match.
 - Produce reusable procedural object factories for Three.js games, WebGPU demos, interactive prototypes, and visual experiments.
 
 ## Why This Exists
@@ -215,11 +215,11 @@ python3 scripts/sculpt.py generate object-sculpt-spec.json \
   --wrapper-out src/AncientOak.ts
 ```
 
-`context` returns the stable core plus only the current phase's editable fields and explicitly lists future work that must remain deferred. The builder applies one correction batch, builds/renders once, creates the active-reference comparison, and submits both AI review layers. When ImageGen prepares the target, the original is reviewed separately as an identity/macro-form guardrail. Four generated planning views are presented as one identity-consistent 2x2 sheet.
+`context` returns the stable core plus only the current phase's editable fields and explicitly lists future work that must remain deferred. The builder applies one correction batch, builds/renders once, creates the `sourceImage` comparison, and submits both AI review layers. Four generated planning views are presented as one identity-consistent 2x2 sheet; complex/ultra assemblies may use an exploded first tile while the other three views remain assembled.
 
 Blockout uses the observed primary view and macro geometry only. Form recursively expands complex components, validates attachments, and uses one ImageGen 2x2 turnaround by default. It may skip that sheet only for an explicitly assessed simple object with strong evidenced symmetry. Lookdev owns PBR, materials, surface descriptors, lighting, and contact shadows. Interaction owns motion inference, pivots, runtime receipts, motion clearance, and final typecheck. A justified `not-required` motion assessment removes the runtime gate.
 
-Each valid challenger is compared with the phase champion using the composite AI similarity score and blind-scout verdict over the original/current/previous images. A failed challenger is checkpointed for audit and rolled back. Three consecutive non-improvements require a materially different representation. Schema, hash, or evidence-scope failures do not spend this quality budget. A system-passed champion remains in `awaiting-user-approval`; only explicit approval of that exact reviewed artifact unlocks the next phase.
+Each valid challenger is compared with the phase champion using the composite AI similarity score and blind-scout verdict over the source/current/previous images. A failed challenger is checkpointed for audit and rolled back. Three consecutive non-improvements require a materially different representation. Schema, hash, or evidence-scope failures do not spend this quality budget. A system-passed champion remains in `awaiting-user-approval`; only explicit approval of that exact reviewed artifact unlocks the next phase.
 
 Modular layout remains available with `--layout modular` for genuinely isolatable systems. Module comparisons require matching module/component scope and a hash-bound observed crop or mask; a full-object reference beside an isolated module is rejected before scoring.
 
@@ -243,9 +243,9 @@ python3 scripts/sculpt.py correct object-sculpt-spec.json \
   --out object-sculpt-challenger.json
 ```
 
-The original reference remains the identity veto, an ImageGen-cleaned or
-simplified white-background image remains the active acceptance target, and the
-cached 2x2 turnaround remains planning-veto evidence only.
+An ImageGen-cleaned or simplified white-background `sourceImage` is the sole
+active acceptance target, and the cached 2x2 planning sheet remains
+planning-veto evidence only.
 
 ## Review Render Quality
 

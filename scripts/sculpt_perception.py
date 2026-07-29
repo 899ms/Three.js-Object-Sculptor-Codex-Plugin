@@ -23,7 +23,7 @@ RENDER_PIPELINE_MODES = frozenset(
 )
 RENDER_PIPELINE_QUALITY_PRESETS = frozenset({"quality", "performance"})
 VISUAL_IDENTITY_VERSION = 1
-EVIDENCE_ROLES = frozenset({"acceptance-target", "identity-veto", "planning-veto"})
+EVIDENCE_ROLES = frozenset({"acceptance-target", "planning-veto"})
 REPRESENTATION_MODES = frozenset(
     {
         "true-geometry",
@@ -49,7 +49,6 @@ def make_perceptual_fields(
         if isinstance(reference_preparation, Mapping)
         else {}
     )
-    original_image = str(preparation.get("originalImage") or source_image or "")
     prepared = str(preparation.get("method") or "").startswith("imagegen-prepared")
     render_quality = "quality" if quality_profile == "reference-fidelity" else "performance"
     return {
@@ -71,7 +70,7 @@ def make_perceptual_fields(
                 "numericScores": "trend-only",
                 "passCondition": (
                     "No unresolved major or critical salience blocker inside viewingContract, "
-                    "no identity drift, and no visible champion regression."
+                    "no acceptance-reference drift, and no visible champion regression."
                 ),
                 "capabilityGapFailsClosed": True,
             },
@@ -108,15 +107,11 @@ def make_perceptual_fields(
             },
         },
         "evidenceAuthority": {
-            "version": 1,
+            "version": 2,
             "acceptanceTarget": {
                 "role": "acceptance-target",
                 "path": source_image,
                 "prepared": prepared,
-            },
-            "identityGuardrail": {
-                "role": "identity-veto",
-                "path": original_image,
             },
             "syntheticTurnaround": {
                 "role": "planning-veto",
@@ -451,14 +446,22 @@ def validate_perceptual_contract(spec: Mapping[str, Any]) -> list[str]:
     if not isinstance(authority, Mapping):
         failures.append("evidenceAuthority must be an object")
     else:
+        authority_version = authority.get("version")
+        if authority_version not in {1, 2}:
+            failures.append("evidenceAuthority.version must be 1 or 2")
         roles = {
             entry.get("role")
             for entry in authority.values()
             if isinstance(entry, Mapping) and "role" in entry
         }
-        if not {"acceptance-target", "identity-veto", "planning-veto"} <= roles:
+        required_roles = (
+            {"acceptance-target", "identity-veto", "planning-veto"}
+            if authority_version == 1
+            else EVIDENCE_ROLES
+        )
+        if not required_roles <= roles:
             failures.append(
-                "evidenceAuthority must declare acceptance-target, identity-veto, and planning-veto"
+                "evidenceAuthority must declare the roles required by its version"
             )
         synthetic = authority.get("syntheticTurnaround")
         if (
@@ -473,19 +476,23 @@ def validate_perceptual_contract(spec: Mapping[str, Any]) -> list[str]:
         source_image = str(spec.get("sourceImage") or "")
         preparation = spec.get("referencePreparation")
         preparation = preparation if isinstance(preparation, Mapping) else {}
-        original_image = str(preparation.get("originalImage") or source_image)
         if not isinstance(acceptance, Mapping) or acceptance.get("path") != source_image:
             failures.append(
                 "evidenceAuthority.acceptanceTarget.path must equal sourceImage"
             )
-        if not isinstance(identity, Mapping) or identity.get("path") != original_image:
+        if authority_version == 1:
+            original_image = str(preparation.get("originalImage") or source_image)
+            if not isinstance(identity, Mapping) or identity.get("path") != original_image:
+                failures.append(
+                    "legacy evidenceAuthority.identityGuardrail.path must equal "
+                    "referencePreparation.originalImage"
+                )
+        elif isinstance(identity, Mapping):
             failures.append(
-                "evidenceAuthority.identityGuardrail.path must equal referencePreparation.originalImage"
+                "evidenceAuthority version 2 uses sourceImage as the sole acceptance reference"
             )
         prepared = str(preparation.get("method") or "").startswith("imagegen-prepared")
         if prepared:
-            if not original_image:
-                failures.append("ImageGen preparation requires a non-empty identity guardrail")
             if preparation.get("outputImage") != source_image:
                 failures.append(
                     "ImageGen preparation outputImage must equal the acceptance sourceImage"
