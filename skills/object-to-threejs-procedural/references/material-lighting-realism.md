@@ -19,6 +19,7 @@ Treat this as a `LookDev Reset`, not a geometry problem.
 
 Before accepting `lookdev`, the spec must contain:
 
+- an assessed `surfaceDescriptor` for every important material: `rigidity` (`rigid`, `semi-rigid`, `flexible`, or `soft`), optical `finish` (`mirror`, `glossy`, `satin`, or `matte`), and `microRelief` (`smooth`, `grain`, `pebbled`, `wrinkled`, `fibrous`, `pitted`, `brushed`, or `custom`) with its executable `none|normal|bump|displacement` channel. Each claim records `basis: observed|inferred` and confidence; the descriptor records `evidenceRefs`.
 - `albedo` palette: dominant, secondary, accent colors, and where they appear on the object.
 - `roughness` response: base value, variation, and local response such as smoother worn edges or rougher cavities.
 - tactile response: at least one of `normal`, `bump`, or `displacement` with scale/amplitude/strength.
@@ -35,9 +36,15 @@ Before accepting `lookdev`, the spec must contain:
 
 Do not accept "brown bark", "gold leaves", "dark metal", or "rough stone" as sufficient. Translate it into PBR terms: albedo palette, roughness, normal/bump, AO, dirt/wear, and local masks.
 
+Do not conflate material axes. `rigid` describes physical/deformation behavior, `matte` or `glossy` describes optical roughness, and `smooth`, `wrinkled`, or `pebbled` describes geometric or normal-scale relief. For example, rigid painted metal can be matte and smooth; flexible rubber can be glossy and pebbled. The validator rejects an assessed descriptor when its numeric roughness or relief channel contradicts the declared surface.
+
 Do not claim exact PBR recovery from a single image. Pixels include baked lighting, exposure, shadow, view angle, and camera response. Treat extracted maps as reference-derived material evidence that still needs neutral/grazing/reference screenshot review.
 
 An executable `localOverrides` entry needs `id`, a supported surface `type`, `amount`, `color`, at least one `evidenceRefs` id, and a `mask` with `pattern` (`noise`, `cavity`, `edge`, `vertical`, `speckle`, or `streak`). Use paired `mask.uvCenter`/`uvScale` plus `feather` when evidence confines the effect to one UV region. Optional `roughnessDelta`, `metalnessDelta`, and `heightDelta` alter independent map channels. Put scratches and chips here as `scratch`/`chip` layers; descriptive arrays alone do not change the shader. A `material-map-evidence` entry is provenance only and must never count as an applied dirt/wear layer.
+
+Use `rust` or `oxide` for observed corrosion and `patina` for an observed
+weathered surface film. Their defaults make the affected region rougher and
+less metallic, but explicit evidence-backed channel deltas remain authoritative.
 
 Use `specularIntensity`, `specularColor`, and `envMapIntensity` to control dielectric reflection strength independently from roughness. These values are authored estimates unless multi-light or measured material evidence is available.
 

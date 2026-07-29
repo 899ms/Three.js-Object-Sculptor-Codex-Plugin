@@ -11,13 +11,15 @@ import os
 import re
 import struct
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from visual_feature_gate import feature_gate_failures
+from sculpt_perception import perceptual_review_failures
 
 
-DEFAULT_PASS_ORDER = ["blockout", "form", "lookdev", "optimization"]
+DEFAULT_PASS_ORDER = ["blockout", "form", "lookdev"]
 VISUAL_PASS_IDS = {
     "blockout",
     "structure",
@@ -34,19 +36,424 @@ METRICS_PASS_IDS = {"optimization", "optimization-pass"}
 REFINEMENT_ACTIONS = frozenset({"refine-spec", "refine-code", "refine-batch"})
 STRATEGY_RESET_ACTION = "strategy-reset"
 CORRECTION_SCOPES = frozenset({"spec", "code"})
-MAX_ATOMIC_REFINEMENT_BATCHES = 2
+CORRECTION_TARGET_TYPES = frozenset(
+    {
+        "component",
+        "material",
+        "repetition",
+        "feature",
+        "detail-feature",
+        "topology-group",
+        "motion-affordance",
+        "global",
+    }
+)
+CORRECTION_OPERATIONS = frozenset({"set", "scale", "translate", "rotate", "replace"})
+GLOBAL_CORRECTION_TARGETS = frozenset(
+    {
+        "spec",
+        "silhouette",
+        "coordinate-frame",
+        "camera",
+        "lighting",
+        "render-pipeline",
+        "evidence",
+        "performance",
+        "assembly",
+    }
+)
+MAX_REFINEMENT_ATTEMPTS = 6
+MAX_CONSECUTIVE_NON_IMPROVEMENTS = 3
+MIN_REFINEMENT_SCORE_DELTA = 0.02
+MAX_REFINEMENT_REGRESSION = 0.0
 MAX_STRATEGY_RESETS = 1
+# Version 4 keeps the phase loop and rollback machinery while using two visual
+# system signals: one composite AI score and an independent blind scout.
+# Human approval remains the final phase gate.
+SIMPLIFIED_PHASE_EXECUTION_VERSION = 4
+SIMPLIFIED_AI_OVERALL_FLOOR = 0.70
+MAX_BLIND_SCOUT_OBSERVATIONS = 3
+BLIND_SCOUT_ARTIFACT_VERSION = 2
+BLIND_SCOUT_PHASE_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "blockout": (
+        "silhouette",
+        "framing",
+        "proportion",
+        "major-part",
+        "assembly",
+    ),
+    "form": (
+        "silhouette",
+        "proportion",
+        "major-part",
+        "assembly",
+        "shape",
+        "attachment",
+        "balance",
+        "signature-detail",
+    ),
+    "lookdev": (
+        "color",
+        "material",
+        "surface",
+        "lighting",
+        "grounding",
+    ),
+    "interaction": (
+        "motion",
+        "clearance",
+        "runtime-state",
+        "assembly",
+    ),
+}
+BLIND_SCOUT_PHASE_ORDER = ("blockout", "form", "lookdev", "interaction")
+BLIND_SCOUT_PHASE_FOCUS = {
+    "blockout": (
+        "First scan all visible prior-quality dimensions for remaining defects or "
+        "improvement opportunities, then judge the complete silhouette, framing, "
+        "macro proportions, and presence/placement/assembly of identity-defining parts."
+    ),
+    "form": (
+        "First re-scan Blockout quality for remaining or improvable silhouette, "
+        "proportion, and major-part issues; then judge structure, local shape, "
+        "attachments, balance, and signature identity detail. A passed prior phase "
+        "is a baseline, not a frozen result."
+    ),
+    "lookdev": (
+        "First re-scan Blockout and Form quality for remaining or improvable "
+        "silhouette, proportion, structure, attachment, balance, and shape issues; "
+        "then judge color zones, material class, gloss/roughness, surface response, "
+        "lighting, and grounding. A passed prior phase is a baseline, not a frozen result."
+    ),
+    "interaction": (
+        "First re-scan all earlier visual quality for remaining or improvable "
+        "silhouette, structure, shape, and lookdev issues; then judge visible motion "
+        "states, pivot plausibility, clearance, detachment, intersection, and "
+        "runtime-state coherence. Earlier passes remain editable when improvement is "
+        "visibly justified."
+    ),
+}
+BLIND_SCOUT_CATEGORY_CHECKS = {
+    "silhouette": (
+        "Compare the complete visible outline, dominant curves, negative spaces, and "
+        "identity-bearing profile against the active reference."
+    ),
+    "framing": (
+        "Check camera-relative scale, crop, orientation, and placement without treating "
+        "a framing mismatch as a geometry correction."
+    ),
+    "proportion": (
+        "Compare macro and local width, height, depth cues, thickness, spacing, and "
+        "relative scale between visible parts."
+    ),
+    "major-part": (
+        "Check the visible count, presence, placement, orientation, and relative size "
+        "of every identity-defining major part."
+    ),
+    "assembly": (
+        "Inspect visible construction relationships for detached, floating, intersecting, "
+        "misaligned, off-center, or implausibly supported parts."
+    ),
+    "shape": (
+        "Compare local contours, curvature, taper, thickness, transitions, and volume "
+        "against the visible reference evidence."
+    ),
+    "attachment": (
+        "Inspect every visible joint, socket, seam, contact, overlap, and intended gap "
+        "for alignment, continuity, penetration, detachment, or implausible connection."
+    ),
+    "balance": (
+        "Compare the reference's intended symmetry or asymmetry, visual weight, support, "
+        "stance, and part distribution; do not penalize asymmetry present in the reference."
+    ),
+    "signature-detail": (
+        "Check identity-critical visible details for missing, invented, malformed, "
+        "misplaced, misoriented, duplicated, or visually implausible construction."
+    ),
+    "color": (
+        "Compare dominant color zones, boundaries, relative values, saturation, and "
+        "identity-critical accents against the active reference."
+    ),
+    "material": (
+        "Compare material class, metalness, roughness or gloss, reflectance, transmission, "
+        "and layered response; reject simplification only when it is visibly poorer than "
+        "or inconsistent with the reference."
+    ),
+    "surface": (
+        "Compare visible relief, wear, grain, scratches, patina, softness, and response "
+        "variation at the target display scale without demanding invisible microdetail."
+    ),
+    "lighting": (
+        "Check whether highlights, shading, reflections, and contrast reveal the same "
+        "forms and material response rather than hiding defects."
+    ),
+    "grounding": (
+        "Check contact shadows, support points, floor contact, and depth cues for floating "
+        "or implausible placement."
+    ),
+    "motion": (
+        "Compare visible motion direction, pivot behavior, deformation, and state changes "
+        "with the observed or approved motion evidence."
+    ),
+    "clearance": (
+        "Inspect moving states for collision, penetration, detachment, implausible gaps, "
+        "or insufficient travel clearance."
+    ),
+    "runtime-state": (
+        "Check that every reviewed runtime state remains visually coherent and preserves "
+        "the accepted object identity, assembly, materials, and rendering."
+    ),
+}
+BLIND_SCOUT_SEVERITY_POLICY = {
+    "critical": (
+        "The visible result loses object identity, omits or invents a defining system, "
+        "or shows a broken or impossible assembly that invalidates the object."
+    ),
+    "major": (
+        "A clear reference mismatch or construction/material defect is readily visible "
+        "at the target display scale and materially harms fidelity or plausibility."
+    ),
+    "minor": (
+        "A localized visible mismatch remains, but it does not materially change identity, "
+        "assembly plausibility, material class, or the dominant read."
+    ),
+}
+BLIND_SCOUT_COVERAGE_RULE = (
+    "Inspect every mandatory check before deciding. Report only the three highest-impact "
+    "visible directions, but reject whenever any current or prior-phase critical or major "
+    "defect exists; an empty observation list asserts that the complete mandatory scan "
+    "found no reportable issue."
+)
+BLIND_SCOUT_REFERENCE_COMPARISON_RULE = (
+    "Use the active reconstruction target for visible fidelity. When an ImageGen-prepared "
+    "target is present, also use the original image only as an identity and macro-form "
+    "guardrail. Judge simplification, asymmetry, detail, and material complexity relative "
+    "to the reference evidence rather than generic realism preferences."
+)
+DETERMINISTIC_QUALITY_METRICS = (
+    "centroidDelta",
+    "aspectRatioDelta",
+    "detailEnergyRatio",
+    "edgeDensityRatio",
+    "foregroundHistogramIntersection",
+    "foregroundMeanColorDelta",
+    "highlightCoverageRatio",
+    "highlightEnergyRatio",
+)
+MATERIAL_OWNER_ROLE_TOKENS = (
+    "material",
+    "surface",
+    "lookdev",
+    "fabric",
+    "fiber",
+    "fur",
+    "hair",
+    "cloth",
+    "costume",
+    "knit",
+    "glass",
+    "liquid",
+)
+
+
+def blind_scout_phase_id(pass_id: str) -> str:
+    """Map legacy pass aliases to the four user-facing phase scopes."""
+
+    normalized = str(pass_id or "").strip().lower()
+    if normalized in {"blockout", "structure", "structural-pass"}:
+        return "blockout"
+    if normalized in {"form", "form-refinement"}:
+        return "form"
+    if normalized in {"lookdev", "material-pass", "surface-pass", "lighting-pass"}:
+        return "lookdev"
+    if normalized in {"interaction", "interaction-pass"}:
+        return "interaction"
+    return normalized
+
+
+def blind_scout_phase_categories(pass_id: str) -> tuple[str, ...]:
+    return BLIND_SCOUT_PHASE_CATEGORIES.get(blind_scout_phase_id(pass_id), ())
+
+
+def blind_scout_phase_scope(pass_id: str, category: str) -> str:
+    phase_id = blind_scout_phase_id(pass_id)
+    if category in BLIND_SCOUT_PHASE_CATEGORIES.get(phase_id, ()):
+        return "current"
+    try:
+        phase_index = BLIND_SCOUT_PHASE_ORDER.index(phase_id)
+    except ValueError:
+        return "deferred"
+    protected_categories = {
+        item
+        for prior_phase in BLIND_SCOUT_PHASE_ORDER[:phase_index]
+        for item in BLIND_SCOUT_PHASE_CATEGORIES[prior_phase]
+    }
+    return "protected" if category in protected_categories else "deferred"
+
+
+def blind_scout_phase_rubrics() -> dict[str, dict[str, Any]]:
+    all_categories = sorted(
+        {
+            category
+            for categories in BLIND_SCOUT_PHASE_CATEGORIES.values()
+            for category in categories
+        }
+    )
+    rubrics: dict[str, dict[str, Any]] = {}
+    for phase_index, phase_id in enumerate(BLIND_SCOUT_PHASE_ORDER):
+        categories = BLIND_SCOUT_PHASE_CATEGORIES[phase_id]
+        prior_categories = sorted(
+            {
+                category
+                for prior_phase in BLIND_SCOUT_PHASE_ORDER[:phase_index]
+                for category in BLIND_SCOUT_PHASE_CATEGORIES[prior_phase]
+            }
+        )
+        protected_categories = [
+            category for category in prior_categories if category not in categories
+        ]
+        mandatory_categories = list(
+            dict.fromkeys([*protected_categories, *categories])
+        )
+        rubrics[phase_id] = {
+            "focus": BLIND_SCOUT_PHASE_FOCUS[phase_id],
+            "currentPhaseCategories": list(categories),
+            "priorPhaseCategories": prior_categories,
+            # Backward-compatible machine key. "Protected" means protected from
+            # regression, not frozen against improvement.
+            "protectedPhaseCategories": protected_categories,
+            "reviewOrder": ["prior-phase-quality-sweep", "current-phase-review"],
+            "priorPhaseReviewRequired": True,
+            "priorPhaseImprovementAllowed": True,
+            "mandatoryChecks": [
+                {
+                    "category": category,
+                    "phaseScope": blind_scout_phase_scope(phase_id, category),
+                    "inspection": BLIND_SCOUT_CATEGORY_CHECKS[category],
+                }
+                for category in mandatory_categories
+            ],
+            "coverageRule": BLIND_SCOUT_COVERAGE_RULE,
+            "severityPolicy": copy.deepcopy(BLIND_SCOUT_SEVERITY_POLICY),
+            "referenceComparisonRule": BLIND_SCOUT_REFERENCE_COMPARISON_RULE,
+            "deferredCategories": [
+                category
+                for category in all_categories
+                if category not in categories and category not in prior_categories
+            ],
+        }
+    return rubrics
+
+
+def blind_scout_execution_contract() -> dict[str, Any]:
+    """Return the phase-scoped prompt/output contract for the visual-only scout."""
+
+    return {
+        "required": True,
+        "role": "blind-visual-scout",
+        "independence": "fresh-context-distinct-from-builder-and-primary-reviewer",
+        "execution": "parallel-with-primary-reviewer",
+        "inputAllowlist": [
+            "originalImage",
+            "currentRender",
+            "previousRender",
+            "sideBySideComparison",
+            "phaseId",
+            "phaseRubric",
+        ],
+        "inputDenylist": [
+            "spec",
+            "phasePacket",
+            "componentIds",
+            "parameters",
+            "scores",
+            "builderDefense",
+            "primaryVerdict",
+        ],
+        "phaseRubrics": blind_scout_phase_rubrics(),
+        "scanRule": (
+            "Run a mandatory two-pass scan using every phaseRubric.mandatoryChecks item: "
+            "(1) inspect every visible component or region for remaining defects and "
+            "clear improvement opportunities in all earlier phases, then (2) inspect "
+            "the active phase. Explicitly test visible assembly and attachment alignment, "
+            "reference-relative balance, signature-detail plausibility, material/surface "
+            "fidelity, and excessive macro deviation whenever their phase scope is current "
+            "or protected. Earlier-phase quality is cumulative and improvable, not frozen. "
+            "Compare currentRender with previousRender to determine whether a refinement "
+            "improves or regresses; previousRender is required when a prior checkpoint exists."
+        ),
+        "outOfScopeRule": (
+            "A major or critical issue in the active phase or any earlier phase may "
+            "cause reject. Earlier-phase issues may also be reported as improvement "
+            "directions even when they are not yet blocking. Only future-phase issues "
+            "are deferred."
+        ),
+        "output": {
+            "artifactVersion": BLIND_SCOUT_ARTIFACT_VERSION,
+            "advisoryOnly": False,
+            "gateAuthority": True,
+            "scoresForbidden": True,
+            "verdictForbidden": False,
+            "numericFixesForbidden": True,
+            "decisionValues": ["approve", "reject"],
+            "maxObservations": MAX_BLIND_SCOUT_OBSERVATIONS,
+            "rejectRule": (
+                "reject requires at least one current or earlier-phase critical or major observation; "
+                "a small numeric score drop alone is not a rejection reason"
+            ),
+            "approveRule": (
+                "approve may contain deferred observations and non-blocking earlier-phase "
+                "improvement directions, but no current or earlier-phase critical or "
+                "major observation"
+            ),
+            "priorPhaseReviewRequired": True,
+            "priorPhaseImprovementAllowed": True,
+            "priorPhaseIsNotFrozen": True,
+            "componentScanFields": [
+                "visualRegion",
+                "severity",
+                "category",
+                "phaseScope",
+                "direction",
+                "viewIds",
+            ],
+            "priorityDirectionFields": [
+                "visualRegion",
+                "category",
+                "phaseScope",
+                "severity",
+                "direction",
+                "viewIds",
+            ],
+            "forbiddenFields": [
+                "componentId",
+                "componentIds",
+                "parameterPath",
+                "score",
+                "numericFix",
+                "beforeValue",
+                "expectedValue",
+            ],
+            "builderMappingRule": (
+                "The builder maps visual regions to exact spec IDs and numeric "
+                "corrections after receiving the scout report."
+            ),
+        },
+    }
 
 DERIVED_SPEC_FIELDS = {
     "reviewHistory",
+    "userPhaseApprovals",
     "visualEvidence",
     "sculptPipeline",
     "pbrExtractionHistory",
 }
 
+# Compatibility-only hints accepted while migrating pre-3.2 specs. They no
+# longer select the quality pipeline or activate performance gates.
 REALTIME_USES = {"browser-prop", "game-prop", "playable", "destructible"}
 INTERACTIVE_USES = {"animated", "playable", "destructible"}
-CURRENT_SCHEMA_VERSION = "3.1"
+CURRENT_SCHEMA_VERSION = "3.2"
 LEGACY_SCHEMA_VERSION = "2.0"
 COMPONENT_TYPES = frozenset({"part", "assembly"})
 VISUAL_EVIDENCE_ARTIFACT_TYPE = "threejs-sculpt-visual-evidence"
@@ -59,10 +466,165 @@ _SCHEMA_VERSION_PATTERN = re.compile(
 )
 
 
+def user_eta_policy() -> dict[str, Any]:
+    """Describe the ETA update that the executing agent owes the user.
+
+    The CLI can count quality gates, but it cannot honestly predict browser,
+    reviewer, ImageGen, or refinement latency.  Keep the estimate agent-owned
+    and require a range whose basis is visible instead of fabricating a timer.
+    """
+
+    return {
+        "required": True,
+        "format": "range",
+        "allowedUnits": ["minutes", "hours"],
+        "singleExactTimeForbidden": True,
+        "recalculateAfterEveryStep": True,
+        "requiredBasis": [
+            "observed duration of completed cycles when available",
+            "remaining quality gates",
+            "remaining refinement budget",
+            "known browser, reviewer, ImageGen, or user-input waits",
+        ],
+        "blockedRule": (
+            "Only report ETA as unknown when an external blocker makes a range dishonest; "
+            "name the blocker and state when progress will be checked again."
+        ),
+    }
+
+
+def user_progress_contract(
+    scope: str,
+    completed: int,
+    total: int,
+    current_step: str,
+    remaining_steps: Iterable[str],
+) -> dict[str, Any]:
+    """Return a stable gate count plus the required user-update policy."""
+
+    safe_total = max(0, int(total))
+    safe_completed = min(max(0, int(completed)), safe_total)
+    percent = (
+        100.0
+        if safe_total == 0 and current_step == "complete"
+        else 0.0
+        if safe_total == 0
+        else round(100.0 * safe_completed / safe_total, 1)
+    )
+    return {
+        "reportRequired": True,
+        "scope": scope,
+        "completedGates": safe_completed,
+        "totalGates": safe_total,
+        "gatePercentComplete": percent,
+        "percentMeaning": "accepted quality gates, not elapsed wall-clock time",
+        "currentStep": current_step,
+        "remainingGates": list(dict.fromkeys(str(item) for item in remaining_steps if str(item))),
+        "nextAction": {
+            "required": True,
+            "instruction": (
+                "State one concrete next action, its target module/pass, and the condition that will finish it."
+            ),
+        },
+        "nextUpdate": "after this step and before starting the next workflow step",
+        "eta": user_eta_policy(),
+    }
+
+
+def visual_checkpoint_presentation(
+    evidence: Mapping[str, Any],
+    *,
+    checkpoint: str,
+    artifact_state: str = "candidate",
+    progress: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Expose exact visual artifacts that must be embedded in the user update."""
+
+    views = evidence.get("views")
+    view_items = [item for item in views if isinstance(item, Mapping)] if isinstance(views, list) else []
+    render_outputs = list(
+        dict.fromkeys(
+            str(item.get("renderScreenshot"))
+            for item in view_items
+            if isinstance(item.get("renderScreenshot"), str)
+            and str(item.get("renderScreenshot")).strip()
+        )
+    )
+    reference_images = list(
+        dict.fromkeys(
+            str(item.get("referenceImage"))
+            for item in view_items
+            if isinstance(item.get("referenceImage"), str)
+            and str(item.get("referenceImage")).strip()
+        )
+    )
+    comparison = evidence.get("comparisonImage")
+    return {
+        "displayRequired": True,
+        "displayBeforeNextStep": True,
+        "checkpoint": checkpoint,
+        "artifactState": artifact_state,
+        "renderOutputs": render_outputs,
+        "referenceImages": reference_images,
+        "sideBySideComparison": comparison if isinstance(comparison, str) else "",
+        "displayOrder": [
+            "render output",
+            "reference/render side-by-side comparison",
+            "review result",
+            "current progress",
+            "remaining-time range",
+        ],
+        "markdownRule": (
+            "Embed the absolute local render and comparison paths as visible Markdown images; "
+            "a plain path or reviewer-only attachment does not satisfy the user update."
+        ),
+        "progress": dict(progress) if isinstance(progress, Mapping) else {},
+        "eta": user_eta_policy(),
+    }
+
+
+def is_pending_quality_attempt(record: Mapping[str, Any]) -> bool:
+    """Return whether a scored attempt still belongs to the active retry cycle."""
+
+    action = record.get("action")
+    return action in REFINEMENT_ACTIONS or (
+        action == "continue" and record.get("accepted") is False
+    )
+
+
+def deterministic_quality_gate_failures(failures: Iterable[Any]) -> list[str]:
+    """Select deterministic pixel-quality vetoes from broader preflight failures.
+
+    Evidence integrity, provenance, stale hashes, missing views, and incomplete
+    correction batches are deliberately excluded. Those failures cannot prove
+    that a refinement made the rendered object worse and therefore must not spend
+    the quality retry budget or trigger a checkpoint rollback.
+    """
+
+    selected: list[str] = []
+    for value in failures:
+        if not isinstance(value, str):
+            continue
+        is_metric_failure = any(metric in value for metric in DETERMINISTIC_QUALITY_METRICS)
+        is_threshold_failure = (
+            " veto threshold " in value
+            or " must be >= " in value
+            or " must be <= " in value
+        )
+        if is_metric_failure and is_threshold_failure:
+            selected.append(value)
+    return list(dict.fromkeys(selected))
+
+
 def refinement_budget(records: Any) -> dict[str, Any]:
-    """Bound atomic fixes; a recorded strategy change starts one fresh fix cycle."""
+    """Bound review work while allowing useful refinements to keep progressing.
+
+    Legacy records did not store a candidate disposition. They still consume the
+    total attempt budget, but do not fabricate a non-improvement streak.
+    """
 
     used = 0
+    consecutive_non_improvements = 0
     strategy_resets = 0
     if isinstance(records, list):
         strategy_resets = sum(
@@ -70,29 +632,167 @@ def refinement_budget(records: Any) -> dict[str, Any]:
             for record in records
             if isinstance(record, Mapping) and record.get("action") == STRATEGY_RESET_ACTION
         )
+        cycle: list[Mapping[str, Any]] = []
         for record in reversed(records):
             if not isinstance(record, Mapping):
                 continue
             action = record.get("action")
-            if action in REFINEMENT_ACTIONS:
-                used += 1
+            if is_pending_quality_attempt(record):
+                cycle.append(record)
                 continue
             if action == STRATEGY_RESET_ACTION:
                 break
             if action == "stop":
+                if str(record.get("candidateDisposition") or "").startswith("rejected-"):
+                    cycle.append(record)
                 break
             if action == "continue" and record.get("accepted", True) is True:
                 break
-    remaining = max(0, MAX_ATOMIC_REFINEMENT_BATCHES - used)
+        for record in reversed(cycle):
+            used += 1
+            disposition = record.get("candidateDisposition")
+            if disposition in {
+                "rejected-regression",
+                "rejected-preflight-regression",
+                "rejected-no-improvement",
+                "rejected-invalid-lineage",
+                "rejected-incomplete",
+            }:
+                consecutive_non_improvements += 1
+            elif disposition in {"seed", "promoted", "gate-pass"}:
+                consecutive_non_improvements = 0
+    remaining = max(0, MAX_REFINEMENT_ATTEMPTS - used)
+    remaining_non_improvements = max(
+        0,
+        MAX_CONSECUTIVE_NON_IMPROVEMENTS - consecutive_non_improvements,
+    )
+    exhausted = remaining == 0 or remaining_non_improvements == 0
     return {
-        "maximumBatches": MAX_ATOMIC_REFINEMENT_BATCHES,
+        # Keep the old names as compatibility aliases for callers and caches.
+        "maximumBatches": MAX_REFINEMENT_ATTEMPTS,
         "usedBatches": used,
         "remainingBatches": remaining,
-        "exhausted": remaining == 0,
+        "maximumAttempts": MAX_REFINEMENT_ATTEMPTS,
+        "usedAttempts": used,
+        "remainingAttempts": remaining,
+        "maximumConsecutiveNonImprovements": MAX_CONSECUTIVE_NON_IMPROVEMENTS,
+        "consecutiveNonImprovements": consecutive_non_improvements,
+        "remainingNonImprovements": remaining_non_improvements,
+        "exhausted": exhausted,
+        "exhaustedReason": (
+            "three-consecutive-non-improvements"
+            if remaining_non_improvements == 0
+            else "total-attempt-limit"
+            if remaining == 0
+            else ""
+        ),
         "maximumStrategyResets": MAX_STRATEGY_RESETS,
         "usedStrategyResets": strategy_resets,
         "remainingStrategyResets": max(0, MAX_STRATEGY_RESETS - strategy_resets),
     }
+
+
+_CORRECTION_PATH_SEGMENT = re.compile(r"^(?P<key>[A-Za-z][A-Za-z0-9_-]*)(?:\[(?P<index>0|[1-9][0-9]*)\])?$")
+
+
+def review_target_catalog(spec: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Index every semantic correction target by its declared type and exact id."""
+
+    catalog: dict[str, dict[str, Any]] = {
+        target_type: {} for target_type in CORRECTION_TARGET_TYPES
+    }
+    collections = {
+        "component": spec.get("componentTree", []),
+        "material": spec.get("materials", []),
+        "repetition": spec.get("repetitionSystems", []),
+        "feature": spec.get("featureReviewTargets", []),
+    }
+    for target_type, items in collections.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str) and item["id"]:
+                catalog[target_type][str(item["id"])] = item
+    for component in spec.get("componentTree", []):
+        if not isinstance(component, Mapping):
+            continue
+        plan = component.get("detailPlan")
+        features = plan.get("features", []) if isinstance(plan, Mapping) else []
+        if not isinstance(features, list):
+            continue
+        for item in features:
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str) and item["id"]:
+                catalog["detail-feature"][str(item["id"])] = item
+    topology = spec.get("surfaceTopologyPlan")
+    groups = topology.get("groups", []) if isinstance(topology, Mapping) else []
+    if isinstance(groups, list):
+        for item in groups:
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str) and item["id"]:
+                catalog["topology-group"][str(item["id"])] = item
+    interaction = spec.get("interactionContract")
+    affordances = (
+        interaction.get("motionAffordances", [])
+        if isinstance(interaction, Mapping)
+        else []
+    )
+    if isinstance(affordances, list):
+        for item in affordances:
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str) and item["id"]:
+                catalog["motion-affordance"][str(item["id"])] = item
+    globals_by_id: dict[str, Any] = {
+        "spec": spec,
+        "silhouette": spec.get("silhouette", {}),
+        "coordinate-frame": spec.get("coordinateFrame", {}),
+        "camera": spec.get("lookDevTargets", {}),
+        "lighting": {
+            "lightingFromPhoto": spec.get("lightingFromPhoto", []),
+            "lookDevTargets": spec.get("lookDevTargets", {}),
+        },
+        "render-pipeline": (
+            spec.get("viewingContract", {}).get("renderPipeline", {})
+            if isinstance(spec.get("viewingContract"), Mapping)
+            else {}
+        ),
+        "evidence": {"viewEvidence": spec.get("viewEvidence", [])},
+        "performance": spec.get("performanceAudit", spec.get("performanceBudget", {})),
+        "interaction": spec.get("interactionContract", {}),
+        "assembly": spec,
+    }
+    catalog["global"].update(globals_by_id)
+    return catalog
+
+
+def resolve_correction_parameter(
+    catalog: Mapping[str, Mapping[str, Any]],
+    target_type: Any,
+    target_id: Any,
+    parameter_path: Any,
+) -> tuple[bool, Any]:
+    """Resolve a spec-relative correction path without executing selectors or code."""
+
+    if not isinstance(target_type, str) or not isinstance(target_id, str):
+        return False, None
+    if not isinstance(parameter_path, str) or not parameter_path.strip():
+        return False, None
+    target_group = catalog.get(target_type)
+    if not isinstance(target_group, Mapping) or target_id not in target_group:
+        return False, None
+    current: Any = target_group[target_id]
+    for raw_segment in parameter_path.split("."):
+        match = _CORRECTION_PATH_SEGMENT.fullmatch(raw_segment)
+        if match is None or not isinstance(current, Mapping):
+            return False, None
+        key = match.group("key")
+        if key not in current:
+            return False, None
+        current = current[key]
+        index_text = match.group("index")
+        if index_text is not None:
+            index = int(index_text)
+            if not isinstance(current, list) or index >= len(current):
+                return False, None
+            current = current[index]
+    return True, current
 
 
 def correction_batch_from_verdict(verdict: Any) -> dict[str, Any]:
@@ -107,8 +807,12 @@ def correction_batch_from_verdict(verdict: Any) -> dict[str, Any]:
             "id": str(issue.get("id")),
             "rootCauseKey": str(issue.get("rootCauseKey")),
             "severity": str(issue.get("severity")),
+            "failureClass": str(issue.get("failureClass")),
+            "targetType": str(issue.get("targetType")),
             "target": str(issue.get("target")),
             "reason": str(issue.get("reason")),
+            "observedMismatch": copy.deepcopy(issue.get("observedMismatch")),
+            "evidenceCheck": str(issue.get("evidenceCheck")),
         }
         for issue in verdict.get("issues", [])
         if isinstance(issue, Mapping)
@@ -130,16 +834,39 @@ def correction_batch_from_verdict(verdict: Any) -> dict[str, Any]:
             {
                 "sequence": index + 1,
                 "issueId": str(correction.get("issueId")),
+                "packId": str(correction.get("packId") or ""),
+                "operatorId": str(correction.get("operatorId") or ""),
                 "scope": normalized_scope,
+                "targetType": str(correction.get("targetType")),
                 "target": str(correction.get("target")),
                 "parameterPath": str(correction.get("parameterPath")),
+                "operation": str(correction.get("operation")),
+                "beforeValue": copy.deepcopy(correction.get("beforeValue")),
+                "value": copy.deepcopy(correction.get("value")),
+                "expectedValue": copy.deepcopy(correction.get("expectedValue")),
+                "unit": str(correction.get("unit")),
                 "change": str(correction.get("change")),
-                "expectedDelta": str(correction.get("expectedDelta")),
+                "expectedDelta": copy.deepcopy(correction.get("expectedDelta")),
+                "expectedVisualEffect": str(
+                    correction.get("expectedVisualEffect")
+                    or correction.get("change")
+                    or ""
+                ),
+                "falsifyingView": str(
+                    correction.get("falsifyingView")
+                    or (
+                        correction.get("expectedDelta", {}).get("viewIds", [""])[0]
+                        if isinstance(correction.get("expectedDelta"), Mapping)
+                        and isinstance(correction.get("expectedDelta", {}).get("viewIds"), list)
+                        and correction.get("expectedDelta", {}).get("viewIds")
+                        else ""
+                    )
+                ),
             }
         )
     return {
         "artifactType": "threejs-sculpt-correction-batch",
-        "version": 1,
+        "version": 2,
         "batchId": str(verdict.get("reviewId") or "refinement"),
         "action": action,
         "atomic": True,
@@ -149,6 +876,7 @@ def correction_batch_from_verdict(verdict: Any) -> dict[str, Any]:
         "scopes": sorted(scopes),
         "corrections": corrections,
         "correctionCount": len(corrections),
+        "impactAssessment": copy.deepcopy(verdict.get("impactAssessment")),
         "executionPolicy": "apply-all-corrections-before-render",
         "reviewPolicy": "one-render-and-one-review-after-the-complete-batch",
     }
@@ -158,6 +886,7 @@ def correction_batch_from_plan(
     action: Any,
     batch_id: Any,
     plan: Any,
+    impact_assessment: Any = None,
 ) -> dict[str, Any]:
     """Keep the legacy manual correction plan on the same atomic execution contract."""
 
@@ -174,28 +903,53 @@ def correction_batch_from_plan(
         issues.append(
             {
                 "id": issue_id,
+                "rootCauseKey": issue_id,
+                "failureClass": "other",
                 "severity": "major",
-                "target": str(item.get("target") or "model"),
+                "targetType": str(item.get("targetType")),
+                "target": str(item.get("target")),
                 "reason": reason,
+                "observedMismatch": {
+                    "parameterPath": str(item.get("parameterPath")),
+                    "actual": copy.deepcopy(item.get("beforeValue")),
+                    "expected": copy.deepcopy(item.get("expectedValue")),
+                    "unit": str(item.get("unit")),
+                    "tolerance": copy.deepcopy(
+                        item.get("expectedDelta", {}).get("tolerance")
+                        if isinstance(item.get("expectedDelta"), Mapping)
+                        else None
+                    ),
+                    "viewIds": copy.deepcopy(
+                        item.get("expectedDelta", {}).get("viewIds", [])
+                        if isinstance(item.get("expectedDelta"), Mapping)
+                        else []
+                    ),
+                },
+                "evidenceCheck": reason,
             }
         )
-        value = f" to {item.get('value')!r}" if "value" in item else ""
         corrections.append(
             {
                 "sequence": index + 1,
                 "issueId": issue_id,
                 "scope": scope,
-                "target": str(item.get("target") or "model"),
-                "parameterPath": str(item.get("parameterPath") or "unspecified"),
-                "change": f"{item.get('action', 'update')}{value}: {reason}",
-                "expectedDelta": reason,
+                "targetType": str(item.get("targetType")),
+                "target": str(item.get("target")),
+                "parameterPath": str(item.get("parameterPath")),
+                "operation": str(item.get("operation")),
+                "beforeValue": copy.deepcopy(item.get("beforeValue")),
+                "value": copy.deepcopy(item.get("value")),
+                "expectedValue": copy.deepcopy(item.get("expectedValue")),
+                "unit": str(item.get("unit")),
+                "change": reason,
+                "expectedDelta": copy.deepcopy(item.get("expectedDelta")),
             }
         )
     if not corrections:
         return {}
     return {
         "artifactType": "threejs-sculpt-correction-batch",
-        "version": 1,
+        "version": 2,
         "batchId": str(batch_id or "manual-refinement"),
         "action": str(action),
         "atomic": True,
@@ -204,6 +958,7 @@ def correction_batch_from_plan(
         "scopes": [scope],
         "corrections": corrections,
         "correctionCount": len(corrections),
+        "impactAssessment": copy.deepcopy(impact_assessment),
         "executionPolicy": "apply-all-corrections-before-render",
         "reviewPolicy": "one-render-and-one-review-after-the-complete-batch",
     }
@@ -241,6 +996,28 @@ def component_type(component: Mapping[str, Any]) -> str:
     """Return the additive component kind; legacy components are geometry parts."""
     value = component.get("componentType", "part")
     return value if isinstance(value, str) else str(value)
+
+
+def detail_feature_count(spec: Mapping[str, Any]) -> int:
+    """Count explicitly inventoried details, falling back for legacy specs."""
+
+    plans_seen = False
+    count = 0
+    legacy_count = 0
+    for component in spec.get("componentTree", []):
+        if not isinstance(component, Mapping) or component_type(component) == "assembly":
+            continue
+        local_features = component.get("localFeatures")
+        if isinstance(local_features, list):
+            legacy_count += len(local_features)
+        plan = component.get("detailPlan")
+        if not isinstance(plan, Mapping):
+            continue
+        plans_seen = True
+        features = plan.get("features")
+        if isinstance(features, list):
+            count += len(features)
+    return count if plans_seen else legacy_count
 
 
 def parse_json(text: str, label: str = "JSON") -> Any:
@@ -429,7 +1206,7 @@ def visual_evidence_integrity_failures(evidence: Any) -> list[str]:
             else:
                 origin = provenance.get("origin")
                 allowed_use = provenance.get("allowedUse")
-                if origin not in {"observed", "synthetic-hypothesis"}:
+                if origin not in {"observed", "prepared-reference", "synthetic-hypothesis"}:
                     failures.append(f"{label} referenceProvenance.origin is invalid")
                 if allowed_use not in {"acceptance", "planning-veto"}:
                     failures.append(f"{label} referenceProvenance.allowedUse is invalid")
@@ -522,9 +1299,9 @@ def visual_evidence_authority_failures(
         if not isinstance(provenance, dict):
             failures.append(f"visual evidence view {index} has invalid reference provenance")
             continue
-        if provenance.get("origin") != "observed":
+        if provenance.get("origin") not in {"observed", "prepared-reference"}:
             failures.append(
-                f"visual evidence view {index} uses a synthetic hypothesis, not observed acceptance truth"
+                f"visual evidence view {index} uses a synthetic hypothesis, not acceptance reference truth"
             )
         if provenance.get("allowedUse") != "acceptance":
             failures.append(
@@ -597,8 +1374,12 @@ def _visual_pass(
     required_layers: dict[str, float],
     required_views: list[str] | None = None,
     diagnostic_views: list[str] | None = None,
+    *,
+    owned_layers: list[str] | None = None,
+    visual_baseline_pass_id: str | None = None,
+    preserve_layers: list[str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": pass_id,
         "label": label,
         "objective": objective,
@@ -608,29 +1389,86 @@ def _visual_pass(
         "requiredViews": required_views or ["primary"],
         "diagnosticViews": diagnostic_views or [],
         "requiredLayerScores": required_layers,
+        "ownedLayers": owned_layers or list(required_layers),
+        "minimumRefinementDelta": MIN_REFINEMENT_SCORE_DELTA,
+        "maximumVisualRegression": MAX_REFINEMENT_REGRESSION,
     }
+    if visual_baseline_pass_id:
+        payload["visualBaselinePassId"] = visual_baseline_pass_id
+        payload["preserveLayers"] = preserve_layers or []
+    return payload
 
 
 def build_pass_plan(
     complexity: str = "moderate",
-    intended_use: str = "browser-prop",
+    intended_use: str | None = None,
     quality_profile: str = "balanced",
+    *,
+    interaction_required: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """Return the smallest pass plan that still covers relevant quality dimensions."""
+    """Return the quality-first pipeline.
+
+    ``intended_use`` remains only as a migration hint. New specs decide whether
+    to append interaction from their explicit interaction contract. Performance
+    is a separate optional audit and never a modeling pass.
+    """
     reference_fidelity = quality_profile == "reference-fidelity"
     diagnostic_views = adaptive_hypothesis_views(complexity, quality_profile)
-    blockout_layers = {"silhouette": 0.85} if reference_fidelity else {"silhouette": 0.72}
-    structure_layers = {"structure": 0.84} if reference_fidelity else {"structure": 0.72}
+    strict = 0.84 if reference_fidelity else 0.72
+    blockout_layers = {
+        "silhouette": 0.85 if reference_fidelity else 0.72,
+        "assemblyCorrectness": strict,
+        "proportionBalance": strict,
+        "shapeSilhouette": strict,
+    }
     form_layers = (
-        {"silhouette": 0.86, "structure": 0.84, "formDetail": 0.82}
+        {
+            "silhouette": 0.86,
+            "structure": 0.84,
+            "formDetail": 0.82,
+            "assemblyCorrectness": 0.86,
+            "proportionBalance": 0.85,
+            "shapeSilhouette": 0.85,
+            "signatureDetail": 0.80,
+        }
         if reference_fidelity
-        else {"silhouette": 0.76, "structure": 0.74}
+        else {
+            "silhouette": 0.76,
+            "structure": 0.74,
+            "formDetail": 0.72,
+            "assemblyCorrectness": 0.76,
+            "proportionBalance": 0.74,
+            "shapeSilhouette": 0.74,
+            "signatureDetail": 0.68,
+        }
     )
     lookdev_layers = (
-        {"material": 0.85, "lighting": 0.80}
+        {
+            "material": 0.85,
+            "lighting": 0.80,
+            "materialPlausibility": 0.84,
+            "surfaceQuality": 0.82,
+        }
         if reference_fidelity
-        else {"material": 0.72, "lighting": 0.68}
+        else {
+            "material": 0.72,
+            "lighting": 0.68,
+            "materialPlausibility": 0.72,
+            "surfaceQuality": 0.68,
+        }
     )
+
+    def sanity(categories: list[str]) -> dict[str, Any]:
+        return {
+            "obviousErrorVeto": True,
+            "requiredCategories": categories,
+            "reviewRule": (
+                "Inspect every required category once, list all visible actionable issues in one "
+                "verdict, and reject any critical or major wrong placement, imbalance, wrong form, "
+                "implausible material, or identity-detail defect regardless of average score."
+            ),
+        }
+
     passes = [
         _visual_pass(
             "blockout",
@@ -641,35 +1479,35 @@ def build_pass_plan(
                 "Primary masses and framing are correct before detail work.",
             ],
             blockout_layers,
-            diagnostic_views=diagnostic_views,
+            # Synthetic views guide construction only; observed evidence still
+            # owns Blockout acceptance.
+            diagnostic_views=[],
+            owned_layers=list(blockout_layers),
         )
     ]
-    if complexity in {"complex", "ultra"}:
-        passes.append(
-            _visual_pass(
-                "structure",
-                "Cấu trúc",
-                "Resolve hierarchy, attachments, joints, and medium-scale forms.",
-                [
-                    "All major child parts attach cleanly to their parent.",
-                    "No floating joints or accidental gaps are visible.",
-                ],
-                structure_layers,
-                diagnostic_views=diagnostic_views,
-            )
-        )
+    passes[0]["visualSanity"] = sanity(
+        ["assemblyCorrectness", "proportionBalance", "shapeSilhouette"]
+    )
     passes.append(
         _visual_pass(
             "form",
             "Hoàn thiện hình",
-            "Refine shape and the visible forms needed by the selected complexity tier.",
+            "Resolve structure, attachments, proportions, shape, and visible identity details.",
             [
                 "Macro and required meso forms match the reference.",
-                "Proportion and attachment errors found in the previous review are resolved.",
+                "All major child parts attach to the correct parent, position, orientation, and scale.",
+                "No obvious imbalance, floating joint, accidental intersection, or implausible form remains.",
+                "Signature details required to identify the object are present and proportionate.",
             ],
             form_layers,
             diagnostic_views=diagnostic_views,
+            owned_layers=list(form_layers),
+            visual_baseline_pass_id="blockout",
+            preserve_layers=list(blockout_layers),
         )
+    )
+    passes[-1]["visualSanity"] = sanity(
+        ["assemblyCorrectness", "proportionBalance", "shapeSilhouette", "signatureDetail"]
     )
     lookdev_views = ["reference"]
     if quality_profile == "reference-fidelity":
@@ -686,52 +1524,56 @@ def build_pass_plan(
             ],
             lookdev_layers,
             lookdev_views,
-            diagnostic_views,
+            [],
+            owned_layers=list(lookdev_layers),
+            visual_baseline_pass_id="form",
+            preserve_layers=list(form_layers),
         )
     )
-    if intended_use in INTERACTIVE_USES:
+    passes[-1]["visualSanity"] = sanity(
+        ["materialPlausibility", "surfaceQuality"]
+    )
+    if interaction_required is None:
+        interaction_required = intended_use in INTERACTIVE_USES
+    if interaction_required:
         passes.append(
             {
                 "id": "interaction",
                 "label": "Tương tác",
-                "objective": "Validate only the runtime behavior required by the intended use.",
+                "objective": "Validate only evidence-backed or user-requested motion affordances.",
                 "componentRefs": ["root"],
                 "acceptance": [
-                    "Required pivots, sockets, animation groups, and colliders work at runtime.",
+                    "Every active motion targets an exact component id with numeric pivot, axis, and limits/rate.",
+                    "No component intersects, detaches, or moves implausibly across its tested key states.",
                     "The model remains stable before, during, and after interaction.",
                 ],
                 "evidenceType": "runtime",
-                "requiredRuntimeChecks": ["loads", "transforms", "interaction"],
-            }
-        )
-    if intended_use in REALTIME_USES:
-        optimization_layers = {
-            "silhouette": form_layers["silhouette"],
-            **lookdev_layers,
-        }
-        passes.append(
-            {
-                "id": "optimization",
-                "label": "Hiệu năng",
-                "objective": "Measure the final model against the real-time budget without changing its look.",
-                "componentRefs": ["root"],
-                "acceptance": [
-                    "Measured FPS meets the target on the declared test device.",
-                    "Draw calls and triangle count stay within the declared budget.",
-                    "A nearby unchanged workflow still loads after optimization.",
+                "requiredRuntimeChecks": [
+                    "loads",
+                    "transforms",
+                    "interaction",
+                    "motion-clearance",
+                    "visual-no-regression",
                 ],
-                "evidenceType": "metrics",
-                "requiredMetrics": ["fps", "drawCalls", "triangles"],
-                "requiredArtifacts": ["performanceCapture"],
-                "requiredPostOptimizationVisualReview": True,
-                "requiredViews": lookdev_views,
-                "diagnosticViews": diagnostic_views,
-                "requiredLayerScores": optimization_layers,
-                "visualBaselinePassId": "lookdev",
-                "maximumVisualRegression": 0.02,
             }
         )
     return passes
+
+
+def interaction_required(spec: Mapping[str, Any]) -> bool:
+    """Return whether the Interaction phase must remain on the active plan.
+
+    An unassessed object keeps the phase visible so the LLM cannot silently
+    finish after Lookdev without applying object-class motion knowledge. Once
+    it records a justified ``not-required`` decision, sync removes the phase;
+    a required contract keeps the runtime gate active.
+    """
+
+    contract = spec.get("interactionContract")
+    if isinstance(contract, Mapping):
+        return contract.get("status") != "not-required"
+    readiness = spec.get("actionReadiness")
+    return isinstance(readiness, Mapping) and readiness.get("enabled") is True
 
 
 def pass_order(spec: dict[str, Any]) -> list[str]:
@@ -745,11 +1587,16 @@ def pass_order(spec: dict[str, Any]) -> list[str]:
             item["id"]
             for item in build_pass_plan(
                 _spec_complexity(spec),
-                str(spec.get("intendedUse") or "browser-prop"),
+                None,
                 str(spec.get("qualityProfile") or "balanced"),
+                interaction_required=interaction_required(spec),
             )
         ]
-        return [*expected, *(item for item in ids if item not in expected)]
+        retired = {"structure", "structural-pass", "optimization", "optimization-pass"}
+        return [
+            *expected,
+            *(item for item in ids if item not in expected and item not in retired),
+        ]
     return ids or DEFAULT_PASS_ORDER.copy()
 
 
@@ -775,8 +1622,9 @@ def effective_pass_config(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
             item
             for item in build_pass_plan(
                 _spec_complexity(spec),
-                str(spec.get("intendedUse") or "browser-prop"),
+                None,
                 str(spec.get("qualityProfile") or "balanced"),
+                interaction_required=interaction_required(spec),
             )
             if item.get("id") == pass_id
         ),
@@ -793,12 +1641,24 @@ def effective_pass_config(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
         "requiredMetrics",
         "requiredArtifacts",
         "requiredRuntimeChecks",
+        "ownedLayers",
+        "preserveLayers",
     ):
         minimum = canonical.get(key)
         selected = configured.get(key)
         if isinstance(minimum, list):
             values = [item for item in selected if isinstance(item, str)] if isinstance(selected, list) else []
             merged[key] = list(dict.fromkeys([*minimum, *values]))
+    if pass_id in {"structure", "form", "structural-pass", "form-refinement"}:
+        policy = spec.get("viewHypothesisPolicy")
+        if isinstance(policy, Mapping):
+            decision = policy.get("decision")
+            hypotheses_active = policy.get("enabled") is True and decision not in {
+                "not-needed",
+                "not-applicable",
+            }
+            if not hypotheses_active:
+                merged["diagnosticViews"] = []
     minimum_layers = canonical.get("requiredLayerScores")
     selected_layers = configured.get("requiredLayerScores")
     if isinstance(minimum_layers, dict):
@@ -810,13 +1670,54 @@ def effective_pass_config(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
         merged["requiredLayerScores"] = merged_layers
     if canonical.get("requiredPostOptimizationVisualReview") is True:
         merged["requiredPostOptimizationVisualReview"] = True
-        configured_tolerance = configured.get("maximumVisualRegression")
-        canonical_tolerance = canonical.get("maximumVisualRegression", 0.02)
+    if isinstance(canonical.get("visualBaselinePassId"), str):
+        merged["visualBaselinePassId"] = canonical["visualBaselinePassId"]
+    configured_tolerance = configured.get("maximumVisualRegression")
+    canonical_tolerance = canonical.get("maximumVisualRegression")
+    if is_number(canonical_tolerance):
         merged["maximumVisualRegression"] = (
             min(float(configured_tolerance), float(canonical_tolerance))
             if is_number(configured_tolerance) and float(configured_tolerance) >= 0
             else canonical_tolerance
         )
+    configured_delta = configured.get("minimumRefinementDelta")
+    canonical_delta = canonical.get("minimumRefinementDelta")
+    if is_number(canonical_delta):
+        merged["minimumRefinementDelta"] = (
+            max(float(configured_delta), float(canonical_delta))
+            if is_number(configured_delta)
+            else canonical_delta
+        )
+    configured_overall = configured.get("minimumOverallScore")
+    canonical_overall = canonical.get("minimumOverallScore")
+    if is_number(canonical_overall):
+        merged["minimumOverallScore"] = (
+            max(float(configured_overall), float(canonical_overall))
+            if is_number(configured_overall)
+            else canonical_overall
+        )
+    # New specs use a lightweight visual gate.  Keep the legacy profile
+    # targets in the source spec as aspirational guidance, but do not let them
+    # silently recreate the old four-layer hard gate at execution time.
+    if simplified_visual_gate_enabled(spec, pass_id):
+        merged["minimumOverallScore"] = SIMPLIFIED_AI_OVERALL_FLOOR
+        merged["requiredLayerScores"] = {}
+        merged["ownedLayers"] = []
+        # Later phases may change form/materials; their protection comes from
+        # the comparison artifact, scout, and human approval rather than
+        # mandatory duplicate layer scores.
+        merged["preserveLayers"] = []
+        merged["maximumVisualRegression"] = 0.10 if pass_id != "blockout" else 0.0
+        # A two-decimal composite improvement is enough to move the champion
+        # in the lightweight loop; requiring the legacy 0.02 delta made
+        # ordinary 0.80 -> 0.82 refinements fail on floating-point boundaries.
+        merged["minimumRefinementDelta"] = 0.01
+        sanity = merged.get("visualSanity")
+        if isinstance(sanity, dict):
+            sanity = copy.deepcopy(sanity)
+            sanity["requiredCategories"] = []
+            merged["visualSanity"] = sanity
+        merged["qualityGateMode"] = "ai-scout-human"
     return merged
 
 
@@ -831,20 +1732,210 @@ def evidence_type(spec: dict[str, Any], pass_id: str) -> str:
     return "visual"
 
 
+def phase_execution_version(spec: Mapping[str, Any]) -> int:
+    contract = spec.get("phaseExecutionContract")
+    version = contract.get("version") if isinstance(contract, Mapping) else None
+    return int(version) if isinstance(version, int) and not isinstance(version, bool) else 0
+
+
+def simplified_visual_gate_enabled(
+    spec: Mapping[str, Any],
+    pass_id: str | None = None,
+) -> bool:
+    """Return whether the v4 lightweight visual gate applies to a pass."""
+
+    if phase_execution_version(spec) < SIMPLIFIED_PHASE_EXECUTION_VERSION:
+        return False
+    if pass_id is None:
+        return True
+    configured = pass_config(dict(spec), pass_id)
+    configured_kind = configured.get("evidenceType")
+    if configured_kind in {"runtime", "metrics"}:
+        return False
+    return pass_id not in RUNTIME_PASS_IDS and pass_id not in METRICS_PASS_IDS
+
+
+def visual_gate_threshold(spec: Mapping[str, Any], pass_id: str) -> float:
+    """Return the executable AI threshold, distinct from aspirational fidelity."""
+
+    if simplified_visual_gate_enabled(spec, pass_id):
+        return SIMPLIFIED_AI_OVERALL_FLOOR
+    configured = pass_config(dict(spec), pass_id)
+    minimum = configured.get("minimumOverallScore")
+    if is_number(minimum):
+        return float(minimum)
+    return visual_acceptance_threshold(dict(spec))
+
+
 def spec_content_hash(spec: dict[str, Any]) -> str:
     stable = {key: value for key, value in spec.items() if key not in DERIVED_SPEC_FIELDS}
     encoded = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
+def generation_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, Any]:
+    """Return exactly the phase-owned inputs consumed by generated TypeScript.
+
+    The generator uses this projection as well as hashing it. This keeps a
+    Lookdev or Interaction edit from changing Blockout source/receipts while
+    preserving the guarantee that every hashed input can affect generated code.
+    """
+
+    canonical = (
+        "form" if pass_id in {"structure", "structural-pass", "form-refinement"}
+        else "lookdev" if pass_id in {"material-pass", "surface-pass", "lighting-pass"}
+        else "interaction" if pass_id in RUNTIME_PASS_IDS
+        else pass_id
+    )
+    ids = pass_order(dict(spec))
+    selected_index = ids.index(pass_id) if pass_id in ids else 0
+    selected_ids = set(ids[: selected_index + 1])
+    build_passes = [
+        {
+            key: copy.deepcopy(item.get(key))
+            for key in ("id", "componentRefs")
+            if key in item
+        }
+        for item in spec.get("buildPasses", [])
+        if isinstance(item, Mapping) and item.get("id") in selected_ids
+    ]
+    explicit_refs = {
+        str(component_id)
+        for item in build_passes
+        for component_id in (
+            item.get("componentRefs", [])
+            if isinstance(item.get("componentRefs"), list)
+            else []
+        )
+        if str(component_id).strip()
+    }
+    all_components = [
+        item for item in spec.get("componentTree", []) if isinstance(item, Mapping)
+    ]
+    component_by_id = {
+        str(item.get("id")): item
+        for item in all_components
+        if isinstance(item.get("id"), str) and str(item.get("id")).strip()
+    }
+    allowed_levels = {
+        "blockout": {"macro"},
+        "form": {"macro", "meso", "micro"},
+        "lookdev": {"macro", "meso", "micro"},
+        "interaction": {"macro", "meso", "micro"},
+    }.get(canonical, {"macro", "meso", "micro"})
+    included_ids: set[str] = set()
+
+    def include_with_parent(item: Mapping[str, Any]) -> None:
+        component_id = str(item.get("id") or "")
+        if not component_id or component_id in included_ids:
+            return
+        parent_id = item.get("parent")
+        if parent_id is not None and str(parent_id) in component_by_id:
+            include_with_parent(component_by_id[str(parent_id)])
+        included_ids.add(component_id)
+
+    for item in all_components:
+        component_id = str(item.get("id") or "")
+        level = str(item.get("level") or "macro")
+        tier = str(item.get("fidelityTier") or "")
+        if component_id in explicit_refs or level in allowed_levels or tier == pass_id:
+            include_with_parent(item)
+    if not included_ids and all_components:
+        include_with_parent(all_components[0])
+
+    geometry_fields = {
+        "id",
+        "name",
+        "componentType",
+        "parent",
+        "level",
+        "fidelityTier",
+        "primitive",
+        "dimensions",
+        "transform",
+        "attachment",
+        "geometryDescriptor",
+        "blockoutProxy",
+    }
+    components: list[dict[str, Any]] = []
+    for item in all_components:
+        if str(item.get("id") or "") not in included_ids:
+            continue
+        fields = set(geometry_fields)
+        if canonical in {"form", "lookdev", "interaction"}:
+            fields.add("localFeatures")
+        if canonical in {"lookdev", "interaction"}:
+            fields.update({"material", "surfaceDetail"})
+        if canonical == "interaction":
+            fields.add("actionProfile")
+        projected = {
+            key: copy.deepcopy(value)
+            for key, value in item.items()
+            if key in fields
+        }
+        if canonical in {"blockout", "form"}:
+            projected["material"] = "__phase-neutral__"
+            features = projected.get("localFeatures")
+            if isinstance(features, list):
+                projected["localFeatures"] = [
+                    {key: copy.deepcopy(value) for key, value in feature.items() if key != "material"}
+                    for feature in features
+                    if isinstance(feature, Mapping)
+                ]
+        components.append(projected)
+
+    neutral_material = {
+        "id": "__phase-neutral__",
+        "baseColor": "#8A8F98",
+        "roughness": 0.82,
+        "metalness": 0.0,
+    }
+    result: dict[str, Any] = {
+        "targetName": spec.get("targetName"),
+        "qualityProfile": spec.get("qualityProfile"),
+        "buildPasses": build_passes,
+        "componentTree": components,
+        "materials": (
+            [neutral_material]
+            if canonical in {"blockout", "form"}
+            else copy.deepcopy(spec.get("materials", []))
+        ),
+        "repetitionSystems": (
+            []
+            if canonical == "blockout"
+            else copy.deepcopy(spec.get("repetitionSystems", []))
+        ),
+        "lookDevTargets": (
+            copy.deepcopy(spec.get("lookDevTargets", {}))
+            if canonical in {"lookdev", "interaction"}
+            else {}
+        ),
+        "lightingFromPhoto": (
+            copy.deepcopy(spec.get("lightingFromPhoto", []))
+            if canonical in {"lookdev", "interaction"}
+            else []
+        ),
+    }
+    assessment = spec.get("preSpecAssessment")
+    if canonical in {"form", "lookdev", "interaction"} and isinstance(
+        assessment, Mapping
+    ):
+        result["preSpecAssessment"] = {
+            "specializedRegions": copy.deepcopy(
+                assessment.get("specializedRegions", {})
+            )
+        }
+    return result
+
+
 def generation_validation_hash(spec: dict[str, Any], pass_id: str) -> str:
-    """Bind an in-process validation result to the exact spec and generation pass."""
+    """Bind validation/generation to the exact phase-owned generation inputs."""
 
     encoded = json.dumps(
         {
-            "contract": "threejs-sculpt-generation-validation-v1",
+            "contract": "threejs-sculpt-generation-validation-v2",
             "passId": pass_id,
-            "spec": spec,
+            "spec": generation_spec_projection(spec, pass_id),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -863,6 +1954,8 @@ def sculpt_representation_signature(spec: dict[str, Any]) -> str:
                 "id", "type", "kind", "mode", "primitive", "strategy", "operation",
                 "method", "algorithm", "componentRef", "componentRefs", "hostComponentRef",
                 "parentId", "requiredTopology", "topology", "closed",
+                "decompositionMode", "observedComplexity", "featureClass", "geometryEffect",
+                "targetId", "implementationId", "parameterPath", "hostComponentId",
             }
             return {
                 str(key): structural_descriptor(item)
@@ -891,7 +1984,9 @@ def sculpt_representation_signature(spec: dict[str, Any]) -> str:
                 if key in component
             } | {
                 key: structural_descriptor(component.get(key))
-                for key in ("geometryDescriptor", "modifiers", "attachment", "localFeatures")
+                for key in (
+                    "geometryDescriptor", "modifiers", "attachment", "localFeatures", "detailPlan"
+                )
                 if key in component
             }
         )
@@ -907,6 +2002,9 @@ def sculpt_representation_signature(spec: dict[str, Any]) -> str:
         {
             "contract": "threejs-sculpt-representation-v1",
             "surfaceTopologyPlan": topology_groups,
+            "detailDecompositionContract": structural_descriptor(
+                spec.get("detailDecompositionContract", {})
+            ),
             "componentTree": components,
             "repetitionSystems": structural_descriptor(spec.get("repetitionSystems", [])),
             "specializedRegions": structural_descriptor(spec.get("specializedRegions", {})),
@@ -917,6 +2015,96 @@ def sculpt_representation_signature(spec: dict[str, Any]) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def phase_quality_targets(spec: Mapping[str, Any], pass_id: str) -> dict[str, Any]:
+    """Project global quality targets to the fields that one phase can improve."""
+
+    targets = spec.get("qualityTargets")
+    if not isinstance(targets, Mapping):
+        return {}
+    canonical = (
+        "form" if pass_id in {"structure", "structural-pass", "form-refinement"}
+        else "lookdev" if pass_id in {"material-pass", "surface-pass", "lighting-pass"}
+        else "interaction" if pass_id in RUNTIME_PASS_IDS
+        else pass_id
+    )
+    lookdev_tokens = (
+        "material",
+        "lighting",
+        "color",
+        "roughness",
+        "gloss",
+        "wear",
+        "highlight",
+        "surface response",
+    )
+    blockout_tokens = (
+        "silhouette",
+        "proportion",
+        "structure",
+        "mass",
+        "framing",
+    )
+
+    def strings(field: str) -> list[str]:
+        value = targets.get(field)
+        return [str(item) for item in value if isinstance(item, str) and item.strip()] if isinstance(value, list) else []
+
+    must_match = strings("mustMatch")
+    nice_to_have = strings("niceToHave")
+    if canonical == "blockout":
+        must_match = [
+            item for item in must_match if any(token in item.lower() for token in blockout_tokens)
+        ]
+        nice_to_have = []
+    elif canonical == "form":
+        must_match = [
+            item for item in must_match if not any(token in item.lower() for token in lookdev_tokens)
+        ]
+        nice_to_have = [
+            item for item in nice_to_have if not any(token in item.lower() for token in lookdev_tokens)
+        ]
+
+    diagnostic_fields = {
+        "blockout": {
+            "maximumCentroidDelta",
+            "maximumAspectRatioDelta",
+            "acceptanceAuthority",
+            "guardrailMode",
+        },
+        "form": {
+            "maximumCentroidDelta",
+            "maximumAspectRatioDelta",
+            "minimumDetailEnergyRatio",
+            "minimumEdgeDensityRatio",
+            "acceptanceAuthority",
+            "guardrailMode",
+        },
+    }.get(canonical)
+    diagnostics = targets.get("diagnosticTargets")
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    if diagnostic_fields is not None:
+        diagnostics = {
+            key: copy.deepcopy(value)
+            for key, value in diagnostics.items()
+            if key in diagnostic_fields
+        }
+    else:
+        diagnostics = copy.deepcopy(dict(diagnostics))
+
+    projection: dict[str, Any] = {}
+    if "targetFidelity" in targets:
+        projection["targetFidelity"] = copy.deepcopy(targets.get("targetFidelity"))
+    if must_match:
+        projection["mustMatch"] = must_match
+    if nice_to_have and canonical in {"form", "lookdev"}:
+        projection["niceToHave"] = nice_to_have
+    if canonical == "lookdev" and isinstance(targets.get("reviewViewpoints"), list):
+        projection["reviewViewpoints"] = copy.deepcopy(targets.get("reviewViewpoints"))
+    if diagnostics:
+        projection["diagnosticTargets"] = diagnostics
+    return projection
 
 
 def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
@@ -930,25 +2118,91 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
         "targetId",
         "schemaVersion",
         "intendedUse",
+        "legacyIntent",
         "qualityProfile",
         "sourceImage",
+        "referencePreparation",
         "suitability",
-        "preSpecAssessment",
-        "surfaceTopologyPlan",
-        "qualityContract",
         "coordinateFrame",
         "silhouette",
         "viewEvidence",
-        "viewHypothesisPolicy",
         "reviewGovernance",
     )
     payload: dict[str, Any] = {key: spec.get(key) for key in base_fields}
+    quality_contract = spec.get("qualityContract")
+    if isinstance(quality_contract, Mapping):
+        minimum_depth = quality_contract.get("minimumSpecDepth")
+        minimum_depth = minimum_depth if isinstance(minimum_depth, Mapping) else {}
+        depth_fields = (
+            ("macroComponents",)
+            if pass_id == "blockout"
+            else ("macroComponents", "mesoComponents", "microFeatureGroups", "repetitionSystems")
+            if pass_id in {"structure", "form", "structural-pass", "form-refinement"}
+            else ("materialLayers", "reviewViewpoints")
+            if pass_id in {"lookdev", "material-pass", "surface-pass", "lighting-pass"}
+            else ()
+        )
+        feature_groups = quality_contract.get("featureGroups")
+        feature_groups = feature_groups if isinstance(feature_groups, list) else []
+        if pass_id in {"blockout", "structure", "form", "structural-pass", "form-refinement"}:
+            feature_groups = [
+                copy.deepcopy(item)
+                for item in feature_groups
+                if isinstance(item, Mapping)
+                and item.get("id") in {"overall-silhouette", "primary-structure"}
+            ]
+        else:
+            feature_groups = [
+                copy.deepcopy(item) for item in feature_groups if isinstance(item, Mapping)
+            ]
+        payload["qualityContract"] = {
+            "qualityBar": quality_contract.get("qualityBar"),
+            "qualityProfile": quality_contract.get("qualityProfile"),
+            "minimumSpecDepth": {
+                key: copy.deepcopy(minimum_depth.get(key))
+                for key in depth_fields
+                if key in minimum_depth
+            },
+            "featureGroups": feature_groups,
+        }
+    assessment = spec.get("preSpecAssessment")
+    if isinstance(assessment, Mapping):
+        object_class = assessment.get("objectClass")
+        object_class = object_class if isinstance(object_class, Mapping) else {}
+        complexity = assessment.get("complexity")
+        complexity = complexity if isinstance(complexity, Mapping) else {}
+        if pass_id == "blockout":
+            payload["preSpecAssessment"] = {
+                "objectClass": {
+                    key: object_class.get(key)
+                    for key in ("primaryType", "formLanguage", "structureKind")
+                },
+                "complexity": {"tier": complexity.get("tier")},
+            }
+        elif pass_id in {"structure", "form", "structural-pass", "form-refinement"}:
+            payload["preSpecAssessment"] = {
+                "objectClass": {
+                    key: object_class.get(key)
+                    for key in ("primaryType", "formLanguage", "structureKind")
+                },
+                "complexity": copy.deepcopy(complexity),
+                "specDepthDecision": copy.deepcopy(
+                    assessment.get("specDepthDecision", {})
+                ),
+                "specializedRegions": copy.deepcopy(
+                    assessment.get("specializedRegions", {})
+                ),
+            }
+        elif pass_id in {"lookdev", "material-pass", "surface-pass", "lighting-pass"}:
+            payload["preSpecAssessment"] = {
+                "materialFamilies": copy.deepcopy(object_class.get("materialFamilies", []))
+            }
+        elif pass_id in RUNTIME_PASS_IDS:
+            payload["preSpecAssessment"] = {
+                "motionPotential": copy.deepcopy(object_class.get("motionPotential", []))
+            }
     targets = spec.get("qualityTargets") if isinstance(spec.get("qualityTargets"), dict) else {}
-    payload["qualityTargets"] = {
-        key: targets.get(key)
-        for key in ("targetFidelity", "mustMatch")
-        if key in targets
-    }
+    payload["qualityTargets"] = phase_quality_targets(spec, pass_id)
     payload["buildPasses"] = configs
     payload["visualAcceptance"] = (
         spec.get("selfCorrectLoop", {}).get("visualAcceptance", {})
@@ -984,6 +2238,7 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
         "attachment", "deformations", "joints", "seams", "localFeatures", "details",
         "fidelityTier",
     }
+    lookdev_fields = form_fields | {"material", "materialLayers", "surfaceDetail"}
 
     def hash_component(item: dict[str, Any], fields: set[str]) -> dict[str, Any]:
         projected = {key: value for key, value in item.items() if key in fields}
@@ -993,17 +2248,26 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
         return projected
 
     if pass_id == "blockout":
+        payload["viewHypothesisPolicy"] = spec.get("viewHypothesisPolicy", {})
         payload["componentTree"] = [
             hash_component(item, blockout_fields)
             for item in components
             if item.get("level", "macro") == "macro"
         ]
-        if composite_contract:
-            # Repeated geometry may contribute to the v3.1 blockout silhouette.
-            payload["repetitionSystems"] = spec.get("repetitionSystems", [])
     elif pass_id in {"structure", "form", "structural-pass", "form-refinement"}:
+        payload["surfaceTopologyPlan"] = spec.get("surfaceTopologyPlan", {})
+        payload["detailDecompositionContract"] = spec.get(
+            "detailDecompositionContract", {}
+        )
+        payload["viewHypothesisPolicy"] = spec.get("viewHypothesisPolicy", {})
         payload["componentTree"] = [
             hash_component(item, form_fields)
+            for item in components
+        ]
+        payload["repetitionSystems"] = spec.get("repetitionSystems", [])
+    elif pass_id in {"lookdev", "material-pass", "surface-pass", "lighting-pass"}:
+        payload["componentTree"] = [
+            hash_component(item, lookdev_fields)
             for item in components
         ]
         payload["repetitionSystems"] = spec.get("repetitionSystems", [])
@@ -1023,8 +2287,10 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
         payload["lookDevTargets"] = spec.get("lookDevTargets", {})
         payload["lightingFromPhoto"] = spec.get("lightingFromPhoto", [])
     if kind == "runtime":
+        payload["interactionContract"] = spec.get("interactionContract", {})
         payload["actionReadiness"] = spec.get("actionReadiness", {})
     if kind == "metrics":
+        payload["performanceAudit"] = spec.get("performanceAudit", {})
         payload["performanceBudget"] = spec.get("performanceBudget", {})
         payload["lodPlan"] = spec.get("lodPlan", [])
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -1068,27 +2334,313 @@ def review_visual_views(entry: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+_LAYER_SCORE_ALIASES = {
+    "silhouette": ("silhouette", "silhouetteProportion", "macro", "shape"),
+    "structure": ("structure", "componentStructure", "meso", "form", "proportion"),
+    "formDetail": ("formDetail", "form-detail", "detail", "localForm"),
+    "material": ("material", "materialSurface", "surface", "lookdev"),
+    "lighting": ("lighting", "lightingCamera", "light", "shadow"),
+}
+
+
+def _canonical_score_layer(layer: str) -> str:
+    for canonical, aliases in _LAYER_SCORE_ALIASES.items():
+        if layer in aliases:
+            return canonical
+    return layer
+
+
 def _score_for_layer(layer_scores: Any, layer: str) -> float | None:
     if not isinstance(layer_scores, dict):
         return None
-    aliases = {
-        "silhouette": ("silhouette", "macro", "shape"),
-        "structure": ("structure", "meso", "form", "proportion"),
-        "formDetail": ("formDetail", "form-detail", "detail", "localForm"),
-        "material": ("material", "surface", "lookdev"),
-        "lighting": ("lighting", "light", "shadow"),
-    }
-    for key in aliases.get(layer, (layer,)):
+    for key in _LAYER_SCORE_ALIASES.get(layer, (layer,)):
         value = layer_scores.get(key)
         if is_number(value):
             return float(value)
     return None
 
 
-def _diagnostic_targets(spec: dict[str, Any]) -> dict[str, float]:
+def _valid_quality_score(value: Any) -> bool:
+    return is_number(value) and 0 <= float(value) <= 1
+
+
+def _view_diagnostic_quality(view: Mapping[str, Any]) -> dict[str, float]:
+    """Normalize one acceptance view so every deterministic quality signal is comparable."""
+
+    diagnostics = view.get("fitDiagnostics")
+    if not isinstance(diagnostics, Mapping):
+        return {}
+    result: dict[str, float] = {}
+    direct_metrics: dict[str, Any] = {}
+    inverse_metrics = {
+        "centroidAlignment": diagnostics.get("centroidDelta"),
+        "aspectAlignment": diagnostics.get("aspectRatioDelta"),
+        "contourAlignment": diagnostics.get("normalizedContourDistance"),
+    }
+    appearance = diagnostics.get("appearance")
+    if isinstance(appearance, Mapping):
+        direct_metrics.update(
+            {
+                "detailEnergyRatio": appearance.get("detailEnergyRatio"),
+                "edgeDensityRatio": appearance.get("edgeDensityRatio"),
+                "histogramIntersection": appearance.get(
+                    "foregroundHistogramIntersection"
+                ),
+                "highlightCoverageRatio": appearance.get(
+                    "highlightCoverageRatio"
+                ),
+                "highlightEnergyRatio": appearance.get("highlightEnergyRatio"),
+            }
+        )
+        inverse_metrics["meanColorAlignment"] = appearance.get(
+            "foregroundMeanColorDelta"
+        )
+    for metric, value in direct_metrics.items():
+        if _valid_quality_score(value):
+            result[metric] = float(value)
+    for metric, value in inverse_metrics.items():
+        if _valid_quality_score(value):
+            result[metric] = max(0.0, 1.0 - float(value))
+    return result
+
+
+def _acceptance_diagnostic_view(view: Mapping[str, Any]) -> bool:
+    provenance = view.get("referenceProvenance")
+    return not isinstance(provenance, Mapping) or (
+        provenance.get("origin") in {"observed", "prepared-reference"}
+        and provenance.get("allowedUse") == "acceptance"
+    )
+
+
+def _canonical_regression_view_id(view: Mapping[str, Any]) -> str:
+    view_id = str(view.get("viewId") or "primary").strip().lower()
+    # Form calls the observed source view `primary`; Lookdev calls the same
+    # camera/reference pair `reference`. Treating them as different let a later
+    # phase omit the only comparable baseline view.
+    return "source-reference" if view_id in {"primary", "reference"} else view_id
+
+
+def diagnostic_quality_vector(evidence: Any) -> dict[str, float]:
+    """Normalize deterministic observed-view geometry diagnostics for rollback.
+
+    Diagnostics remain veto-only: they can reject a regression but can never
+    approve a gate. The weakest observed acceptance view is retained so a 2x2
+    sheet cannot average away one visibly damaged angle.
+    """
+
+    if not isinstance(evidence, Mapping):
+        return {}
+    buckets: dict[str, list[float]] = {}
+    per_view: dict[str, float] = {}
+    views = evidence.get("views")
+    if not isinstance(views, list):
+        return {}
+    for view in views:
+        if not isinstance(view, Mapping):
+            continue
+        if not _acceptance_diagnostic_view(view):
+            continue
+        view_id = str(view.get("viewId") or "primary")
+        for metric, quality in _view_diagnostic_quality(view).items():
+            buckets.setdefault(metric, []).append(quality)
+            per_view[f"{view_id}.{metric}"] = quality
+    # Keep aggregate keys for compatibility and dashboards, but rollback uses
+    # the per-view keys too so improvement in one angle cannot hide damage in
+    # another angle.
+    return {
+        **{
+            key: min(values)
+            for key, values in buckets.items()
+            if values
+        },
+        **per_view,
+    }
+
+
+def quality_candidate_disposition(
+    baseline: Mapping[str, Any] | None,
+    candidate: Mapping[str, Any],
+    *,
+    owned_layers: Iterable[str],
+    protected_layers: Iterable[str] = (),
+    required_layers: Mapping[str, Any] | None = None,
+    minimum_delta: float = MIN_REFINEMENT_SCORE_DELTA,
+    maximum_regression: float = MAX_REFINEMENT_REGRESSION,
+    diagnostic_metrics: Iterable[str] | None = None,
+    blind_scout_decision: str | None = None,
+) -> dict[str, Any]:
+    """Classify a reviewed challenger without allowing score averaging to hide damage."""
+
+    owned = list(dict.fromkeys(str(item) for item in owned_layers if str(item)))
+    required_comparison_layers = list(
+        dict.fromkeys([*owned, *(str(item) for item in protected_layers if str(item))])
+    )
+    after_scores = candidate.get("layerScores")
+    missing_layers = [
+        layer
+        for layer in required_comparison_layers
+        if not _valid_quality_score(_score_for_layer(after_scores, layer))
+    ]
+    if not _valid_quality_score(candidate.get("overallScore")):
+        missing_layers.insert(0, "overallScore")
+    if missing_layers:
+        return {
+            "disposition": "rejected-incomplete",
+            "meaningfulImprovement": False,
+            "improvedLayers": [],
+            "regressedLayers": [],
+            "missingLayers": list(dict.fromkeys(missing_layers)),
+            "minimumDelta": minimum_delta,
+            "maximumRegression": maximum_regression,
+        }
+
+    # Old sidecars may contain a champion created before complete layer scoring
+    # was mandatory. Treat that invalid baseline as absent so one valid candidate
+    # repairs the state instead of becoming permanently unable to improve it.
+    if baseline is not None:
+        baseline_scores = baseline.get("layerScores")
+        baseline_incomplete = not _valid_quality_score(baseline.get("overallScore")) or any(
+            not _valid_quality_score(_score_for_layer(baseline_scores, layer))
+            for layer in required_comparison_layers
+        )
+        if baseline_incomplete:
+            baseline = None
+    if baseline is None:
+        return {
+            "disposition": "seed",
+            "meaningfulImprovement": True,
+            "improvedLayers": owned,
+            "regressedLayers": [],
+            "missingLayers": [],
+            "minimumDelta": minimum_delta,
+            "maximumRegression": maximum_regression,
+        }
+
+    before_scores = baseline.get("layerScores")
+    baseline_scored_layers = [
+        _canonical_score_layer(str(layer))
+        for layer, value in before_scores.items()
+        if isinstance(before_scores, Mapping) and _valid_quality_score(value)
+    ] if isinstance(before_scores, Mapping) else []
+    # When a phase intentionally owns no numeric layers (v4 lightweight gate),
+    # do not resurrect historical layer names and turn them into hidden
+    # requirements.  Legacy phases retain the old comparison behavior.
+    compared_layers = list(
+        dict.fromkeys(
+            [
+                *required_comparison_layers,
+                *(
+                    baseline_scored_layers
+                    if required_comparison_layers
+                    else []
+                ),
+            ]
+        )
+    )
+    regressions: list[str] = []
+    improved: list[str] = []
+    crossed: list[str] = []
+    thresholds = required_layers if isinstance(required_layers, Mapping) else {}
+    before_overall = baseline.get("overallScore")
+    after_overall = candidate.get("overallScore")
+    if is_number(before_overall) and (
+        not is_number(after_overall)
+        or float(after_overall) < float(before_overall) - maximum_regression
+    ):
+        regressions.append("overallScore")
+    before_diagnostics = baseline.get("diagnosticScores")
+    after_diagnostics = candidate.get("diagnosticScores")
+    allowed_diagnostics = (
+        {str(metric) for metric in diagnostic_metrics}
+        if diagnostic_metrics is not None
+        else None
+    )
+    if isinstance(before_diagnostics, Mapping):
+        for metric, before in before_diagnostics.items():
+            if allowed_diagnostics is not None and str(metric) not in allowed_diagnostics:
+                continue
+            if not _valid_quality_score(before):
+                continue
+            after = (
+                after_diagnostics.get(metric)
+                if isinstance(after_diagnostics, Mapping)
+                else None
+            )
+            if (
+                not _valid_quality_score(after)
+                or float(after) < float(before) - maximum_regression
+            ):
+                regressions.append(f"diagnostic.{metric}")
+    for layer in compared_layers:
+        before = _score_for_layer(before_scores, layer)
+        after = _score_for_layer(after_scores, layer)
+        if before is not None and (after is None or after < before - maximum_regression):
+            regressions.append(layer)
+    for layer in owned:
+        before = _score_for_layer(before_scores, layer)
+        after = _score_for_layer(after_scores, layer)
+        if before is not None and after is not None and after >= before + minimum_delta:
+            improved.append(layer)
+        threshold = thresholds.get(layer)
+        if (
+            before is not None
+            and after is not None
+            and is_number(threshold)
+            and before < float(threshold) <= after
+        ):
+            crossed.append(layer)
+    if not owned:
+        # A lightweight phase still needs a useful champion signal.  Compare
+        # the composite score and deterministic diagnostics directly instead of
+        # inventing layer scores.
+        if (
+            is_number(before_overall)
+            and is_number(after_overall)
+            and float(after_overall) >= float(before_overall) + minimum_delta
+        ):
+            improved.append("overallScore")
+        if isinstance(before_diagnostics, Mapping):
+            for metric, before in before_diagnostics.items():
+                if allowed_diagnostics is not None and str(metric) not in allowed_diagnostics:
+                    continue
+                after = (
+                    after_diagnostics.get(metric)
+                    if isinstance(after_diagnostics, Mapping)
+                    else None
+                )
+                if (
+                    _valid_quality_score(before)
+                    and _valid_quality_score(after)
+                    and float(after) >= float(before) + minimum_delta
+                ):
+                    improved.append(f"diagnostic.{metric}")
+    meaningful = bool(improved or crossed)
+    scout_approved_regression = bool(regressions) and blind_scout_decision == "approve"
+    disposition = (
+        "gate-pass"
+        if scout_approved_regression
+        else "rejected-regression"
+        if regressions
+        else "promoted"
+        if meaningful
+        else "rejected-no-improvement"
+    )
+    return {
+        "disposition": disposition,
+        "meaningfulImprovement": meaningful and not regressions,
+        "improvedLayers": sorted(set([*improved, *crossed])),
+        "regressedLayers": sorted(set(regressions)),
+        "missingLayers": [],
+        "minimumDelta": minimum_delta,
+        "maximumRegression": maximum_regression,
+        "blindScoutDecision": blind_scout_decision,
+        "regressionAcceptedByBlindScout": scout_approved_regression,
+    }
+
+
+def _diagnostic_targets(spec: dict[str, Any], pass_id: str | None = None) -> dict[str, float]:
     reference_fidelity = spec.get("qualityProfile") == "reference-fidelity"
     floors = {
-        "silhouetteIou": 0.88 if reference_fidelity else 0.75,
         "maximumCentroidDelta": 0.02 if reference_fidelity else 0.05,
         "maximumAspectRatioDelta": 0.03 if reference_fidelity else 0.08,
         "minimumDetailEnergyRatio": 0.75 if reference_fidelity else 0.65,
@@ -1104,7 +2656,6 @@ def _diagnostic_targets(spec: dict[str, Any]) -> dict[str, float]:
         return floors
     result = dict(floors)
     for field in (
-        "silhouetteIou",
         "minimumDetailEnergyRatio",
         "minimumEdgeDensityRatio",
         "minimumHistogramIntersection",
@@ -1132,7 +2683,7 @@ def _diagnostic_guardrail_failures(
     pass_id: str,
 ) -> list[str]:
     failures: list[str] = []
-    targets = _diagnostic_targets(spec)
+    targets = _diagnostic_targets(spec, pass_id)
     by_id = {str(view.get("viewId") or "primary"): view for view in views}
     if len(required_view_ids) == 1 and len(views) == 1 and required_view_ids[0] not in by_id:
         by_id[required_view_ids[0]] = views[0]
@@ -1144,7 +2695,6 @@ def _diagnostic_guardrail_failures(
         if not isinstance(diagnostics, dict):
             failures.append(f"visual view {view_id!r} needs reproducible fitDiagnostics")
             continue
-        iou = diagnostics.get("silhouetteIou")
         centroid = diagnostics.get("centroidDelta")
         aspect = diagnostics.get("aspectRatioDelta")
         appearance = diagnostics.get("appearance")
@@ -1154,31 +2704,37 @@ def _diagnostic_guardrail_failures(
             isinstance(provenance, dict)
             and provenance.get("origin") == "synthetic-hypothesis"
         )
-        minimum_iou = min(targets["silhouetteIou"], 0.38) if synthetic_hypothesis else targets["silhouetteIou"]
+        simplified = simplified_visual_gate_enabled(spec, pass_id)
         maximum_centroid = max(targets["maximumCentroidDelta"], 0.18) if synthetic_hypothesis else targets["maximumCentroidDelta"]
         maximum_aspect = max(targets["maximumAspectRatioDelta"], 0.30) if synthetic_hypothesis else targets["maximumAspectRatioDelta"]
-        if not is_number(iou) or float(iou) < minimum_iou:
-            failures.append(
-                f"visual view {view_id!r} silhouetteIou must be >= {minimum_iou}"
-            )
-        if not is_number(centroid) or float(centroid) > maximum_centroid:
+        if (
+            not simplified
+            and (not is_number(centroid) or float(centroid) > maximum_centroid)
+        ):
             failures.append(
                 f"visual view {view_id!r} centroidDelta must be <= "
                 f"{maximum_centroid}"
             )
-        if not is_number(aspect) or float(aspect) > maximum_aspect:
+        if (
+            not simplified
+            and (not is_number(aspect) or float(aspect) > maximum_aspect)
+        ):
             failures.append(
                 f"visual view {view_id!r} aspectRatioDelta must be <= "
                 f"{maximum_aspect}"
             )
-        detail_relevant = not synthetic_hypothesis and pass_id in {
+        detail_relevant = (
+            not simplified
+            and not synthetic_hypothesis
+            and pass_id in {
             "lookdev",
             "material-pass",
             "surface-pass",
             "lighting-pass",
             "optimization",
             "optimization-pass",
-        }
+            }
+        )
         if detail_relevant and (
             not is_number(detail_ratio)
             or float(detail_ratio) < targets["minimumDetailEnergyRatio"]
@@ -1296,7 +2852,16 @@ def _visual_review_failures(
 ) -> list[str]:
     evidence = entry.get("evidence")
     failures = visual_preflight_failures(spec, evidence, pass_id, spec_path)
-    required_threshold = visual_acceptance_threshold(spec)
+    configured_overall = config.get("minimumOverallScore")
+    required_threshold = (
+        visual_gate_threshold(spec, pass_id)
+        if simplified_visual_gate_enabled(spec, pass_id)
+        else (
+            float(configured_overall)
+            if is_number(configured_overall)
+            else visual_acceptance_threshold(spec)
+        )
+    )
     recorded_threshold = entry.get("visualAcceptanceThreshold")
     if not is_number(recorded_threshold) or float(recorded_threshold) < required_threshold:
         failures.append(
@@ -1363,7 +2928,8 @@ def _visual_review_failures(
     notes = entry.get("aiVisionNotes")
     if not isinstance(notes, str) or len(notes.strip()) < 12:
         failures.append("aiVisionNotes must explain the accepted visual result")
-    failures.extend(feature_gate_failures(spec, entry, pass_id))
+    if not simplified_visual_gate_enabled(spec, pass_id):
+        failures.extend(feature_gate_failures(spec, entry, pass_id))
     return failures
 
 
@@ -1377,61 +2943,609 @@ def _latest_history_entry(spec: dict[str, Any], pass_id: str) -> dict[str, Any] 
     return None
 
 
-def _post_optimization_regression_failures(
+def phase_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, Any]:
+    """Return only stable core plus the contract consumed by one phase.
+
+    This projection is intentionally LLM-facing. It does not replace the source
+    JSON or discard future-phase data; it prevents a Blockout turn from spending
+    attention on PBR, motion, receipts, or recursive microdetail that cannot yet
+    improve the observed silhouette.
+    """
+
+    selected = str(pass_id)
+    stable_fields = (
+        "targetName",
+        "targetId",
+        "sourceImage",
+        "referencePreparation",
+        "coordinateFrame",
+        "silhouette",
+        "viewEvidence",
+        "componentNamingContract",
+        "assumptions",
+        "risks",
+    )
+    projection: dict[str, Any] = {
+        field: copy.deepcopy(spec.get(field))
+        for field in stable_fields
+        if field in spec
+    }
+    components = [
+        item
+        for item in spec.get("componentTree", [])
+        if isinstance(item, Mapping)
+    ]
+
+    if selected == "blockout":
+        assessment = spec.get("preSpecAssessment")
+        if isinstance(assessment, Mapping):
+            complexity = assessment.get("complexity")
+            object_class = assessment.get("objectClass")
+            object_class = object_class if isinstance(object_class, Mapping) else {}
+            projection["preSpecAssessment"] = {
+                "objectClass": {
+                    key: copy.deepcopy(object_class.get(key))
+                    for key in ("primaryType", "formLanguage", "structureKind")
+                    if key in object_class
+                },
+                "complexityTier": (
+                    complexity.get("tier") if isinstance(complexity, Mapping) else "moderate"
+                ),
+            }
+        allowed = {
+            "id", "name", "componentType", "level", "role", "parent",
+            "importance", "confidence", "transform", "attachment", "primitive",
+            "parameters", "geometryDescriptor", "blockoutProxy", "fidelityTier",
+            "evidenceRefs",
+        }
+        projection["componentTree"] = [
+            {key: copy.deepcopy(value) for key, value in item.items() if key in allowed}
+            for item in components
+            if item.get("level", "macro") == "macro"
+        ]
+        projection["viewHypothesisPolicy"] = copy.deepcopy(
+            spec.get("viewHypothesisPolicy", {})
+        )
+        projection["qualityTargets"] = phase_quality_targets(spec, selected)
+    elif selected in {"form", "structure", "structural-pass", "form-refinement"}:
+        projected_components: list[dict[str, Any]] = []
+        for item in components:
+            copied = copy.deepcopy(dict(item))
+            copied.pop("actionProfile", None)
+            copied.pop("surfaceDetail", None)
+            copied.pop("material", None)
+            copied.pop("materialLayers", None)
+            projected_components.append(copied)
+        projection.update(
+            {
+                "componentTree": projected_components,
+                "surfaceTopologyPlan": copy.deepcopy(spec.get("surfaceTopologyPlan", {})),
+                "detailDecompositionContract": copy.deepcopy(
+                    spec.get("detailDecompositionContract", {})
+                ),
+                "repetitionSystems": copy.deepcopy(spec.get("repetitionSystems", [])),
+                "featureReviewTargets": copy.deepcopy(spec.get("featureReviewTargets", [])),
+                "viewHypothesisPolicy": copy.deepcopy(spec.get("viewHypothesisPolicy", {})),
+                "qualityTargets": phase_quality_targets(spec, selected),
+            }
+        )
+    elif selected in {"lookdev", "material-pass", "surface-pass", "lighting-pass"}:
+        projection.update(
+            {
+                "componentMaterialBindings": [
+                    {
+                        key: copy.deepcopy(item.get(key))
+                        for key in ("id", "parent", "material", "materialLayers")
+                        if key in item
+                    }
+                    for item in components
+                ],
+                "materials": copy.deepcopy(spec.get("materials", [])),
+                "lookDevTargets": copy.deepcopy(spec.get("lookDevTargets", {})),
+                "lightingFromPhoto": copy.deepcopy(spec.get("lightingFromPhoto", [])),
+                "qualityTargets": phase_quality_targets(spec, selected),
+            }
+        )
+    elif selected in RUNTIME_PASS_IDS:
+        projection.update(
+            {
+                "componentActions": [
+                    {
+                        key: copy.deepcopy(item.get(key))
+                        for key in ("id", "parent", "transform", "actionProfile")
+                        if key in item
+                    }
+                    for item in components
+                ],
+                "interactionContract": copy.deepcopy(spec.get("interactionContract", {})),
+                "actionReadiness": copy.deepcopy(spec.get("actionReadiness", {})),
+                "qualityTargets": phase_quality_targets(spec, selected),
+            }
+        )
+    return projection
+
+
+def phase_work_packet(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
+    """Project the large sculpt contract into one concise, executable phase packet."""
+
+    config = effective_pass_config(spec, pass_id)
+    phase_order = ["blockout", "form", "lookdev", "interaction"]
+    canonical_phase = (
+        "form" if pass_id in {"structure", "structural-pass", "form-refinement"}
+        else "lookdev" if pass_id in {"material-pass", "surface-pass", "lighting-pass"}
+        else "interaction" if pass_id in RUNTIME_PASS_IDS
+        else pass_id
+    )
+    try:
+        phase_index = phase_order.index(canonical_phase)
+    except ValueError:
+        phase_index = -1
+    components = [
+        item
+        for item in spec.get("componentTree", [])
+        if isinstance(item, dict) and item.get("componentType", "part") != "assembly"
+    ]
+    if canonical_phase == "blockout":
+        editable_components = [
+            str(item.get("id")) for item in components if item.get("level", "macro") == "macro"
+        ]
+    elif canonical_phase in {"form", "lookdev", "interaction"}:
+        editable_components = [str(item.get("id")) for item in components]
+    else:
+        editable_components = []
+    materials = [
+        str(item.get("id"))
+        for item in spec.get("materials", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+    baseline_pass = config.get("visualBaselinePassId")
+    baseline = (
+        _latest_history_entry(spec, str(baseline_pass))
+        if isinstance(baseline_pass, str) and baseline_pass
+        else None
+    )
+    depth = {
+        "macroComponents": sum(item.get("level", "macro") == "macro" for item in components),
+        "mesoComponents": sum(item.get("level") == "meso" for item in components),
+        "microFeatureGroups": detail_feature_count(spec),
+    }
+    execution = (
+        spec.get("phaseExecutionContract")
+        if isinstance(spec.get("phaseExecutionContract"), Mapping)
+        else {}
+    )
+    owned_fields = execution.get("phaseOwnedFields")
+    phase_owned = (
+        owned_fields.get(canonical_phase, [])
+        if isinstance(owned_fields, Mapping)
+        else []
+    )
+    repairable_prior_paths = list(
+        dict.fromkeys(
+            str(path)
+            for phase in phase_order[: max(phase_index, 0)]
+            for path in (
+                owned_fields.get(phase, [])
+                if isinstance(owned_fields, Mapping)
+                and isinstance(owned_fields.get(phase), list)
+                else []
+            )
+            if isinstance(path, str) and path
+        )
+    )
+    editable_paths = list(
+        dict.fromkeys(
+            [
+                *repairable_prior_paths,
+                *(
+                    str(path)
+                    for path in phase_owned
+                    if isinstance(path, str) and path
+                ),
+            ]
+        )
+    )
+    deferred = execution.get("deferredWork")
+    deferred_work = dict(deferred) if isinstance(deferred, Mapping) else {}
+    later_deferred = {
+        phase: copy.deepcopy(deferred_work.get(phase, []))
+        for phase in [*phase_order[phase_index + 1 :], "finalization"]
+        if phase in deferred_work
+    }
+    visual_scout = copy.deepcopy(execution.get("visualScout", {}))
+    if (
+        isinstance(visual_scout, dict)
+        and phase_execution_version(spec) >= SIMPLIFIED_PHASE_EXECUTION_VERSION
+    ):
+        phase_rubrics = visual_scout.get("phaseRubrics")
+        active_rubric = (
+            phase_rubrics.get(canonical_phase, {})
+            if isinstance(phase_rubrics, Mapping)
+            else {}
+        )
+        visual_scout["activePhaseInput"] = {
+            "phaseId": canonical_phase,
+            "phaseRubric": copy.deepcopy(active_rubric),
+            "inputRule": (
+                "Pass only the allowed images (including previousRender when a prior "
+                "checkpoint exists), this phaseId, and this phaseRubric to the blind scout."
+            ),
+        }
+    return {
+        "passId": pass_id,
+        "objective": config.get("objective", ""),
+        "acceptance": config.get("acceptance", []),
+        "editableComponentIds": editable_components,
+        "editableMaterialIds": materials
+        if phase_index >= phase_order.index("lookdev")
+        else [],
+        "requiredViews": config.get("requiredViews", []),
+        "diagnosticViews": config.get("diagnosticViews", []),
+        "requiredLayerScores": config.get("requiredLayerScores", {}),
+        "ownedLayers": config.get("ownedLayers", []),
+        "protectedLayers": config.get("preserveLayers", []),
+        "minimumRefinementDelta": config.get(
+            "minimumRefinementDelta", MIN_REFINEMENT_SCORE_DELTA
+        ),
+        "maximumVisualRegression": config.get(
+            "maximumVisualRegression", MAX_REFINEMENT_REGRESSION
+        ),
+        "derivedDepth": depth,
+        "specDeltaContract": {
+            "strategy": "stable-core-plus-phase-delta",
+            "editablePaths": editable_paths,
+            "activePhaseOwnedPaths": copy.deepcopy(phase_owned),
+            "repairablePriorPhasePaths": repairable_prior_paths,
+            "correctionAuthority": copy.deepcopy(
+                execution.get("correctionAuthority", {})
+            ),
+            "crossPhaseRepairRule": (
+                "The active phase must review and may improve any earlier phase "
+                "through an exact impact-assessed correction batch applied to a "
+                "challenger. A passed phase is a baseline, not frozen. Compare "
+                "original/current/previous renders and veto only visible whole-result "
+                "regression; future-phase work remains forbidden."
+            ),
+            "stableCoreFields": copy.deepcopy(execution.get("stableCoreFields", [])),
+            "stableCoreChangeRule": (
+                "Change a stable-core field only when observed evidence falsifies it; record the reason."
+            ),
+            "futurePhaseWorkForbidden": later_deferred,
+        },
+        "visualCycle": {
+            "steps": copy.deepcopy(
+                execution.get("cycle", {}).get(
+                    "steps",
+                    [
+                        "spec-delta",
+                        "build-render",
+                        "reference-comparison",
+                        "independent-review",
+                        "promote-or-rollback",
+                    ],
+                )
+                if isinstance(execution.get("cycle"), Mapping)
+                else []
+            ),
+            "maximumNonVisualOperationsBeforeRender": 2,
+            "visibleProgressRequired": True,
+            "comparisonAuthority": execution.get("cycle", {}).get(
+                "comparisonAuthority",
+                "prepared-target-with-original-identity-guardrail",
+            ),
+            "multiViewPresentation": "single-2x2-sheet",
+            "administrativeWorkCountsAsProgress": False,
+        },
+        "visualScout": visual_scout,
+        "qualityGate": copy.deepcopy(
+            execution.get(
+                "qualityGate",
+                {
+                    "mode": "ai-scout-human",
+                    "aiOverallFloor": SIMPLIFIED_AI_OVERALL_FLOOR,
+                    "blindScoutDecisions": ["approve", "reject"],
+                    "maxBlindScoutObservations": MAX_BLIND_SCOUT_OBSERVATIONS,
+                },
+            )
+            if phase_execution_version(spec) >= SIMPLIFIED_PHASE_EXECUTION_VERSION
+            else {}
+        ),
+        "humanApproval": copy.deepcopy(execution.get("humanApproval", {})),
+        "userFeedback": latest_user_phase_feedback(spec, pass_id),
+        "contextProjection": phase_spec_projection(spec, pass_id),
+        "frozenBaseline": (
+            {
+                "passId": baseline_pass,
+                "specHash": baseline.get("specHash"),
+                "layerScores": baseline.get("layerScores", {}),
+                "comparisonSha256": (
+                    baseline.get("evidence", {}).get("comparisonSha256")
+                    if isinstance(baseline.get("evidence"), dict)
+                    else ""
+                ),
+                "renderSnapshot": copy.deepcopy(
+                    baseline.get("renderSnapshot", {})
+                ),
+            }
+            if isinstance(baseline, dict)
+            else {}
+        ),
+    }
+
+
+def prior_pass_regression_failures(
     spec: dict[str, Any], entry: dict[str, Any], config: dict[str, Any]
 ) -> list[str]:
-    baseline_pass = str(config.get("visualBaselinePassId") or "lookdev")
+    baseline_pass_value = config.get("visualBaselinePassId")
+    if not isinstance(baseline_pass_value, str) or not baseline_pass_value.strip():
+        return []
+    baseline_pass = baseline_pass_value.strip()
     baseline = _latest_history_entry(spec, baseline_pass)
     if baseline is None:
-        return [f"post-optimization visual review needs an accepted {baseline_pass!r} baseline"]
-    tolerance_value = config.get("maximumVisualRegression", 0.02)
-    tolerance = float(tolerance_value) if is_number(tolerance_value) else 0.02
+        return [f"visual review needs an accepted {baseline_pass!r} regression baseline"]
+    tolerance_value = config.get("maximumVisualRegression", 0.0)
+    tolerance = float(tolerance_value) if is_number(tolerance_value) else 0.0
     failures: list[str] = []
-    baseline_score = baseline.get("aiVisionScore")
-    current_score = entry.get("aiVisionScore")
-    if is_number(baseline_score) and (
-        not is_number(current_score) or float(current_score) < float(baseline_score) - tolerance
-    ):
-        failures.append(
-            f"post-optimization aiVisionScore regressed by more than {tolerance}"
-        )
-    for layer in ("material", "lighting", "silhouette", "structure", "formDetail"):
+    preserve_layers = config.get("preserveLayers", [])
+    layers = (
+        [str(item) for item in preserve_layers if isinstance(item, str) and item]
+        if isinstance(preserve_layers, list)
+        else []
+    )
+    for layer in layers:
         before = _score_for_layer(baseline.get("layerScores"), layer)
         after = _score_for_layer(entry.get("layerScores"), layer)
-        if before is not None and (after is None or after < before - tolerance):
+        # Protected layers are veto-only, not acceptance targets for this phase.
+        # Still require the independent reviewer to score them: silently omitting
+        # one would make a later lookdev/optimization pass able to hide damaged form.
+        if before is not None and after is None:
             failures.append(
-                f"post-optimization layer {layer!r} regressed by more than {tolerance}"
+                f"protected layer {layer!r} needs an independent score against "
+                f"accepted {baseline_pass!r}"
+            )
+        elif before is not None and after is not None and after < before - tolerance:
+            failures.append(
+                f"protected layer {layer!r} regressed from accepted {baseline_pass!r} "
+                f"by more than {tolerance}"
             )
     baseline_views = review_visual_views(baseline)
     current_views = review_visual_views(entry)
-    baseline_by_id = {str(view.get("viewId") or "primary"): view for view in baseline_views}
-    current_by_id = {str(view.get("viewId") or "primary"): view for view in current_views}
+    baseline_by_id = {
+        _canonical_regression_view_id(view): view
+        for view in baseline_views
+        if _acceptance_diagnostic_view(view)
+    }
+    current_by_id = {
+        _canonical_regression_view_id(view): view
+        for view in current_views
+        if _acceptance_diagnostic_view(view)
+    }
     for view_id, before_view in baseline_by_id.items():
         after_view = current_by_id.get(view_id)
         if not isinstance(after_view, dict):
-            continue
-        before_diagnostics = before_view.get("fitDiagnostics")
-        after_diagnostics = after_view.get("fitDiagnostics")
-        if not isinstance(before_diagnostics, dict) or not isinstance(after_diagnostics, dict):
-            continue
-        for field in ("silhouetteIou",):
-            before = before_diagnostics.get(field)
-            after = after_diagnostics.get(field)
-            if is_number(before) and (not is_number(after) or float(after) < float(before) - tolerance):
-                failures.append(
-                    f"post-optimization view {view_id!r} {field} regressed by more than {tolerance}"
-                )
-        before_appearance = before_diagnostics.get("appearance")
-        after_appearance = after_diagnostics.get("appearance")
-        before_detail = before_appearance.get("detailEnergyRatio") if isinstance(before_appearance, dict) else None
-        after_detail = after_appearance.get("detailEnergyRatio") if isinstance(after_appearance, dict) else None
-        if is_number(before_detail) and (
-            not is_number(after_detail) or float(after_detail) < float(before_detail) - tolerance
-        ):
             failures.append(
-                f"post-optimization view {view_id!r} detailEnergyRatio regressed by more than {tolerance}"
+                f"current review needs a comparable acceptance view for protected "
+                f"{baseline_pass!r} view {view_id!r}"
             )
+            continue
+        before_quality = _view_diagnostic_quality(before_view)
+        after_quality = _view_diagnostic_quality(after_view)
+        for metric, before in before_quality.items():
+            if simplified_visual_gate_enabled(spec, str(entry.get("passId") or "")):
+                # The current workflow delegates visual regression to the
+                # original/current/previous image comparison and blind scout.
+                continue
+            metric_tolerance = tolerance
+            after = after_quality.get(metric)
+            if after is None or after < before - metric_tolerance:
+                failures.append(
+                    f"protected view {view_id!r} {metric} regressed from accepted "
+                    f"{baseline_pass!r} by more than {metric_tolerance}"
+                )
     return failures
+
+
+def _prior_pass_regression_failures(
+    spec: dict[str, Any], entry: dict[str, Any], config: dict[str, Any]
+) -> list[str]:
+    """Compatibility alias for callers of the former private helper."""
+
+    return prior_pass_regression_failures(spec, entry, config)
+
+
+def _post_optimization_regression_failures(
+    spec: dict[str, Any], entry: dict[str, Any], config: dict[str, Any]
+) -> list[str]:
+    """Compatibility wrapper for callers using the old optimization-only name."""
+
+    return prior_pass_regression_failures(spec, entry, config)
+
+
+def blind_scout_entry_failures(
+    spec: Mapping[str, Any],
+    entry: Mapping[str, Any],
+    pass_id: str,
+    *,
+    require_approve: bool = False,
+) -> list[str]:
+    """Validate the compact blind-scout record stored with an accepted review.
+
+    The scout is deliberately forbidden from naming spec IDs, parameter paths,
+    scores, or numeric fixes.  It reports only what a person can see in the
+    comparison; the primary reviewer/builder maps those observations to exact
+    component corrections.
+    """
+
+    if not simplified_visual_gate_enabled(spec, pass_id):
+        return []
+    evidence = entry.get("evidence")
+    comparison_hash = (
+        evidence.get("comparisonSha256")
+        if isinstance(evidence, Mapping)
+        else None
+    )
+    scout = entry.get("blindScout")
+    failures: list[str] = []
+    if not isinstance(scout, Mapping):
+        return ["blindScout is required for the v4 visual gate"]
+    allowed_scout_fields = {
+        "artifactType",
+        "version",
+        "phaseId",
+        "decision",
+        "comparisonSha256",
+        "reviewedAt",
+        "reviewer",
+        "observations",
+    }
+    unexpected_scout_fields = sorted(set(scout) - allowed_scout_fields)
+    if unexpected_scout_fields:
+        failures.append(
+            "blindScout contains forbidden fields: "
+            + ", ".join(str(field) for field in unexpected_scout_fields)
+        )
+    if scout.get("artifactType") != "threejs-sculpt-blind-scout":
+        failures.append("blindScout.artifactType is invalid")
+    if scout.get("version") != BLIND_SCOUT_ARTIFACT_VERSION:
+        failures.append(
+            f"blindScout.version must be {BLIND_SCOUT_ARTIFACT_VERSION}"
+        )
+    expected_phase_id = blind_scout_phase_id(pass_id)
+    if scout.get("phaseId") != expected_phase_id:
+        failures.append(
+            f"blindScout.phaseId must match the active phase {expected_phase_id!r}"
+        )
+    decision = scout.get("decision")
+    if decision not in {"approve", "reject"}:
+        failures.append("blindScout.decision must be approve or reject")
+    if scout.get("comparisonSha256") != comparison_hash:
+        failures.append("blindScout is not bound to the comparison hash")
+    if not isinstance(scout.get("reviewedAt"), str) or not scout["reviewedAt"].strip():
+        failures.append("blindScout.reviewedAt is required")
+    reviewer = scout.get("reviewer")
+    if not isinstance(reviewer, Mapping):
+        failures.append("blindScout.reviewer is required")
+    else:
+        unexpected_reviewer_fields = sorted(
+            set(reviewer) - {"role", "contextId", "model"}
+        )
+        if unexpected_reviewer_fields:
+            failures.append(
+                "blindScout.reviewer contains forbidden fields: "
+                + ", ".join(str(field) for field in unexpected_reviewer_fields)
+            )
+        if reviewer.get("role") != "blind-visual-scout":
+            failures.append("blindScout.reviewer.role must be blind-visual-scout")
+        if not isinstance(reviewer.get("contextId"), str) or not reviewer["contextId"].strip():
+            failures.append("blindScout.reviewer.contextId is required")
+        if not isinstance(reviewer.get("model"), str) or not reviewer["model"].strip():
+            failures.append("blindScout.reviewer.model is required")
+        primary = entry.get("reviewerEvidence")
+        primary_context = (
+            primary.get("reviewerContextId")
+            if isinstance(primary, Mapping)
+            else None
+        )
+        if (
+            isinstance(primary_context, str)
+            and primary_context.strip()
+            and reviewer.get("contextId") == primary_context
+        ):
+            failures.append("blindScout contextId must differ from the primary reviewer")
+    observations = scout.get("observations")
+    if not isinstance(observations, list):
+        failures.append("blindScout.observations must be an array")
+        observations = []
+    if len(observations) > MAX_BLIND_SCOUT_OBSERVATIONS:
+        failures.append(
+            f"blindScout.observations may contain at most {MAX_BLIND_SCOUT_OBSERVATIONS} items"
+        )
+    all_categories = {
+        category
+        for categories in BLIND_SCOUT_PHASE_CATEGORIES.values()
+        for category in categories
+    }
+    blocking_count = 0
+    forbidden_tokens = {
+        "componentid",
+        "componentids",
+        "parameterpath",
+        "score",
+        "numeric",
+        "value",
+        "beforevalue",
+        "expectedvalue",
+    }
+    for index, observation in enumerate(observations):
+        label = f"blindScout.observations[{index}]"
+        if not isinstance(observation, Mapping):
+            failures.append(f"{label} must be an object")
+            continue
+        unexpected_observation_fields = sorted(
+            set(observation)
+            - {
+                "visualRegion",
+                "category",
+                "phaseScope",
+                "direction",
+                "severity",
+                "viewIds",
+            }
+        )
+        if unexpected_observation_fields:
+            failures.append(
+                f"{label} contains forbidden fields: "
+                + ", ".join(str(field) for field in unexpected_observation_fields)
+            )
+        for field in ("visualRegion", "category", "direction"):
+            if not isinstance(observation.get(field), str) or not observation[field].strip():
+                failures.append(f"{label}.{field} is required")
+        direction = observation.get("direction")
+        if isinstance(direction, str) and re.search(r"\d", direction):
+            failures.append(f"{label}.direction must not contain a numeric fix")
+        severity = observation.get("severity")
+        if severity not in {"critical", "major", "minor"}:
+            failures.append(f"{label}.severity must be critical, major, or minor")
+        category = observation.get("category")
+        if category not in all_categories:
+            failures.append(f"{label}.category is not a canonical visual category")
+        expected_scope = blind_scout_phase_scope(expected_phase_id, str(category))
+        phase_scope = observation.get("phaseScope")
+        if phase_scope != expected_scope:
+            failures.append(
+                f"{label}.phaseScope must be {expected_scope!r} for "
+                f"{expected_phase_id} category {category!r}"
+            )
+        if expected_scope in {"current", "protected"} and severity in {"critical", "major"}:
+            blocking_count += 1
+        view_ids = observation.get("viewIds")
+        if not isinstance(view_ids, list) or not view_ids or not all(
+            isinstance(view_id, str) and view_id.strip() for view_id in view_ids
+        ):
+            failures.append(f"{label}.viewIds must contain reviewed view ids")
+        elif isinstance(evidence, Mapping):
+            known_views = {
+                view.get("viewId")
+                for view in evidence.get("views", [])
+                if isinstance(view, Mapping) and isinstance(view.get("viewId"), str)
+            }
+            unknown = sorted(set(view_ids) - known_views)
+            if unknown:
+                failures.append(f"{label}.viewIds reference unknown views: " + ", ".join(unknown))
+        for key in observation:
+            if str(key).lower() in forbidden_tokens:
+                failures.append(f"{label} must not contain spec/score/numeric field {key!r}")
+    if decision == "approve" and blocking_count:
+        failures.append(
+            "blindScout approve cannot contain current/protected critical or major observations"
+        )
+    if decision == "reject" and not blocking_count:
+        failures.append(
+            "blindScout reject requires at least one current/protected critical or major observation"
+        )
+    if require_approve and decision != "approve":
+        failures.append("blindScout decision must be approve before phase promotion")
+    return list(dict.fromkeys(failures))
 
 
 def review_failures(
@@ -1453,7 +3567,17 @@ def review_failures(
     kind = evidence_type(spec, pass_id)
     config = effective_pass_config(spec, pass_id)
     if kind == "visual":
+        failures.extend(perceptual_review_failures(spec, entry))
         failures.extend(_visual_review_failures(spec, entry, pass_id, config, spec_path))
+        failures.extend(
+            blind_scout_entry_failures(
+                spec,
+                entry,
+                pass_id,
+                require_approve=True,
+            )
+        )
+        failures.extend(prior_pass_regression_failures(spec, entry, config))
     elif kind == "runtime":
         checks = entry.get("runtimeChecks")
         if not isinstance(checks, dict):
@@ -1503,7 +3627,7 @@ def review_failures(
                 failures.append(f"artifact {name!r} is required")
         if config.get("requiredPostOptimizationVisualReview") is True:
             failures.extend(_visual_review_failures(spec, entry, pass_id, config, spec_path))
-            failures.extend(_post_optimization_regression_failures(spec, entry, config))
+            failures.extend(prior_pass_regression_failures(spec, entry, config))
     return list(dict.fromkeys(failures))
 
 
@@ -1528,6 +3652,180 @@ def _latest_review(
     return -1, None
 
 
+def human_phase_approval_required(
+    spec: Mapping[str, Any],
+    pass_id: str | None = None,
+) -> bool:
+    contract = spec.get("phaseExecutionContract")
+    if not isinstance(contract, Mapping) or contract.get("version") not in {3, 4}:
+        return False
+    policy = contract.get("humanApproval")
+    if not isinstance(policy, Mapping) or policy.get("required") is not True:
+        return False
+    perceptual = spec.get("perceptualContract")
+    approval_mode = (
+        perceptual.get("approvalMode")
+        if isinstance(perceptual, Mapping)
+        else "phase-by-phase"
+    )
+    if approval_mode != "final-only":
+        return True
+    ids = pass_order(dict(spec))
+    return bool(ids) and pass_id == ids[-1]
+
+
+def phase_review_key(entry: Mapping[str, Any]) -> str:
+    """Bind a human decision to the exact system-reviewed phase artifact."""
+
+    evidence = entry.get("evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    reviewer = entry.get("reviewerEvidence")
+    reviewer = reviewer if isinstance(reviewer, Mapping) else {}
+    payload = {
+        "passId": entry.get("passId"),
+        "reviewId": entry.get("reviewId") or reviewer.get("reviewId"),
+        "specHash": entry.get("specHash"),
+        "action": entry.get("action"),
+        "comparisonSha256": evidence.get("comparisonSha256"),
+        "reviewedArtifactSha256": reviewer.get("reviewedArtifactSha256"),
+        "blindScout": entry.get("blindScout"),
+        "runtimeChecks": entry.get("runtimeChecks"),
+        "metrics": entry.get("metrics"),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _reviewed_artifact_sha256(entry: Mapping[str, Any]) -> str:
+    evidence = entry.get("evidence")
+    if isinstance(evidence, Mapping):
+        comparison = evidence.get("comparisonSha256")
+        if isinstance(comparison, str):
+            return comparison
+    reviewer = entry.get("reviewerEvidence")
+    if isinstance(reviewer, Mapping):
+        artifact = reviewer.get("reviewedArtifactSha256")
+        if isinstance(artifact, str):
+            return artifact
+    return ""
+
+
+def matching_user_phase_decision(
+    spec: Mapping[str, Any],
+    pass_id: str,
+    entry: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    approvals = spec.get("userPhaseApprovals")
+    if not isinstance(approvals, list):
+        return None
+    review_key = phase_review_key(entry)
+    for item in reversed(approvals):
+        if not isinstance(item, dict):
+            continue
+        if (
+            item.get("passId") == pass_id
+            and item.get("reviewKey") == review_key
+            and item.get("specHash") == entry.get("specHash")
+            and item.get("reviewedArtifactSha256")
+            == _reviewed_artifact_sha256(entry)
+        ):
+            return item
+    return None
+
+
+def latest_user_phase_feedback(
+    spec: Mapping[str, Any],
+    pass_id: str,
+) -> list[dict[str, Any]]:
+    approvals = spec.get("userPhaseApprovals")
+    if not isinstance(approvals, list):
+        return []
+    for item in reversed(approvals):
+        if (
+            isinstance(item, Mapping)
+            and item.get("passId") == pass_id
+            and item.get("decision") == "changes-requested"
+        ):
+            feedback = item.get("feedback")
+            return [
+                dict(finding)
+                for finding in feedback
+                if isinstance(finding, Mapping)
+            ] if isinstance(feedback, list) else []
+    return []
+
+
+def record_user_phase_decision(
+    spec: dict[str, Any],
+    pass_id: str,
+    decision: str,
+    *,
+    user_statement: str,
+    feedback: list[dict[str, Any]] | None = None,
+    recorded_at: str | None = None,
+) -> dict[str, Any]:
+    """Record explicit user judgment only after the complete system gate passes."""
+
+    if decision not in {"approved", "changes-requested"}:
+        raise ValueError("user phase decision must be approved or changes-requested")
+    if not isinstance(user_statement, str) or not user_statement.strip():
+        raise ValueError("user phase decision requires the user's explicit statement")
+    status = pipeline_status(spec)
+    if (
+        status.get("currentPass") != pass_id
+        or status.get("state") != "awaiting-user-approval"
+    ):
+        raise ValueError(
+            "user approval can be recorded only after the current phase passes "
+            "deterministic preflight and both AI review layers"
+        )
+    pending = status.get("pendingUserApproval")
+    if not isinstance(pending, Mapping):
+        raise ValueError("current phase has no system-passed artifact awaiting user approval")
+    normalized_feedback = [
+        {
+            "visualRegion": str(item.get("visualRegion") or "").strip(),
+            "problem": str(item.get("problem") or "").strip(),
+            "expectedDirection": str(item.get("expectedDirection") or "").strip(),
+        }
+        for item in (feedback or [])
+        if isinstance(item, Mapping)
+    ]
+    if decision == "changes-requested" and (
+        not normalized_feedback
+        or any(not all(item.values()) for item in normalized_feedback)
+    ):
+        raise ValueError(
+            "changes-requested requires feedback items with visualRegion, problem, "
+            "and expectedDirection"
+        )
+    if decision == "approved" and normalized_feedback:
+        raise ValueError("approved user phase decisions must not include change feedback")
+    record = {
+        "passId": pass_id,
+        "decision": decision,
+        "reviewKey": pending.get("reviewKey"),
+        "reviewId": pending.get("reviewId", ""),
+        "specHash": pending.get("specHash"),
+        "reviewedArtifactSha256": pending.get("reviewedArtifactSha256", ""),
+        "userStatement": user_statement.strip(),
+        "feedback": normalized_feedback,
+        "recordedAt": recorded_at
+        or datetime.now(timezone.utc).isoformat(),
+    }
+    approvals = spec.setdefault("userPhaseApprovals", [])
+    if not isinstance(approvals, list):
+        raise ValueError("userPhaseApprovals must be an array")
+    approvals.append(record)
+    return record
+
+
 def pipeline_status(
     spec: dict[str, Any],
     spec_path: Path | None = None,
@@ -1540,6 +3838,8 @@ def pipeline_status(
     latest_action = ""
     gate_failures: list[str] = []
     pending_correction_batch: dict[str, Any] = {}
+    pending_user_approval: dict[str, Any] = {}
+    user_feedback: list[dict[str, Any]] = []
 
     for pass_id in ids:
         index, entry = _latest_review(spec, pass_id, completion_index)
@@ -1556,7 +3856,7 @@ def pipeline_status(
                 if isinstance(previous_entry, dict)
                 else ""
             )
-            if isinstance(previous_entry, dict) and previous_action in REFINEMENT_ACTIONS:
+            if isinstance(previous_entry, dict) and is_pending_quality_attempt(previous_entry):
                 latest_action = previous_action
                 pending_correction_batch = (
                     previous_entry.get("correctionBatch")
@@ -1578,12 +3878,49 @@ def pipeline_status(
         latest_action = str(entry.get("action") or "")
         failures = review_failures(spec, entry, pass_id, spec_path)
         if not failures:
+            if human_phase_approval_required(spec, pass_id):
+                user_decision = matching_user_phase_decision(spec, pass_id, entry)
+                if user_decision is None:
+                    current = pass_id
+                    state = "awaiting-user-approval"
+                    pending_user_approval = {
+                        "required": True,
+                        "systemPassed": True,
+                        "passId": pass_id,
+                        "reviewKey": phase_review_key(entry),
+                        "reviewId": entry.get("reviewId", ""),
+                        "specHash": entry.get("specHash"),
+                        "reviewedArtifactSha256": _reviewed_artifact_sha256(entry),
+                        "instruction": (
+                            "Show the user the current output and exact evidence, then ask for "
+                            "explicit approval or structured change feedback."
+                        ),
+                    }
+                    gate_failures = ["explicit user approval is required to complete this phase"]
+                    break
+                if user_decision.get("decision") == "changes-requested":
+                    current = pass_id
+                    state = "needs-user-refinement"
+                    user_feedback = latest_user_phase_feedback(spec, pass_id)
+                    gate_failures = [
+                        "user requested changes: "
+                        + "; ".join(
+                            f"{item.get('visualRegion')}: {item.get('problem')} "
+                            f"→ {item.get('expectedDirection')}"
+                            for item in user_feedback
+                        )
+                    ]
+                    break
             completed.append(pass_id)
             completion_index = index
             continue
         current = pass_id
         gate_failures = failures
-        state = {
+        quality_direction_stop = (
+            latest_action == "stop"
+            and str(entry.get("candidateDisposition") or "").startswith("rejected-")
+        )
+        state = "needs-strategy-change" if quality_direction_stop else {
             "stop": "stopped",
             "request-input": "awaiting-input",
             STRATEGY_RESET_ACTION: "needs-strategy-change",
@@ -1591,7 +3928,17 @@ def pipeline_status(
             "refine-code": "needs-refinement",
             "refine-batch": "needs-refinement",
         }.get(latest_action, "needs-review")
-        if latest_action in REFINEMENT_ACTIONS:
+        if quality_direction_stop:
+            gate_failures = list(
+                dict.fromkeys(
+                    [
+                        "reviewer stopped a regressed challenger; the champion was restored and a different strategy is required",
+                        *gate_failures,
+                    ]
+                )
+            )
+        if is_pending_quality_attempt(entry):
+            state = "needs-refinement"
             pending_correction_batch = (
                 entry.get("correctionBatch")
                 if isinstance(entry.get("correctionBatch"), dict)
@@ -1617,6 +3964,19 @@ def pipeline_status(
         if isinstance(history, list) and current != "complete"
         else []
     )
+    current_budget = refinement_budget(current_records)
+    if (
+        current != "complete"
+        and current_budget["exhausted"]
+        and state == "needs-refinement"
+    ):
+        state = "needs-strategy-change"
+        exhaustion = (
+            "refinement budget is exhausted; restore/retain the champion and record "
+            "a strategy-reset before more rendering"
+        )
+        gate_failures = list(dict.fromkeys([exhaustion, *gate_failures]))
+    remaining_passes = [] if current == "complete" else ids[len(completed):]
     return {
         "passGateMode": "adaptive-sequential",
         "passOrder": ids,
@@ -1626,10 +3986,20 @@ def pipeline_status(
         "state": state,
         "latestAction": latest_action,
         "pendingCorrectionBatch": pending_correction_batch,
-        "refinementBudget": refinement_budget(current_records),
+        "pendingUserApproval": pending_user_approval,
+        "userFeedback": user_feedback
+        or ([] if current == "complete" else latest_user_phase_feedback(spec, current)),
+        "refinementBudget": current_budget,
         "blockedReason": "; ".join(gate_failures),
         "gateFailures": gate_failures,
         "nextRequiredEvidence": required,
+        "userProgress": user_progress_contract(
+            "assembled-quality-passes",
+            len(completed),
+            len(ids),
+            current,
+            remaining_passes,
+        ),
         "specHash": spec_content_hash(spec),
     }
 
@@ -1642,7 +4012,8 @@ def next_required_evidence(spec: dict[str, Any], pass_id: str) -> list[str]:
         evidence.extend(
             [
                 "hash-bound reference + render comparison manifest for every required view",
-                "one artifact-bound AI reviewer record with critique and required scores",
+                "one artifact-bound AI reviewer record with composite score and critique",
+                "one hash-bound blind visual scout record with binary approve/reject verdict",
                 "latest review action=continue for the current spec",
             ]
         )
@@ -1658,10 +4029,102 @@ def next_required_evidence(spec: dict[str, Any], pass_id: str) -> list[str]:
                     "no visual score or diagnostic regression beyond the configured tolerance",
                 ]
             )
+    if human_phase_approval_required(spec, pass_id):
+        evidence.append(
+            "explicit user approval bound to the exact system-passed phase artifact"
+        )
     return list(dict.fromkeys(evidence))
 
 
 def sync_pipeline(spec: dict[str, Any]) -> dict[str, Any]:
+    execution = spec.get("phaseExecutionContract")
+    if (
+        isinstance(execution, dict)
+        and phase_execution_version(spec) >= SIMPLIFIED_PHASE_EXECUTION_VERSION
+    ):
+        execution["correctionAuthority"] = {
+            "mode": "cumulative-prior-phase-repair",
+            "laterPhaseMayRepairEarlierPhase": True,
+            "futurePhaseEditsForbidden": True,
+            "impactAssessmentRequired": True,
+            "challengerOnly": True,
+            "previousRenderComparisonRequired": True,
+            "protectedPhaseRegressionVeto": True,
+            "priorPhaseReviewRequired": True,
+            "priorPhaseImprovementAllowed": True,
+            "priorPhaseIsNotFrozen": True,
+            "rule": (
+                "The active phase must review its own and every earlier phase's visible "
+                "quality, and may improve earlier work when evidence exposes a defect "
+                "or clear opportunity. Assess impact first, edit only a challenger, "
+                "and promote only when the cumulative result is better or unchanged."
+            ),
+        }
+        execution["visualScout"] = blind_scout_execution_contract()
+        execution["qualityGate"] = {
+            "mode": "ai-scout-human",
+            "signals": [
+                "aiOverallScore>=0.70",
+                "blindScoutDecision=approve",
+                "humanApproval=approved",
+            ],
+            "aiOverallFloor": SIMPLIFIED_AI_OVERALL_FLOOR,
+            "blindScoutDecisions": ["approve", "reject"],
+            "maxBlindScoutObservations": MAX_BLIND_SCOUT_OBSERVATIONS,
+            "centroidAndAspect": "diagnostic-only",
+            "humanApprovalAfterSystemPass": True,
+        }
+    targets = spec.get("qualityTargets")
+    diagnostics = (
+        targets.get("diagnosticTargets")
+        if isinstance(targets, dict)
+        else None
+    )
+    if isinstance(diagnostics, dict):
+        diagnostics.pop("silhouetteIou", None)
+        diagnostics["guardrailMode"] = "advisory-only"
+    if schema_version_at_least(spec, CURRENT_SCHEMA_VERSION):
+        configured = {
+            str(item.get("id")): item
+            for item in spec.get("buildPasses", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        canonical = build_pass_plan(
+            _spec_complexity(spec),
+            None,
+            str(spec.get("qualityProfile") or "balanced"),
+            interaction_required=interaction_required(spec),
+        )
+        spec["buildPasses"] = [
+            {**copy.deepcopy(configured.get(str(item["id"]), {})), **item}
+            for item in canonical
+        ]
+        for item in spec["buildPasses"]:
+            if isinstance(item, dict):
+                item.pop("maximumSilhouetteIouRegression", None)
+        if simplified_visual_gate_enabled(spec):
+            for item in spec["buildPasses"]:
+                if not isinstance(item, dict) or item.get("evidenceType") != "visual":
+                    continue
+                item["minimumOverallScore"] = SIMPLIFIED_AI_OVERALL_FLOOR
+                item["requiredLayerScores"] = {}
+                item["ownedLayers"] = []
+                item["preserveLayers"] = []
+                item["maximumVisualRegression"] = 0.10 if item.get("id") != "blockout" else 0.0
+                sanity = item.get("visualSanity")
+                if isinstance(sanity, dict):
+                    sanity["requiredCategories"] = []
+        loop = spec.get("selfCorrectLoop")
+        if isinstance(loop, dict):
+            pass_ids = [str(item["id"]) for item in canonical]
+            loop["reviewAfterPasses"] = pass_ids
+            screenshot = loop.get("screenshotPolicy")
+            if isinstance(screenshot, dict):
+                screenshot["requiredForPasses"] = [
+                    str(item["id"])
+                    for item in canonical
+                    if item.get("evidenceType") == "visual"
+                ]
     payload = pipeline_status(spec)
     spec["sculptPipeline"] = payload
     return payload
@@ -1672,7 +4135,7 @@ def check_pass(spec: dict[str, Any], requested_pass: str) -> tuple[bool, str, di
     ids = status["passOrder"]
     if requested_pass not in ids:
         return False, f"unknown build pass {requested_pass!r}; expected one of: {', '.join(ids)}", status
-    if status["state"] in {"stopped", "awaiting-input"}:
+    if status["state"] in {"stopped", "awaiting-input", "awaiting-user-approval"}:
         return False, f"workflow is {status['state']}: {status['blockedReason']}", status
     current = status["currentPass"]
     completed = status["completedPasses"]

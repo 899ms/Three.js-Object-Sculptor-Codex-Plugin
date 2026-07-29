@@ -6,21 +6,38 @@ import hashlib
 import math
 import re
 import shutil
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from sculpt_contract import (
+    BLIND_SCOUT_ARTIFACT_VERSION,
+    BLIND_SCOUT_PHASE_CATEGORIES,
+    CORRECTION_OPERATIONS,
     CORRECTION_SCOPES,
+    CORRECTION_TARGET_TYPES,
     REFINEMENT_ACTIONS,
     STRATEGY_RESET_ACTION,
+    blind_scout_phase_id,
+    blind_scout_phase_scope,
     correction_batch_from_verdict,
+    deterministic_quality_gate_failures,
+    diagnostic_quality_vector,
+    effective_pass_config,
     file_sha256,
+    is_pending_quality_attempt,
+    quality_candidate_disposition,
     refinement_budget,
+    resolve_correction_parameter,
+    review_target_catalog,
+    simplified_visual_gate_enabled,
+    visual_checkpoint_presentation,
     visual_evidence_authority_failures,
     visual_evidence_integrity_failures,
     write_spec_atomic,
 )
+from sculpt_checkpoint import capture_checkpoint, restore_checkpoint
 from sculpt_manifest import entry_by_id, load_modules, read_object, resolve_manifest
 from sculpt_module_contract import (
     MODULE_BUILD_RECEIPT_ARTIFACT_TYPE,
@@ -37,9 +54,13 @@ from sculpt_module_state import (
     implementation_semantic_hashes,
     interface_hash,
     module_representation_signature,
+    module_preview_pass,
+    module_required_layer_scores,
     module_status,
+    recorded_reviewer_context_ids,
     visual_gate_floor,
 )
+from sculpt_perception import perceptual_review_failures
 
 
 MODULE_REVIEW_ARTIFACT_TYPE = "threejs-sculpt-module-review"
@@ -66,8 +87,19 @@ ISSUE_FAILURE_CLASSES = {
     "performance",
     "other",
 }
+SANITY_CATEGORIES = {
+    "assemblyCorrectness",
+    "proportionBalance",
+    "shapeSilhouette",
+    "materialPlausibility",
+    "surfaceQuality",
+    "signatureDetail",
+}
 MODULE_PREFLIGHT_ARTIFACT_TYPE = "threejs-sculpt-module-preflight"
 MODULE_PREFLIGHT_VERSION = 1
+BLIND_SCOUT_ARTIFACT_TYPE = "threejs-sculpt-blind-scout"
+BLIND_SCOUT_VERSION = BLIND_SCOUT_ARTIFACT_VERSION
+MAX_BLIND_SCOUT_OBSERVATIONS = 3
 
 
 def _is_score(value: Any) -> bool:
@@ -85,11 +117,269 @@ def _strings(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str) and item]
 
 
+def _finite_nonnegative(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0
+    )
+
+
+def _finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _validate_quantified_delta(
+    value: Any,
+    label: str,
+    evidence_view_ids: set[str],
+    failures: list[str],
+) -> None:
+    if not isinstance(value, dict):
+        failures.append(f"{label} must be an object with metric/from/to/tolerance/unit/viewIds")
+        return
+    if not isinstance(value.get("metric"), str) or len(value.get("metric", "").strip()) < 3:
+        failures.append(f"{label}.metric must name the measured outcome")
+    for field in ("from", "to"):
+        if not _finite_number(value.get(field)):
+            failures.append(f"{label}.{field} must be a finite number")
+    tolerance = value.get("tolerance")
+    if not _finite_nonnegative(tolerance):
+        failures.append(f"{label}.tolerance must be a non-negative number")
+    if (
+        _finite_number(value.get("from"))
+        and _finite_number(value.get("to"))
+        and float(value["from"]) == float(value["to"])
+    ):
+        failures.append(f"{label}.to must differ from .from")
+    if not isinstance(value.get("unit"), str) or not value.get("unit", "").strip():
+        failures.append(f"{label}.unit is required")
+    view_ids = value.get("viewIds")
+    if not isinstance(view_ids, list) or not view_ids or not all(
+        isinstance(item, str) and item for item in view_ids
+    ):
+        failures.append(f"{label}.viewIds must contain reviewed view ids")
+    elif evidence_view_ids:
+        unknown = sorted(set(view_ids) - evidence_view_ids)
+        if unknown:
+            failures.append(f"{label}.viewIds reference unknown reviewed views: " + ", ".join(unknown))
+
+
+def blind_scout_contract_failures(
+    scout: Any,
+    evidence: Mapping[str, Any],
+    *,
+    require_approve: bool = False,
+    primary_reviewer_context: str | None = None,
+    expected_phase: str | None = None,
+) -> list[str]:
+    """Validate the ID-free, binary visual scout record supplied by a reviewer."""
+
+    failures: list[str] = []
+    if not isinstance(scout, Mapping):
+        return ["blindScout is required for the v4 visual gate"]
+    allowed_scout_fields = {
+        "artifactType",
+        "version",
+        "phaseId",
+        "decision",
+        "comparisonSha256",
+        "reviewedAt",
+        "reviewer",
+        "observations",
+    }
+    unexpected_scout_fields = sorted(set(scout) - allowed_scout_fields)
+    if unexpected_scout_fields:
+        failures.append(
+            "blindScout contains forbidden fields: "
+            + ", ".join(str(field) for field in unexpected_scout_fields)
+        )
+    if scout.get("artifactType") != BLIND_SCOUT_ARTIFACT_TYPE:
+        failures.append(f"blindScout.artifactType must be {BLIND_SCOUT_ARTIFACT_TYPE!r}")
+    if scout.get("version") != BLIND_SCOUT_VERSION:
+        failures.append(f"blindScout.version must be {BLIND_SCOUT_VERSION}")
+    canonical_phase = blind_scout_phase_id(
+        expected_phase if expected_phase is not None else str(scout.get("phaseId") or "")
+    )
+    if (
+        canonical_phase not in BLIND_SCOUT_PHASE_CATEGORIES
+        or scout.get("phaseId") != canonical_phase
+    ):
+        failures.append(
+            f"blindScout.phaseId must match the active phase {canonical_phase!r}"
+        )
+    decision = scout.get("decision")
+    if decision not in {"approve", "reject"}:
+        failures.append("blindScout.decision must be approve or reject")
+    if scout.get("comparisonSha256") != evidence.get("comparisonSha256"):
+        failures.append("blindScout.comparisonSha256 must match the evidence comparison hash")
+    if not isinstance(scout.get("reviewedAt"), str) or not scout["reviewedAt"].strip():
+        failures.append("blindScout.reviewedAt is required")
+    reviewer = scout.get("reviewer")
+    if not isinstance(reviewer, Mapping):
+        failures.append("blindScout.reviewer must be an object")
+    else:
+        unexpected_reviewer_fields = sorted(
+            set(reviewer) - {"role", "contextId", "model"}
+        )
+        if unexpected_reviewer_fields:
+            failures.append(
+                "blindScout.reviewer contains forbidden fields: "
+                + ", ".join(str(field) for field in unexpected_reviewer_fields)
+            )
+        if reviewer.get("role") != "blind-visual-scout":
+            failures.append("blindScout.reviewer.role must be blind-visual-scout")
+        for field in ("contextId", "model"):
+            if not isinstance(reviewer.get(field), str) or not reviewer[field].strip():
+                failures.append(f"blindScout.reviewer.{field} is required")
+        if (
+            isinstance(primary_reviewer_context, str)
+            and primary_reviewer_context.strip()
+            and reviewer.get("contextId") == primary_reviewer_context
+        ):
+            failures.append("blindScout reviewer contextId must differ from primary reviewer")
+    observations = scout.get("observations")
+    if not isinstance(observations, list):
+        failures.append("blindScout.observations must be an array")
+        observations = []
+    if len(observations) > MAX_BLIND_SCOUT_OBSERVATIONS:
+        failures.append(
+            f"blindScout.observations may contain at most {MAX_BLIND_SCOUT_OBSERVATIONS} items"
+        )
+    known_views = {
+        item.get("viewId")
+        for item in evidence.get("views", [])
+        if isinstance(item, Mapping) and isinstance(item.get("viewId"), str)
+    }
+    all_categories = {
+        category
+        for categories in BLIND_SCOUT_PHASE_CATEGORIES.values()
+        for category in categories
+    }
+    blocking = 0
+    forbidden = {
+        "componentid",
+        "componentids",
+        "parameterpath",
+        "score",
+        "numericfix",
+        "beforevalue",
+        "expectedvalue",
+        "value",
+    }
+    for index, observation in enumerate(observations):
+        label = f"blindScout.observations[{index}]"
+        if not isinstance(observation, Mapping):
+            failures.append(f"{label} must be an object")
+            continue
+        unexpected_observation_fields = sorted(
+            set(observation)
+            - {
+                "visualRegion",
+                "category",
+                "phaseScope",
+                "direction",
+                "severity",
+                "viewIds",
+            }
+        )
+        if unexpected_observation_fields:
+            failures.append(
+                f"{label} contains forbidden fields: "
+                + ", ".join(str(field) for field in unexpected_observation_fields)
+            )
+        for field in ("visualRegion", "category", "direction"):
+            if not isinstance(observation.get(field), str) or not observation[field].strip():
+                failures.append(f"{label}.{field} is required")
+        direction = observation.get("direction")
+        if isinstance(direction, str) and re.search(r"\d", direction):
+            failures.append(f"{label}.direction must not contain a numeric fix")
+        severity = observation.get("severity")
+        if severity not in {"critical", "major", "minor"}:
+            failures.append(f"{label}.severity must be critical, major, or minor")
+        category = observation.get("category")
+        if category not in all_categories:
+            failures.append(f"{label}.category is not a canonical visual category")
+        expected_scope = blind_scout_phase_scope(canonical_phase, str(category))
+        if observation.get("phaseScope") != expected_scope:
+            failures.append(
+                f"{label}.phaseScope must be {expected_scope!r} for "
+                f"{canonical_phase} category {category!r}"
+            )
+        if expected_scope in {"current", "protected"} and severity in {"critical", "major"}:
+            blocking += 1
+        view_ids = observation.get("viewIds")
+        if not isinstance(view_ids, list) or not view_ids or not all(
+            isinstance(item, str) and item.strip() for item in view_ids
+        ):
+            failures.append(f"{label}.viewIds must contain reviewed view ids")
+        elif known_views:
+            unknown = sorted(set(view_ids) - known_views)
+            if unknown:
+                failures.append(f"{label}.viewIds reference unknown views: " + ", ".join(unknown))
+        for key in observation:
+            if str(key).lower() in forbidden:
+                failures.append(f"{label} must not contain spec/score/numeric field {key!r}")
+    if decision == "approve" and blocking:
+        failures.append(
+            "blindScout approve cannot contain current/protected critical or major observations"
+        )
+    if decision == "reject" and not blocking:
+        failures.append(
+            "blindScout reject requires a current/protected critical or major observation"
+        )
+    if require_approve and decision != "approve":
+        failures.append("blindScout decision must be approve before phase promotion")
+    return list(dict.fromkeys(failures))
+
+
+def _validate_observed_mismatch(
+    value: Any,
+    label: str,
+    evidence_view_ids: set[str],
+    failures: list[str],
+) -> None:
+    if not isinstance(value, dict):
+        failures.append(
+            f"{label} must be an object with parameterPath/actual/expected/unit/tolerance/viewIds"
+        )
+        return
+    if not isinstance(value.get("parameterPath"), str) or not value.get("parameterPath", "").strip():
+        failures.append(f"{label}.parameterPath is required")
+    for field in ("actual", "expected"):
+        if field not in value:
+            failures.append(f"{label}.{field} is required")
+    if not isinstance(value.get("unit"), str) or not value.get("unit", "").strip():
+        failures.append(f"{label}.unit is required")
+    if not _finite_nonnegative(value.get("tolerance")):
+        failures.append(f"{label}.tolerance must be a non-negative number")
+    view_ids = value.get("viewIds")
+    if not isinstance(view_ids, list) or not view_ids or not all(
+        isinstance(item, str) and item for item in view_ids
+    ):
+        failures.append(f"{label}.viewIds must contain reviewed view ids")
+    elif evidence_view_ids:
+        unknown = sorted(set(view_ids) - evidence_view_ids)
+        if unknown:
+            failures.append(f"{label}.viewIds reference unknown reviewed views: " + ", ".join(unknown))
+
+
 def review_contract_failures(
     verdict: dict[str, Any],
     evidence: dict[str, Any],
     artifact_type: str = MODULE_REVIEW_ARTIFACT_TYPE,
     artifact_version: int = MODULE_REVIEW_VERSION,
+    target_catalog: Mapping[str, Mapping[str, Any]] | None = None,
+    required_sanity_categories: list[str] | None = None,
+    *,
+    require_blind_scout: bool = False,
+    simplified_visual_gate: bool = False,
+    blind_scout_phase: str | None = None,
 ) -> list[str]:
     failures: list[str] = []
     if verdict.get("artifactType") != artifact_type:
@@ -105,14 +395,34 @@ def review_contract_failures(
             "action must be continue, refine-spec, refine-code, refine-batch, "
             "strategy-reset, request-input, or stop"
         )
+    evidence_view_ids = {
+        item.get("viewId")
+        for item in evidence.get("views", [])
+        if isinstance(item, dict) and isinstance(item.get("viewId"), str) and item.get("viewId")
+    }
     if verdict.get("comparisonSha256") != evidence.get("comparisonSha256"):
         failures.append("verdict comparisonSha256 does not match the reviewed evidence")
+    builder = verdict.get("builder")
+    reviewer = verdict.get("reviewer")
+    if require_blind_scout:
+        primary_context = (
+            reviewer.get("contextId")
+            if isinstance(reviewer, dict)
+            else None
+        )
+        failures.extend(
+            blind_scout_contract_failures(
+                verdict.get("blindScout"),
+                evidence,
+                require_approve=action == "continue",
+                primary_reviewer_context=primary_context,
+                expected_phase=blind_scout_phase,
+            )
+        )
     summary = verdict.get("summary")
     if not isinstance(summary, str) or len(summary.strip()) < 12:
         failures.append("summary must contain a concrete visual assessment")
 
-    builder = verdict.get("builder")
-    reviewer = verdict.get("reviewer")
     builder_context = builder.get("contextId") if isinstance(builder, dict) else None
     reviewer_context = reviewer.get("contextId") if isinstance(reviewer, dict) else None
     if not isinstance(builder_context, str) or not builder_context.strip():
@@ -132,6 +442,7 @@ def review_contract_failures(
 
     issues = verdict.get("issues", [])
     issue_ids: set[str] = set()
+    issues_by_id: dict[str, dict[str, Any]] = {}
     if not isinstance(issues, list):
         failures.append("issues must be an array")
         issues = []
@@ -147,6 +458,7 @@ def review_contract_failures(
             failures.append(f"duplicate issue id {issue_id!r}")
         else:
             issue_ids.add(issue_id)
+            issues_by_id[issue_id] = issue
         if issue.get("severity") not in {"critical", "major", "minor"}:
             failures.append(f"{label}.severity must be critical, major, or minor")
         if issue.get("status") not in {"open", "resolved"}:
@@ -162,6 +474,26 @@ def review_contract_failures(
         for field in ("rootCauseKey", "evidenceCheck"):
             if not isinstance(issue.get(field), str) or not issue.get(field, "").strip():
                 failures.append(f"{label}.{field} is required")
+        if action in REFINEMENT_ACTIONS and issue.get("status") == "open":
+            target_type = issue.get("targetType")
+            target_id = issue.get("target")
+            if target_type not in CORRECTION_TARGET_TYPES:
+                failures.append(
+                    f"{label}.targetType must be one of: "
+                    + ", ".join(sorted(CORRECTION_TARGET_TYPES))
+                )
+            elif target_catalog is not None and (
+                target_type not in target_catalog or target_id not in target_catalog[target_type]
+            ):
+                failures.append(
+                    f"{label}.target must reference an existing {target_type} id; got {target_id!r}"
+                )
+            _validate_observed_mismatch(
+                issue.get("observedMismatch"),
+                f"{label}.observedMismatch",
+                evidence_view_ids,
+                failures,
+            )
 
     open_issue_ids = {
         issue.get("id")
@@ -170,6 +502,94 @@ def review_contract_failures(
         and issue.get("status") == "open"
         and isinstance(issue.get("id"), str)
     }
+
+    required_sanity = list(dict.fromkeys(required_sanity_categories or []))
+    if action == "continue" or action in REFINEMENT_ACTIONS:
+        sanity_checks = verdict.get("sanityChecks")
+        if required_sanity and not isinstance(sanity_checks, dict):
+            failures.append(
+                "scored review requires sanityChecks for: "
+                + ", ".join(required_sanity)
+            )
+            sanity_checks = {}
+        if isinstance(sanity_checks, dict):
+            for category in required_sanity:
+                label = f"sanityChecks.{category}"
+                check = sanity_checks.get(category)
+                if not isinstance(check, dict):
+                    failures.append(f"{label} must be an object")
+                    continue
+                status = check.get("status")
+                if status not in {"pass", "fail"}:
+                    failures.append(f"{label}.status must be pass or fail")
+                if not isinstance(check.get("summary"), str) or len(
+                    check.get("summary", "").strip()
+                ) < 8:
+                    failures.append(f"{label}.summary must state the visual finding")
+                component_ids = check.get("componentIds")
+                if not isinstance(component_ids, list) or not all(
+                    isinstance(item, str) and item for item in component_ids
+                ):
+                    failures.append(f"{label}.componentIds must be an array of exact ids")
+                elif target_catalog is not None:
+                    known_components = target_catalog.get("component", {})
+                    unknown_components = sorted(
+                        set(component_ids) - set(known_components)
+                    )
+                    if unknown_components:
+                        failures.append(
+                            f"{label}.componentIds reference unknown components: "
+                            + ", ".join(unknown_components)
+                        )
+                view_ids = check.get("viewIds")
+                if not isinstance(view_ids, list) or not view_ids or not all(
+                    isinstance(item, str) and item for item in view_ids
+                ):
+                    failures.append(f"{label}.viewIds must contain reviewed view ids")
+                elif evidence_view_ids:
+                    unknown = sorted(set(view_ids) - evidence_view_ids)
+                    if unknown:
+                        failures.append(
+                            f"{label}.viewIds reference unknown reviewed views: "
+                            + ", ".join(unknown)
+                        )
+                layer_scores = verdict.get("layerScores")
+                if not isinstance(layer_scores, dict) or not _is_score(
+                    layer_scores.get(category)
+                ):
+                    failures.append(
+                        f"{label} requires layerScores.{category} from 0 to 1"
+                    )
+                matching_issues = [
+                    issue
+                    for issue in issues
+                    if isinstance(issue, dict)
+                    and issue.get("status") == "open"
+                    and issue.get("sanityCategory") == category
+                ]
+                if status == "fail" and not matching_issues:
+                    failures.append(
+                        f"{label} fail requires an open issue with matching sanityCategory"
+                    )
+                if action == "continue" and status != "pass":
+                    failures.append(
+                        f"continue is vetoed because {label}.status is not pass"
+                    )
+        for index, issue in enumerate(issues):
+            if not isinstance(issue, dict):
+                continue
+            category = issue.get("sanityCategory")
+            if category is not None and category not in SANITY_CATEGORIES:
+                failures.append(f"issues[{index}].sanityCategory is invalid")
+            if (
+                issue.get("status") == "open"
+                and issue.get("severity") in BLOCKING_SEVERITIES
+                and required_sanity
+                and category not in SANITY_CATEGORIES
+            ):
+                failures.append(
+                    f"issues[{index}] blocking visual defect must name a valid sanityCategory"
+                )
 
     corrections = verdict.get("corrections", [])
     if not isinstance(corrections, list):
@@ -194,9 +614,118 @@ def review_contract_failures(
             failures.append(
                 f"{label}.scope conflicts with {action}; use refine-batch for mixed spec/code corrections"
             )
-        for field in ("target", "parameterPath", "change", "expectedDelta"):
+        for field in ("target", "parameterPath", "change", "unit"):
             if not isinstance(correction.get(field), str) or not correction.get(field, "").strip():
                 failures.append(f"{label}.{field} is required")
+        if action in REFINEMENT_ACTIONS:
+            target_type = correction.get("targetType")
+            target_id = correction.get("target")
+            if target_type not in CORRECTION_TARGET_TYPES:
+                failures.append(
+                    f"{label}.targetType must be one of: "
+                    + ", ".join(sorted(CORRECTION_TARGET_TYPES))
+                )
+            elif target_catalog is not None and (
+                target_type not in target_catalog or target_id not in target_catalog[target_type]
+            ):
+                failures.append(
+                    f"{label}.target must reference an existing {target_type} id; got {target_id!r}"
+                )
+            linked_issue = issues_by_id.get(str(correction.get("issueId")))
+            if isinstance(linked_issue, dict) and (
+                linked_issue.get("targetType") != target_type
+                or linked_issue.get("target") != target_id
+            ):
+                failures.append(f"{label} target must exactly match its issue target")
+            if isinstance(linked_issue, dict):
+                mismatch = linked_issue.get("observedMismatch")
+                if isinstance(mismatch, dict):
+                    if (
+                        "beforeValue" in correction
+                        and mismatch.get("actual") != correction.get("beforeValue")
+                    ):
+                        failures.append(
+                            f"{label}.beforeValue must equal its issue observedMismatch.actual"
+                        )
+                    if (
+                        "expectedValue" in correction
+                        and mismatch.get("expected") != correction.get("expectedValue")
+                    ):
+                        failures.append(
+                            f"{label}.expectedValue must equal its issue observedMismatch.expected"
+                        )
+
+            effective_scope = scope or expected_scope
+            parameter_path = correction.get("parameterPath")
+            if effective_scope == "spec":
+                if target_catalog is None:
+                    failures.append(f"{label} requires the current spec target catalog")
+                else:
+                    resolved, current_value = resolve_correction_parameter(
+                        target_catalog,
+                        target_type,
+                        target_id,
+                        parameter_path,
+                    )
+                    if not resolved:
+                        failures.append(
+                            f"{label}.parameterPath must resolve on {target_type} {target_id!r}"
+                        )
+                    elif (
+                        "beforeValue" in correction
+                        and correction.get("beforeValue") != current_value
+                    ):
+                        failures.append(
+                            f"{label}.beforeValue must equal the current spec value {current_value!r}"
+                        )
+            elif effective_scope == "code" and (
+                not isinstance(parameter_path, str)
+                or not parameter_path.startswith("implementation.")
+            ):
+                failures.append(
+                    f"{label}.parameterPath for code scope must start with 'implementation.'"
+                )
+
+            operation = correction.get("operation")
+            if operation not in CORRECTION_OPERATIONS:
+                failures.append(
+                    f"{label}.operation must be one of: "
+                    + ", ".join(sorted(CORRECTION_OPERATIONS))
+                )
+            for field in ("beforeValue", "value", "expectedValue"):
+                if field not in correction:
+                    failures.append(f"{label}.{field} is required")
+            if operation in {"set", "replace"} and (
+                "value" in correction
+                and "expectedValue" in correction
+                and correction.get("value") != correction.get("expectedValue")
+            ):
+                failures.append(f"{label}.expectedValue must equal .value for {operation}")
+            if operation == "scale":
+                value = correction.get("value")
+                if not (
+                    _finite_number(value)
+                    or (
+                        isinstance(value, list)
+                        and value
+                        and all(_finite_number(item) for item in value)
+                    )
+                ):
+                    failures.append(f"{label}.value for scale must be a finite factor or vector")
+            if operation in {"translate", "rotate"}:
+                value = correction.get("value")
+                if not (
+                    isinstance(value, list)
+                    and len(value) == 3
+                    and all(_finite_number(item) for item in value)
+                ):
+                    failures.append(f"{label}.value for {operation} must be three finite numbers")
+            _validate_quantified_delta(
+                correction.get("expectedDelta"),
+                f"{label}.expectedDelta",
+                evidence_view_ids,
+                failures,
+            )
 
     resolved = verdict.get("resolvedIssueIds", [])
     if not isinstance(resolved, list) or not all(isinstance(item, str) and item for item in resolved):
@@ -235,10 +764,26 @@ def review_contract_failures(
     if action == "continue" or action in REFINEMENT_ACTIONS:
         if not _is_score(verdict.get("overallScore")):
             failures.append(f"{action} requires overallScore from 0 to 1")
-        if not isinstance(verdict.get("layerScores"), dict):
-            failures.append(f"{action} requires layerScores")
+        layer_scores = verdict.get("layerScores")
+        if simplified_visual_gate:
+            if layer_scores is not None and (
+                not isinstance(layer_scores, dict)
+                or any(
+                    not isinstance(layer, str)
+                    or not layer
+                    or not _is_score(value)
+                    for layer, value in layer_scores.items()
+                )
+            ):
+                failures.append(
+                    f"{action} optional layerScores values must be named scores from 0 to 1"
+                )
+        elif not isinstance(layer_scores, dict) or not layer_scores:
+            failures.append(f"{action} requires non-empty layerScores")
+        elif any(not isinstance(layer, str) or not layer or not _is_score(value) for layer, value in layer_scores.items()):
+            failures.append(f"{action} layerScores values must be named scores from 0 to 1")
     if action == "continue":
-        if not isinstance(verdict.get("featureReviews"), list):
+        if not simplified_visual_gate and not isinstance(verdict.get("featureReviews"), list):
             failures.append("continue requires featureReviews")
     if action == STRATEGY_RESET_ACTION:
         for field in ("strategyId", "strategyChange", "falsifyingCheck"):
@@ -249,6 +794,7 @@ def review_contract_failures(
             isinstance(item, str) and item for item in root_causes
         ):
             failures.append("strategy-reset requires rootCauseKeys")
+    failures.extend(impact_assessment_failures(verdict, target_catalog))
     if action == "request-input":
         required_evidence = verdict.get("requiredEvidence")
         if not isinstance(required_evidence, list) or not required_evidence:
@@ -262,7 +808,7 @@ def review_contract_failures(
                 if isinstance(view, dict)
                 and isinstance(view.get("viewId"), str)
                 and isinstance(view.get("referenceProvenance"), dict)
-                and view["referenceProvenance"].get("origin") == "observed"
+                and view["referenceProvenance"].get("origin") in {"observed", "prepared-reference"}
             }
             provenance = evidence.get("renderProvenance")
             declared_view_ids = set(
@@ -327,8 +873,141 @@ def review_contract_failures(
     return list(dict.fromkeys(failures))
 
 
-def _review_contract_failures(verdict: dict[str, Any], evidence: dict[str, Any]) -> list[str]:
-    return review_contract_failures(verdict, evidence)
+def impact_assessment_failures(
+    verdict: Mapping[str, Any],
+    target_catalog: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[str]:
+    """Reject unbounded edits before they can mutate a challenger."""
+
+    action = verdict.get("action")
+    if action not in {*REFINEMENT_ACTIONS, STRATEGY_RESET_ACTION}:
+        return []
+    assessment = verdict.get("impactAssessment")
+    if not isinstance(assessment, Mapping):
+        return ["impactAssessment is required before refinement or strategy-reset"]
+    failures: list[str] = []
+    if assessment.get("verdict") != "safe-to-apply":
+        failures.append("impactAssessment.verdict must be safe-to-apply")
+    if assessment.get("risk") not in {"low", "medium", "high"}:
+        failures.append("impactAssessment.risk must be low, medium, or high")
+    for field in ("expectedEffect", "rollbackCheckpoint"):
+        if not isinstance(assessment.get(field), str) or len(
+            str(assessment.get(field) or "").strip()
+        ) < 8:
+            failures.append(f"impactAssessment.{field} must be concrete")
+    for field, allow_empty in (
+        ("targetIds", False),
+        ("allowedPaths", False),
+        ("protectedComponentIds", True),
+        ("possibleSideEffects", True),
+        ("structuralInvariants", False),
+    ):
+        value = assessment.get(field)
+        if not isinstance(value, list) or (not allow_empty and not value) or not all(
+            isinstance(item, str) and item.strip() for item in (value or [])
+        ):
+            failures.append(
+                f"impactAssessment.{field} must be "
+                + ("an array of strings" if allow_empty else "a non-empty array of strings")
+            )
+    target_ids = {
+        str(item) for item in assessment.get("targetIds", [])
+        if isinstance(item, str) and item
+    }
+    allowed_paths = {
+        str(item) for item in assessment.get("allowedPaths", [])
+        if isinstance(item, str) and item
+    }
+    protected_ids = {
+        str(item) for item in assessment.get("protectedComponentIds", [])
+        if isinstance(item, str) and item
+    }
+    corrections = [
+        item for item in verdict.get("corrections", [])
+        if isinstance(item, Mapping)
+    ]
+    if action in REFINEMENT_ACTIONS:
+        correction_targets = {
+            str(item.get("target")) for item in corrections
+            if isinstance(item.get("target"), str) and item.get("target")
+        }
+        correction_paths = {
+            str(item.get("parameterPath")) for item in corrections
+            if isinstance(item.get("parameterPath"), str) and item.get("parameterPath")
+        }
+        if correction_targets != target_ids:
+            failures.append(
+                "impactAssessment.targetIds must exactly match correction targets"
+            )
+        if correction_paths != allowed_paths:
+            failures.append(
+                "impactAssessment.allowedPaths must exactly match correction parameter paths"
+            )
+        if assessment.get("strategyChange") is not False:
+            failures.append("refinement impactAssessment.strategyChange must be false")
+    else:
+        if assessment.get("strategyChange") is not True:
+            failures.append("strategy-reset impactAssessment.strategyChange must be true")
+    component_targets = {
+        str(item.get("target"))
+        for item in corrections
+        if item.get("targetType") == "component"
+    }
+    overlap = sorted(component_targets & protected_ids)
+    if overlap:
+        failures.append(
+            "impactAssessment cannot protect and modify the same component: "
+            + ", ".join(overlap)
+        )
+    if target_catalog is not None:
+        known_targets = {
+            str(target_id)
+            for group in target_catalog.values()
+            if isinstance(group, Mapping)
+            for target_id in group
+        }
+        unknown_targets = sorted(target_ids - known_targets)
+        if unknown_targets:
+            failures.append(
+                "impactAssessment.targetIds reference unknown targets: "
+                + ", ".join(unknown_targets)
+            )
+        known_components = target_catalog.get("component", {})
+        unknown_protected = sorted(
+            protected_ids
+            - (
+                set(str(item) for item in known_components)
+                if isinstance(known_components, Mapping)
+                else set()
+            )
+        )
+        if unknown_protected:
+            failures.append(
+                "impactAssessment.protectedComponentIds reference unknown components: "
+                + ", ".join(unknown_protected)
+            )
+    return list(dict.fromkeys(failures))
+
+
+def _review_contract_failures(
+    verdict: dict[str, Any],
+    evidence: dict[str, Any],
+    target_catalog: Mapping[str, Mapping[str, Any]] | None = None,
+    required_sanity_categories: list[str] | None = None,
+    *,
+    require_blind_scout: bool = False,
+    simplified_visual_gate: bool = False,
+    blind_scout_phase: str | None = None,
+) -> list[str]:
+    return review_contract_failures(
+        verdict,
+        evidence,
+        target_catalog=target_catalog,
+        required_sanity_categories=required_sanity_categories,
+        require_blind_scout=require_blind_scout,
+        simplified_visual_gate=simplified_visual_gate,
+        blind_scout_phase=blind_scout_phase,
+    )
 
 
 def _implementation_hashes(files: list[Path]) -> dict[str, str]:
@@ -390,6 +1069,7 @@ def _render_provenance_failures(
             module_id,
             module_hash_value,
             manifest_path,
+            module_preview_pass(module),
         )
     )
     return failures
@@ -400,6 +1080,7 @@ def _generated_runtime_provenance_failures(
     module_id: str,
     module_hash_value: str,
     manifest_path: Path,
+    expected_pass_id: str,
 ) -> list[str]:
     """Prove the reviewed pixels came from the current generated factory in a live scene."""
 
@@ -439,6 +1120,10 @@ def _generated_runtime_provenance_failures(
         failures.append("generated module build receipt is stale for the current module spec")
     if build_receipt.get("manifestPath") != str(manifest_path.expanduser().resolve()):
         failures.append("generated module build receipt belongs to another sculpt manifest")
+    if build_receipt.get("passId") != expected_pass_id:
+        failures.append(
+            f"generated module build receipt must use the module preview pass {expected_pass_id!r}"
+        )
     resolved_spec_data: dict[str, Any] | None = None
     generated_source = ""
     for path_field, hash_field, label in (
@@ -618,6 +1303,12 @@ def diagnostic_veto_failures(
     from make_visual_comparison_sheet import silhouette_diagnostics
 
     gate = module.get("qualityGate") if isinstance(module.get("qualityGate"), dict) else {}
+    global_spec = (
+        manifest.get("globalSpec")
+        if isinstance(manifest.get("globalSpec"), dict)
+        else {}
+    )
+    simplified = simplified_visual_gate_enabled(global_spec)
     required_views = set(_strings(gate.get("requiredViews")))
     diagnostic_views = set(_strings(gate.get("diagnosticViews")))
     reviewed_views = required_views | diagnostic_views
@@ -672,8 +1363,7 @@ def diagnostic_veto_failures(
             coverage = info.get("foregroundCoverage") if isinstance(info, dict) else None
             if not _is_score(coverage) or float(coverage) <= 0.01 or float(coverage) >= 0.95:
                 failures.append(f"view {view_id!r} {side} foreground mask is unusable")
-        metrics = (
-            ("silhouetteIou", "minimumSilhouetteIou", lambda value, limit: value >= limit, "below"),
+        metrics = () if simplified else (
             ("centroidDelta", "maximumCentroidDelta", lambda value, limit: value <= limit, "above"),
             ("aspectRatioDelta", "maximumAspectRatioDelta", lambda value, limit: value <= limit, "above"),
         )
@@ -683,14 +1373,13 @@ def diagnostic_veto_failures(
             and provenance.get("origin") == "synthetic-hypothesis"
         )
         synthetic_limits = {
-            "minimumSilhouetteIou": 0.38,
             "maximumCentroidDelta": 0.18,
             "maximumAspectRatioDelta": 0.30,
         }
         for field, threshold_field, predicate, relation in metrics:
             value = diagnostics.get(field)
             limit = thresholds.get(threshold_field)
-            if synthetic_hypothesis:
+            if synthetic_hypothesis and not simplified:
                 synthetic_limit = synthetic_limits[threshold_field]
                 limit = (
                     min(float(limit), synthetic_limit)
@@ -708,10 +1397,14 @@ def diagnostic_veto_failures(
         if synthetic_hypothesis:
             # ImageGen can constrain inferred volume, not unseen material truth.
             continue
+        if simplified:
+            continue
         appearance = diagnostics.get("appearance")
-        appearance_metrics = (
+        geometry_appearance_metrics = (
             ("detailEnergyRatio", "minimumDetailEnergyRatio", lambda value, limit: value >= limit, "below"),
             ("edgeDensityRatio", "minimumEdgeDensityRatio", lambda value, limit: value >= limit, "below"),
+        )
+        lookdev_appearance_metrics = (
             (
                 "foregroundHistogramIntersection",
                 "minimumHistogramIntersection",
@@ -732,6 +1425,11 @@ def diagnostic_veto_failures(
                 "below",
             ),
         )
+        appearance_metrics = (
+            (*geometry_appearance_metrics, *lookdev_appearance_metrics)
+            if module_preview_pass(module) == "lookdev"
+            else geometry_appearance_metrics
+        )
         for field, threshold_field, predicate, relation in appearance_metrics:
             value = appearance.get(field) if isinstance(appearance, dict) else None
             limit = thresholds.get(threshold_field)
@@ -751,6 +1449,236 @@ def diagnostic_veto_failures(
     return list(dict.fromkeys(failures))
 
 
+def module_evidence_scope_failures(
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    module: dict[str, Any],
+    module_id: str,
+    evidence: dict[str, Any],
+) -> list[str]:
+    """Reject whole-object/reference vs isolated-module comparisons before scoring."""
+
+    payload = module.get("payload") if isinstance(module.get("payload"), dict) else {}
+    owned_component_ids = {
+        item.get("id")
+        for item in payload.get("componentTree", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    global_spec = (
+        manifest.get("globalSpec")
+        if isinstance(manifest.get("globalSpec"), dict)
+        else {}
+    )
+    global_source_value = global_spec.get("sourceImage")
+
+    def local_file(value: Any) -> Path | None:
+        if not isinstance(value, str) or not value.strip() or "://" in value:
+            return None
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = manifest_path.parent / candidate
+        resolved = candidate.resolve()
+        return resolved if resolved.is_file() else None
+
+    global_source = local_file(global_source_value)
+    failures: list[str] = []
+    for view in evidence.get("views", []):
+        if not isinstance(view, dict):
+            continue
+        view_id = str(view.get("viewId") or "unknown")
+        scope = view.get("evaluationScope")
+        if not isinstance(scope, dict):
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: module evidence requires "
+                "evaluationScope; do not compare a full-object reference with an isolated module render"
+            )
+            continue
+        if scope.get("kind") != "module-local" or scope.get("moduleId") != module_id:
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: evaluationScope must be "
+                f"module-local for module {module_id!r}"
+            )
+        component_ids = scope.get("componentIds")
+        scoped_components = (
+            set(component_ids)
+            if isinstance(component_ids, list)
+            and component_ids
+            and all(isinstance(item, str) and item for item in component_ids)
+            else set()
+        )
+        if not scoped_components:
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: componentIds must name the module-local targets"
+            )
+        elif not scoped_components <= owned_component_ids:
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: componentIds are not owned by "
+                f"module {module_id!r}: "
+                + ", ".join(sorted(scoped_components - owned_component_ids))
+            )
+        isolation = scope.get("referenceIsolation")
+        if not isinstance(isolation, dict):
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: referenceIsolation is required"
+            )
+            continue
+        method = isolation.get("method")
+        if method not in {"pre-isolated", "crop", "alpha-mask", "binary-mask"}:
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: referenceIsolation.method is invalid"
+            )
+        source = local_file(isolation.get("sourceImage"))
+        source_hash = isolation.get("sourceImageSha256")
+        if (
+            source is None
+            or not isinstance(source_hash, str)
+            or file_sha256(source) != source_hash
+        ):
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: isolated reference source/hash is invalid"
+            )
+        provenance = view.get("referenceProvenance")
+        observed_reference = (
+            isinstance(provenance, dict)
+            and provenance.get("origin") in {"observed", "prepared-reference"}
+        )
+        if (
+            global_source is not None
+            and observed_reference
+            and source != global_source
+        ):
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: acceptance module crop/mask must derive from sourceImage"
+            )
+        reference = local_file(view.get("referenceImage"))
+        isolated_hash = isolation.get("isolatedReferenceSha256")
+        if (
+            reference is None
+            or not isinstance(isolated_hash, str)
+            or isolated_hash != view.get("referenceSha256")
+            or file_sha256(reference) != isolated_hash
+        ):
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: isolated reference hash does not match referenceImage"
+            )
+        if (
+            global_source is not None
+            and reference is not None
+            and (
+                reference == global_source
+                or file_sha256(reference) == file_sha256(global_source)
+            )
+        ):
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: full sourceImage cannot be scored "
+                "against an isolated module render; provide a module crop or mask"
+            )
+        if global_source is not None and observed_reference and method == "pre-isolated":
+            failures.append(
+                f"view {view_id!r} evidence-scope-mismatch: observed module evidence must "
+                "declare crop, alpha-mask, or binary-mask derivation from sourceImage"
+            )
+        if method == "crop":
+            region = isolation.get("regionNormalized")
+            valid_region = not (
+                not isinstance(region, list)
+                or len(region) != 4
+                or any(
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or not math.isfinite(float(value))
+                    for value in region
+                )
+                or float(region[0]) < 0
+                or float(region[1]) < 0
+                or float(region[2]) <= 0
+                or float(region[3]) <= 0
+                or float(region[0]) + float(region[2]) > 1
+                or float(region[1]) + float(region[3]) > 1
+            )
+            if not valid_region:
+                failures.append(
+                    f"view {view_id!r} evidence-scope-mismatch: crop requires valid regionNormalized [x,y,w,h]"
+                )
+            elif source is not None and reference is not None:
+                try:
+                    source_width, source_height, source_pixels = load_image(source)
+                    reference_width, reference_height, reference_pixels = load_image(reference)
+                    x0 = max(0, min(source_width - 1, math.floor(float(region[0]) * source_width)))
+                    y0 = max(0, min(source_height - 1, math.floor(float(region[1]) * source_height)))
+                    x1 = max(x0 + 1, min(source_width, math.ceil((float(region[0]) + float(region[2])) * source_width)))
+                    y1 = max(y0 + 1, min(source_height, math.ceil((float(region[1]) + float(region[3])) * source_height)))
+                    derived_pixels = [
+                        source_pixels[y * source_width + x]
+                        for y in range(y0, y1)
+                        for x in range(x0, x1)
+                    ]
+                    crop_matches = (
+                        reference_width == x1 - x0
+                        and reference_height == y1 - y0
+                        and reference_pixels == derived_pixels
+                    )
+                except (OSError, ValueError):
+                    crop_matches = False
+                if not crop_matches:
+                    failures.append(
+                        f"view {view_id!r} evidence-scope-mismatch: referenceImage pixels do not equal the declared source crop"
+                    )
+        if method == "binary-mask":
+            mask = local_file(isolation.get("maskImage"))
+            mask_hash = isolation.get("maskSha256")
+            if mask is None or not isinstance(mask_hash, str) or file_sha256(mask) != mask_hash:
+                failures.append(
+                    f"view {view_id!r} evidence-scope-mismatch: binary-mask requires a hash-bound maskImage"
+                )
+            elif source is not None and reference is not None:
+                try:
+                    source_width, source_height, source_pixels = load_image(source)
+                    mask_width, mask_height, mask_pixels = load_image(mask)
+                    reference_width, reference_height, reference_pixels = load_image(reference)
+                    derived_pixels = [
+                        source_pixel if mask_pixel[3] >= 128 and sum(mask_pixel[:3]) >= 384 else (0, 0, 0, 0)
+                        for source_pixel, mask_pixel in zip(source_pixels, mask_pixels)
+                    ]
+                    mask_matches = (
+                        mask_width == source_width
+                        and mask_height == source_height
+                        and reference_width == source_width
+                        and reference_height == source_height
+                        and len(mask_pixels) == len(source_pixels)
+                        and reference_pixels == derived_pixels
+                    )
+                except (OSError, ValueError):
+                    mask_matches = False
+                if not mask_matches:
+                    failures.append(
+                        f"view {view_id!r} evidence-scope-mismatch: referenceImage pixels do not equal sourceImage with the declared binary mask"
+                    )
+        if method == "alpha-mask" and reference is not None:
+            try:
+                source_width, source_height, source_pixels = load_image(source) if source is not None else (0, 0, [])
+                reference_width, reference_height, pixels = load_image(reference)
+                alpha_matches = (
+                    source_width == reference_width
+                    and source_height == reference_height
+                    and len(source_pixels) == len(pixels)
+                    and any(pixel[3] < 250 for pixel in pixels)
+                    and any(pixel[3] >= 250 for pixel in pixels)
+                    and all(
+                        reference_pixel == source_pixel
+                        or reference_pixel == (0, 0, 0, 0)
+                        for source_pixel, reference_pixel in zip(source_pixels, pixels)
+                    )
+                )
+            except (OSError, ValueError):
+                alpha_matches = False
+            if not alpha_matches:
+                failures.append(
+                    f"view {view_id!r} evidence-scope-mismatch: alpha-mask reference is not a pixel-preserving mask of sourceImage"
+                )
+    return list(dict.fromkeys(failures))
+
+
 def _feature_gate_failures(
     manifest: dict[str, Any],
     module: dict[str, Any],
@@ -767,6 +1695,7 @@ def _feature_gate_failures(
         and (target.get("tier") == "critical" or target.get("mustPass") is True)
     }
     global_spec = manifest.get("globalSpec") if isinstance(manifest.get("globalSpec"), dict) else {}
+    simplified = simplified_visual_gate_enabled(global_spec)
     quality_contract = (
         global_spec.get("qualityContract")
         if isinstance(global_spec.get("qualityContract"), dict)
@@ -817,13 +1746,14 @@ def _feature_gate_failures(
             if _is_score(configured_minimum)
             else configured_minimum
         )
-        if not _is_score(score) or not _is_score(minimum):
-            failures.append(f"critical/covered feature {feature_id!r} has an invalid score contract")
-        elif float(score) < float(minimum):
-            failures.append(
-                f"critical/covered feature {feature_id!r} score {float(score):.3f} "
-                f"is below {float(minimum):.3f}"
-            )
+        if not simplified:
+            if not _is_score(score) or not _is_score(minimum):
+                failures.append(f"critical/covered feature {feature_id!r} has an invalid score contract")
+            elif float(score) < float(minimum):
+                failures.append(
+                    f"critical/covered feature {feature_id!r} score {float(score):.3f} "
+                    f"is below {float(minimum):.3f}"
+                )
         required_views = set(_strings(target.get("reviewViewIds"))) if target.get("requiresDedicatedEvidence") is True else set()
         review_views = set(_strings(review.get("viewIds")))
         missing_evidence = required_views - available_views
@@ -860,25 +1790,62 @@ def _continue_gate_failures(
     )
     if _is_score(overall) and _is_score(minimum) and float(overall) < float(minimum):
         failures.append(f"overall score {float(overall):.3f} is below {float(minimum):.3f}")
+    simplified = simplified_visual_gate_enabled(
+        manifest.get("globalSpec", {})
+        if isinstance(manifest.get("globalSpec"), dict)
+        else {},
+        module_preview_pass(module),
+    )
+    failures.extend(
+        perceptual_review_failures(
+            manifest.get("globalSpec", {})
+            if isinstance(manifest.get("globalSpec"), dict)
+            else {},
+            {
+                "evidence": evidence,
+                "reviewCorrections": verdict.get("corrections", []),
+                "correctionBatch": correction_batch_from_verdict(verdict),
+            },
+        )
+    )
     layer_scores = verdict.get("layerScores") if isinstance(verdict.get("layerScores"), dict) else {}
-    for layer, threshold in gate.get("requiredLayerScores", {}).items():
-        value = layer_scores.get(layer)
-        if not _is_score(value):
-            failures.append(f"required layer {layer!r} has no valid score")
-        elif float(value) < float(threshold):
-            failures.append(
-                f"layer {layer!r} score {float(value):.3f} is below {float(threshold):.3f}"
-            )
-    for issue in verdict.get("issues", []):
-        if (
-            isinstance(issue, dict)
-            and issue.get("status") == "open"
-            and issue.get("severity") in BLOCKING_SEVERITIES
-        ):
-            failures.append(f"blocking issue {issue.get('id')!r} remains open")
-    if not diagnostics_preflighted:
+    if not simplified:
+        for layer, threshold in module_required_layer_scores(module).items():
+            value = layer_scores.get(layer)
+            if not _is_score(value):
+                failures.append(f"required layer {layer!r} has no valid score")
+            elif float(value) < float(threshold):
+                failures.append(
+                    f"layer {layer!r} score {float(value):.3f} is below {float(threshold):.3f}"
+                )
+    if not simplified:
+        for issue in verdict.get("issues", []):
+            if (
+                isinstance(issue, dict)
+                and issue.get("status") == "open"
+                and issue.get("severity") in BLOCKING_SEVERITIES
+            ):
+                failures.append(f"blocking issue {issue.get('id')!r} remains open")
+    if not diagnostics_preflighted and not simplified:
         failures.extend(diagnostic_veto_failures(manifest, module, evidence))
+    # Covered/signature features always need an explicit independent visibility
+    # check.  The lightweight gate removes per-feature numeric thresholds, not
+    # the evidence that an identity-defining feature exists in the render.
     failures.extend(_feature_gate_failures(manifest, module, entry, evidence, verdict))
+    if simplified:
+        failures.extend(
+            blind_scout_contract_failures(
+                verdict.get("blindScout"),
+                evidence,
+                require_approve=True,
+                primary_reviewer_context=(
+                    verdict.get("reviewer", {}).get("contextId")
+                    if isinstance(verdict.get("reviewer"), dict)
+                    else None
+                ),
+                expected_phase=module_preview_pass(module),
+            )
+        )
     return list(dict.fromkeys(failures))
 
 
@@ -963,10 +1930,125 @@ def _snapshot_refinement_renders(
         )
     if not snapshots:
         raise ValueError("refinement review has no render views to preserve")
+    comparison_value = evidence.get("comparisonImage")
+    comparison_hash = evidence.get("comparisonSha256")
+    if not isinstance(comparison_value, str) or not isinstance(comparison_hash, str):
+        raise ValueError("reviewed comparison snapshot is missing its path or hash")
+    comparison_source = Path(comparison_value).expanduser().resolve()
+    if not comparison_source.is_file() or file_sha256(comparison_source) != comparison_hash:
+        raise ValueError("reviewed comparison changed before its immutable snapshot was stored")
+    comparison_suffix = (
+        comparison_source.suffix.lower()
+        if comparison_source.suffix.lower() in {".png", ".jpg", ".jpeg"}
+        else ".img"
+    )
+    comparison_destination = destination_dir / f"comparison-{comparison_hash[:12]}{comparison_suffix}"
+    if (
+        not comparison_destination.is_file()
+        or file_sha256(comparison_destination) != comparison_hash
+    ):
+        temporary = comparison_destination.with_name(comparison_destination.name + ".tmp")
+        shutil.copyfile(comparison_source, temporary)
+        if file_sha256(temporary) != comparison_hash:
+            temporary.unlink(missing_ok=True)
+            raise ValueError("immutable comparison snapshot hash does not match reviewed evidence")
+        temporary.replace(comparison_destination)
     return {
         "artifactType": "threejs-sculpt-render-snapshot",
         "version": 1,
         "views": snapshots,
+        "comparisonImage": str(comparison_destination),
+        "comparisonSha256": comparison_hash,
+    }
+
+
+def _module_checkpoint_files(
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    module_id: str,
+    implementation_files: dict[str, str],
+) -> tuple[list[Path], dict[Path, list[str]]]:
+    """Resolve only authoring/build files; append-only review cache stays outside rollback."""
+
+    module_path = load_modules(manifest_path, manifest, [module_id])[module_id][0]
+    files = [manifest_path, module_path, *(Path(value) for value in implementation_files)]
+    roles: dict[Path, list[str]] = {
+        manifest_path: ["manifest", "authoring"],
+        module_path: ["module-spec", "authoring"],
+    }
+    for value in implementation_files:
+        roles[Path(value)] = ["implementation", "authoring"]
+
+    build_path = module_build_receipt_path(manifest_path, module_id)
+    if build_path.is_file():
+        files.append(build_path)
+        roles[build_path] = ["build-receipt", "generated"]
+        build = read_object(build_path, "module build receipt")
+        for field, role in (
+            ("resolvedSpec", "resolved-spec"),
+            ("generatedOutput", "generated-factory"),
+        ):
+            value = build.get(field)
+            if isinstance(value, str) and value.strip():
+                artifact = Path(value).expanduser().resolve()
+                files.append(artifact)
+                roles[artifact] = [role, "generated"]
+    return list(dict.fromkeys(files)), roles
+
+
+def _capture_module_candidate(
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    module_id: str,
+    implementation_files: dict[str, str],
+    verdict: dict[str, Any],
+) -> dict[str, Any]:
+    files, roles = _module_checkpoint_files(
+        manifest_path,
+        manifest,
+        module_id,
+        implementation_files,
+    )
+    checkpoint = capture_checkpoint(
+        manifest_path.parent,
+        cache_path(manifest_path).parent / "quality-checkpoints",
+        files,
+        roles=roles,
+        metadata={
+            "scope": "module-quality-candidate",
+            "moduleId": module_id,
+            "reviewId": verdict.get("reviewId"),
+            "overallScore": verdict.get("overallScore"),
+            "layerScores": verdict.get("layerScores", {}),
+        },
+    )
+    checkpoint_id = checkpoint.parent.name
+    return {
+        "checkpointId": checkpoint_id,
+        "checkpointManifest": str(checkpoint),
+    }
+
+
+def _module_quality_policy(module: dict[str, Any]) -> dict[str, Any]:
+    required = module_required_layer_scores(module)
+    preview_pass = module_preview_pass(module)
+    if preview_pass == "lookdev":
+        owned = [
+            layer
+            for layer in required
+            if any(token in layer.lower() for token in ("material", "surface", "lighting", "light"))
+        ]
+        protected = [layer for layer in required if layer not in owned]
+        if not owned:
+            owned = list(required)
+    else:
+        owned = list(required)
+        protected = []
+    return {
+        "previewPass": preview_pass,
+        "requiredLayers": required,
+        "ownedLayers": owned,
+        "protectedLayers": protected,
     }
 
 
@@ -1117,7 +2199,7 @@ def _latest_pending_refinement_attempt(
             return None
         if attempt.get("action") == "request-input":
             continue
-        if attempt.get("action") in REFINEMENT_ACTIONS:
+        if is_pending_quality_attempt(attempt):
             return attempt
     return None
 
@@ -1127,10 +2209,11 @@ def _active_refinement_cycle(attempts: list[dict[str, Any]]) -> list[dict[str, A
     for attempt in reversed(attempts):
         if not isinstance(attempt, dict):
             continue
-        if attempt.get("accepted") is True or attempt.get("action") in {
-            "stop",
-            STRATEGY_RESET_ACTION,
-        }:
+        if attempt.get("accepted") is True or attempt.get("action") == STRATEGY_RESET_ACTION:
+            break
+        if attempt.get("action") == "stop":
+            if str(attempt.get("candidateDisposition") or "").startswith("rejected-"):
+                active.append(attempt)
             break
         active.append(attempt)
     return list(reversed(active))
@@ -1145,7 +2228,7 @@ def _pending_strategy_reset(attempts: list[dict[str, Any]]) -> dict[str, Any] | 
         action = attempt.get("action")
         if attempt.get("accepted") is True or action in {"request-input", "stop"}:
             return None
-        if action in REFINEMENT_ACTIONS:
+        if is_pending_quality_attempt(attempt):
             return None
         if action == STRATEGY_RESET_ACTION:
             return attempt
@@ -1189,6 +2272,18 @@ def _refinement_preflight_failures(
     implementation_semantic_files: dict[str, str],
     evidence: dict[str, Any],
 ) -> list[str]:
+    latest = next(
+        (attempt for attempt in reversed(attempts) if isinstance(attempt, dict)),
+        None,
+    )
+    if (
+        isinstance(latest, dict)
+        and latest.get("action") == "stop"
+        and str(latest.get("candidateDisposition") or "").startswith("rejected-")
+    ):
+        return [
+            "the reviewer stopped a regressed challenger; the champion is active and a strategy-reset with a materially different representation is required before another render"
+        ]
     pending_input = _pending_request_input(attempts)
     if pending_input is not None:
         requested_views = {
@@ -1202,7 +2297,7 @@ def _refinement_preflight_failures(
             if isinstance(view, dict)
             and isinstance(view.get("viewId"), str)
             and isinstance(view.get("referenceProvenance"), dict)
-            and view["referenceProvenance"].get("origin") == "observed"
+            and view["referenceProvenance"].get("origin") in {"observed", "prepared-reference"}
         }
         missing_views = requested_views - current_views
         if missing_views:
@@ -1375,15 +2470,33 @@ def _module_preflight_context(
     gate = module.get("qualityGate") if isinstance(module.get("qualityGate"), dict) else {}
     required_views = set(_strings(gate.get("requiredViews")))
     diagnostic_views = set(_strings(gate.get("diagnosticViews")))
+    evidence_contract_failures: list[str] = []
+    evidence_scope_failures: list[str] = []
+    hypothesis_failures: list[str] = []
+    provenance_failures: list[str] = []
+    diagnostic_failures: list[str] = []
+    refinement_failures: list[str] = []
     failures: list[str] = []
     if verify_evidence:
-        failures.extend(visual_evidence_integrity_failures(evidence))
-        failures.extend(visual_evidence_authority_failures(evidence, required_views))
+        evidence_contract_failures.extend(visual_evidence_integrity_failures(evidence))
+        evidence_contract_failures.extend(
+            visual_evidence_authority_failures(evidence, required_views)
+        )
+        evidence_scope_failures.extend(
+            module_evidence_scope_failures(
+                path,
+                manifest,
+                module,
+                module_id,
+                evidence,
+            )
+        )
+        evidence_contract_failures.extend(evidence_scope_failures)
         if diagnostic_views:
             from sculpt_view_hypotheses import hypothesis_evidence_failures
 
             global_spec = manifest.get("globalSpec") if isinstance(manifest.get("globalSpec"), dict) else {}
-            failures.extend(
+            hypothesis_failures.extend(
                 hypothesis_evidence_failures(
                     path,
                     global_spec,
@@ -1425,7 +2538,7 @@ def _module_preflight_context(
         module,
     )
     if verify_evidence:
-        failures.extend(
+        provenance_failures.extend(
             _render_provenance_failures(
                 evidence,
                 manifest,
@@ -1437,8 +2550,9 @@ def _module_preflight_context(
                 path,
             )
         )
-        failures.extend(diagnostic_veto_failures(manifest, module, evidence))
-        failures.extend(
+        if not evidence_scope_failures:
+            diagnostic_failures.extend(diagnostic_veto_failures(manifest, module, evidence))
+        refinement_failures.extend(
             _refinement_preflight_failures(
                 attempts,
                 str(checked.get("moduleHash") or ""),
@@ -1447,6 +2561,11 @@ def _module_preflight_context(
                 evidence,
             )
         )
+        failures.extend(evidence_contract_failures)
+        failures.extend(hypothesis_failures)
+        failures.extend(provenance_failures)
+        failures.extend(diagnostic_failures)
+        failures.extend(refinement_failures)
     return {
         "path": path,
         "manifest": manifest,
@@ -1463,7 +2582,220 @@ def _module_preflight_context(
         "evidenceFiles": _evidence_file_snapshot(evidence),
         "pendingCorrectionBatch": pending_batch,
         "refinementBudget": refinement_budget(attempts),
+        "pendingAttempt": pending_attempt,
+        "evidenceContractFailures": list(dict.fromkeys(evidence_contract_failures)),
+        "evidenceScopeFailures": list(dict.fromkeys(evidence_scope_failures)),
+        "hypothesisFailures": list(dict.fromkeys(hypothesis_failures)),
+        "provenanceFailures": list(dict.fromkeys(provenance_failures)),
+        "diagnosticFailures": list(dict.fromkeys(diagnostic_failures)),
+        "deterministicQualityFailures": deterministic_quality_gate_failures(
+            diagnostic_failures
+        ),
+        "refinementFailures": list(dict.fromkeys(refinement_failures)),
         "failures": list(dict.fromkeys(failures)),
+    }
+
+
+def _diagnostic_metric_snapshot(evidence: dict[str, Any]) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {}
+    for view in evidence.get("views", []):
+        if not isinstance(view, dict) or not isinstance(view.get("viewId"), str):
+            continue
+        diagnostics = view.get("fitDiagnostics")
+        if not isinstance(diagnostics, dict):
+            continue
+        values = {
+            field: diagnostics.get(field)
+            for field in ("centroidDelta", "aspectRatioDelta")
+            if _finite_number(diagnostics.get(field))
+        }
+        appearance = diagnostics.get("appearance")
+        if isinstance(appearance, dict):
+            values["appearance"] = {
+                field: appearance.get(field)
+                for field in (
+                    "detailEnergyRatio",
+                    "edgeDensityRatio",
+                    "foregroundHistogramIntersection",
+                    "foregroundMeanColorDelta",
+                    "highlightCoverageRatio",
+                    "highlightEnergyRatio",
+                )
+                if _finite_number(appearance.get(field))
+            }
+        snapshot[view["viewId"]] = values
+    return snapshot
+
+
+def _candidate_differs_from_module_champion(
+    context: dict[str, Any],
+    champion: dict[str, Any],
+) -> bool:
+    return any(
+        (
+            context["checked"].get("moduleHash") != champion.get("moduleHash"),
+            context["implementationFiles"] != champion.get("implementationFiles"),
+            context["implementationSemanticFiles"]
+            != champion.get("implementationSemanticFiles"),
+            context["representationSignature"] != champion.get("representationSignature"),
+        )
+    )
+
+
+def _record_module_preflight_regression(
+    cache: dict[str, Any],
+    context: dict[str, Any],
+    module_id: str,
+    quality_failures: list[str],
+    recorded_at: str,
+) -> dict[str, Any]:
+    attempts_by_module = cache.setdefault("reviewAttempts", {})
+    if not isinstance(attempts_by_module, dict):
+        attempts_by_module = {}
+        cache["reviewAttempts"] = attempts_by_module
+    attempts = attempts_by_module.setdefault(module_id, [])
+    if not isinstance(attempts, list):
+        attempts = []
+        attempts_by_module[module_id] = attempts
+    pending_attempt = context.get("pendingAttempt")
+    champions = cache.get("reviewChampions")
+    champion = champions.get(module_id) if isinstance(champions, dict) else None
+    if (
+        not isinstance(pending_attempt, dict)
+        or not isinstance(champion, dict)
+        or not isinstance(champion.get("checkpointManifest"), str)
+        or not quality_failures
+        or context.get("refinementBudget", {}).get("exhausted") is True
+        or not _candidate_differs_from_module_champion(context, champion)
+    ):
+        return {}
+
+    non_diagnostic_failures = [
+        *context.get("evidenceContractFailures", []),
+        *context.get("hypothesisFailures", []),
+        *context.get("provenanceFailures", []),
+        *context.get("refinementFailures", []),
+    ]
+    diagnostic_failures = context.get("diagnosticFailures", [])
+    if non_diagnostic_failures or set(diagnostic_failures) != set(quality_failures):
+        return {}
+
+    comparison_hash = str(context["evidence"].get("comparisonSha256") or "")
+    attempt_number = len(attempts) + 1
+    preflight_id = (
+        f"{module_id}-deterministic-preflight-{attempt_number}-"
+        f"{comparison_hash[:12] or 'comparison'}"
+    )
+    candidate_render_snapshot = _snapshot_refinement_renders(
+        context["path"],
+        module_id,
+        preflight_id,
+        context["evidence"],
+    )
+    candidate_checkpoint = _capture_module_candidate(
+        context["path"],
+        context["manifest"],
+        module_id,
+        context["implementationFiles"],
+        {"reviewId": preflight_id, "overallScore": None, "layerScores": {}},
+    )
+    candidate_record = {
+        **candidate_checkpoint,
+        "moduleHash": context["checked"].get("moduleHash"),
+        "implementationFiles": context["implementationFiles"],
+        "implementationSemanticFiles": context["implementationSemanticFiles"],
+        "representationSignature": context["representationSignature"],
+        "evidenceManifest": str(context["evidencePath"]),
+        "evidenceSha256": file_sha256(context["evidencePath"]),
+        "comparisonSha256": comparison_hash,
+        "renderSha256": _render_hashes(context["evidence"]),
+        "renderSnapshot": candidate_render_snapshot,
+        "diagnosticMetrics": _diagnostic_metric_snapshot(context["evidence"]),
+        "recordedAt": recorded_at,
+    }
+    restored_checkpoint = restore_checkpoint(
+        champion["checkpointManifest"],
+        context["path"].parent,
+    )
+    correction_batch = _attempt_correction_batch(pending_attempt)
+    attempt = {
+        "attempt": attempt_number,
+        "attemptType": "deterministic-preflight",
+        "reviewId": preflight_id,
+        "action": pending_attempt.get("action"),
+        "accepted": False,
+        "recordedAt": recorded_at,
+        "moduleHash": champion.get("moduleHash"),
+        "implementationFiles": champion.get("implementationFiles", {}),
+        "implementationSemanticFiles": champion.get(
+            "implementationSemanticFiles", {}
+        ),
+        "representationSignature": champion.get("representationSignature"),
+        "evidenceManifest": champion.get("evidenceManifest"),
+        "evidenceSha256": champion.get("evidenceSha256"),
+        "comparisonSha256": champion.get("comparisonSha256"),
+        "renderSha256": champion.get("renderSha256", []),
+        "renderSnapshot": champion.get("renderSnapshot", {}),
+        "candidateDisposition": "rejected-preflight-regression",
+        "meaningfulImprovement": False,
+        "improvedLayers": [],
+        "regressedLayers": ["deterministicDiagnostics"],
+        "championCheckpointId": champion.get("checkpointId"),
+        "championCheckpointManifest": champion.get("checkpointManifest"),
+        "candidateCheckpointId": candidate_record.get("checkpointId"),
+        "candidateCheckpointManifest": candidate_record.get("checkpointManifest"),
+        "candidateModuleHash": candidate_record.get("moduleHash"),
+        "candidateImplementationFiles": candidate_record.get("implementationFiles", {}),
+        "candidateImplementationSemanticFiles": candidate_record.get(
+            "implementationSemanticFiles", {}
+        ),
+        "candidateRepresentationSignature": candidate_record.get(
+            "representationSignature"
+        ),
+        "candidateEvidenceManifest": candidate_record.get("evidenceManifest"),
+        "candidateEvidenceSha256": candidate_record.get("evidenceSha256"),
+        "candidateComparisonSha256": candidate_record.get("comparisonSha256"),
+        "candidateRenderSha256": candidate_record.get("renderSha256", []),
+        "candidateRenderSnapshot": candidate_record.get("renderSnapshot", {}),
+        "candidateDiagnosticMetrics": candidate_record.get("diagnosticMetrics", {}),
+        "restoredCheckpoint": restored_checkpoint,
+        "overallScore": champion.get("overallScore"),
+        "layerScores": champion.get("layerScores", {}),
+        "candidateOverallScore": None,
+        "candidateLayerScores": {},
+        "sanityChecks": pending_attempt.get("sanityChecks", {}),
+        "featureReviews": pending_attempt.get("featureReviews", []),
+        "issues": pending_attempt.get("issues", []),
+        "corrections": pending_attempt.get("corrections", []),
+        "issueLineageKeys": pending_attempt.get("issueLineageKeys", []),
+        "correctionBatch": correction_batch,
+        "resolvedIssueIds": pending_attempt.get("resolvedIssueIds", []),
+        "resolvedRootCauseKeys": pending_attempt.get("resolvedRootCauseKeys", []),
+        "summary": (
+            "Deterministic visual preflight rejected the refinement and restored "
+            "the active champion before another edit cycle."
+        ),
+        "failures": quality_failures,
+    }
+    attempts.append(attempt)
+    active_snapshot = champion.get("renderSnapshot")
+    champion_presentation: dict[str, Any] = {}
+    if isinstance(active_snapshot, dict):
+        views = active_snapshot.get("views")
+        champion_presentation = visual_checkpoint_presentation(
+            {
+                "views": views if isinstance(views, list) else [],
+                "comparisonImage": active_snapshot.get("comparisonImage", ""),
+            },
+            checkpoint="module-preflight-active-champion",
+            artifact_state="restored-champion",
+        )
+    return {
+        "attempt": attempt,
+        "candidate": candidate_record,
+        "restoredCheckpoint": restored_checkpoint,
+        "activeChampion": champion_presentation,
+        "refinementBudget": refinement_budget(attempts),
     }
 
 
@@ -1480,7 +2812,14 @@ def preflight_module_review(
         evidence_path,
         implementation_files,
     )
-    ok = not context["failures"]
+    failures = list(context["failures"])
+    if context["refinementBudget"].get("exhausted") is True:
+        failures.append(
+            "refinement budget is exhausted; retain the champion and record a "
+            "strategy-reset before another edit/build/render/reviewer cycle"
+        )
+    failures = list(dict.fromkeys(failures))
+    ok = not failures
     now = datetime.now(timezone.utc).isoformat()
     cache = _load_cache(context["path"])
     cache["version"] = 2
@@ -1488,7 +2827,7 @@ def preflight_module_review(
     if not isinstance(preflights, dict):
         preflights = {}
         cache["reviewPreflights"] = preflights
-    preflights[module_id] = {
+    receipt = {
         "artifactType": MODULE_PREFLIGHT_ARTIFACT_TYPE,
         "version": MODULE_PREFLIGHT_VERSION,
         "ok": ok,
@@ -1501,18 +2840,46 @@ def preflight_module_review(
         "implementationSemanticFiles": context["implementationSemanticFiles"],
         "evidenceFiles": context["evidenceFiles"],
         "recordedAt": now,
-        "failures": context["failures"],
+        "failures": failures,
     }
+    rollback = _record_module_preflight_regression(
+        cache,
+        context,
+        module_id,
+        context.get("deterministicQualityFailures", []),
+        now,
+    )
+    if rollback:
+        receipt.update(
+            {
+                "candidateDisposition": "rejected-preflight-regression",
+                "championCheckpointId": rollback["attempt"].get(
+                    "championCheckpointId"
+                ),
+                "candidateCheckpointId": rollback["attempt"].get(
+                    "candidateCheckpointId"
+                ),
+                "restoredCheckpoint": rollback["restoredCheckpoint"],
+            }
+        )
+    preflights[module_id] = receipt
     cache["updatedAt"] = now
     write_spec_atomic(cache_path(context["path"]), cache)
+    current_budget = rollback.get("refinementBudget", context["refinementBudget"])
     return {
         "ok": ok,
         "moduleId": module_id,
         "moduleHash": context["checked"].get("moduleHash"),
         "comparisonSha256": context["evidence"].get("comparisonSha256"),
         "pendingCorrectionBatch": context["pendingCorrectionBatch"],
-        "refinementBudget": context["refinementBudget"],
-        "failures": context["failures"],
+        "refinementBudget": current_budget,
+        "candidateDisposition": (
+            "rejected-preflight-regression" if rollback else "preflight-failed" if failures else "candidate"
+        ),
+        "restoredCheckpoint": rollback.get("restoredCheckpoint", {}),
+        "activeChampion": rollback.get("activeChampion", {}),
+        "strategyChangeRequired": current_budget.get("exhausted") is True,
+        "failures": failures,
     }
 
 
@@ -1551,12 +2918,20 @@ def review_module(
     evidence_path: Path,
     implementation_files: list[Path] | None = None,
 ) -> dict[str, Any]:
+    resolved_verdict_path = verdict_path.expanduser().resolve()
+    verdict = read_object(resolved_verdict_path, "module review verdict")
+    preview_action = str(verdict.get("action"))
+    governance_action = preview_action in {
+        STRATEGY_RESET_ACTION,
+        "request-input",
+        "stop",
+    }
     cache, preflight_receipt, receipt_failures = _module_preflight_receipt(
         manifest_path,
         module_id,
         evidence_path,
     )
-    if receipt_failures:
+    if receipt_failures and not governance_action:
         raise ValueError("module review requires a current passing preflight receipt: " + "; ".join(receipt_failures))
     context = _module_preflight_context(
         manifest_path,
@@ -1578,7 +2953,7 @@ def review_module(
         field
         for field, value in current_receipt_contract.items()
         if preflight_receipt.get(field) != value
-    ]
+    ] if not governance_action else []
     if stale_fields:
         raise ValueError(
             "module review requires a fresh preflight; changed fields: "
@@ -1595,9 +2970,34 @@ def review_module(
     required_views = context["requiredViews"]
     implementation_hashes = context["implementationFiles"]
     semantic_implementation_hashes = context["implementationSemanticFiles"]
-    resolved_verdict_path = verdict_path.expanduser().resolve()
-    verdict = read_object(resolved_verdict_path, "module review verdict")
-    contract_failures = _review_contract_failures(verdict, evidence)
+    resolved_spec = resolve_manifest(path, manifest, [module_id])
+    correction_targets = review_target_catalog(resolved_spec)
+    preview_phase = module_preview_pass(module)
+    sanity_contract = effective_pass_config(resolved_spec, preview_phase).get(
+        "visualSanity"
+    )
+    required_sanity_categories = (
+        sanity_contract.get("requiredCategories", [])
+        if isinstance(sanity_contract, dict)
+        else []
+    )
+    contract_failures = _review_contract_failures(
+        verdict,
+        evidence,
+        correction_targets,
+        required_sanity_categories,
+        # v4 modules use the same compact composite-score + blind-scout gate
+        # as assembled phases; legacy manifests keep their layer contract.
+        require_blind_scout=simplified_visual_gate_enabled(
+            resolved_spec,
+            preview_phase,
+        ),
+        simplified_visual_gate=simplified_visual_gate_enabled(
+            resolved_spec,
+            preview_phase,
+        ),
+        blind_scout_phase=preview_phase,
+    )
     if contract_failures:
         raise ValueError("invalid module review verdict: " + "; ".join(contract_failures))
     cache["version"] = 2
@@ -1608,13 +3008,31 @@ def review_module(
         attempts_by_module[module_id] = attempts
     if any(attempt.get("reviewId") == verdict.get("reviewId") for attempt in attempts if isinstance(attempt, dict)):
         raise ValueError(f"reviewId {verdict.get('reviewId')!r} has already been recorded")
+    reviewer = verdict.get("reviewer") if isinstance(verdict.get("reviewer"), dict) else {}
+    reviewer_context_id = reviewer.get("contextId")
+    if reviewer_context_id in recorded_reviewer_context_ids(path, manifest):
+        raise ValueError(
+            "each module phase attempt requires a fresh independent reviewer contextId "
+            "across all modules and assembled phases"
+        )
 
     action = str(verdict.get("action"))
     budget = refinement_budget(attempts)
-    if action in REFINEMENT_ACTIONS and budget["exhausted"]:
+    if (action == "continue" or action in REFINEMENT_ACTIONS) and budget["exhausted"]:
+        champions_value = cache.get("reviewChampions")
+        champion_value = (
+            champions_value.get(module_id)
+            if isinstance(champions_value, dict)
+            else None
+        )
+        if isinstance(champion_value, dict) and isinstance(
+            champion_value.get("checkpointManifest"), str
+        ):
+            restore_checkpoint(champion_value["checkpointManifest"], path.parent)
         raise ValueError(
             "atomic refinement budget is exhausted; record one strategy-reset with a "
-            "different representation before any further refinement"
+            "different representation before any further refinement; the champion "
+            "checkpoint has been restored"
         )
     if action == STRATEGY_RESET_ACTION:
         if budget.get("remainingStrategyResets", 0) < 1:
@@ -1639,15 +3057,27 @@ def review_module(
             raise ValueError(
                 "strategy-reset rootCauseKeys must reference blockers from the active failed cycle"
             )
-    if action in REFINEMENT_ACTIONS and _latest_pending_refinement_attempt(attempts) is not None:
-        progress_failures = _refinement_delta_failures(attempts, verdict)
-        if progress_failures:
-            raise ValueError(
-                "another refinement batch requires independently measured progress and closure "
-                "of prior blockers; complete the batch or use strategy-reset after budget exhaustion: "
-                + "; ".join(progress_failures)
-            )
     correction_batch = correction_batch_from_verdict(verdict)
+    perceptual = (
+        resolved_spec.get("perceptualContract")
+        if isinstance(resolved_spec.get("perceptualContract"), dict)
+        else {}
+    )
+    if perceptual.get("enforcementMode") == "strict" and correction_batch:
+        from sculpt_corrections import correction_failures
+
+        typed_failures = correction_failures(resolved_spec, correction_batch)
+        if typed_failures:
+            raise ValueError(
+                "invalid typed perceptual correction batch: "
+                + "; ".join(typed_failures)
+            )
+    # `stop` is still a scored rendered challenger. Always compare it with the
+    # champion and restore on regression; the reviewer action remains intact in
+    # audit instead of becoming a loophole around rollback.
+    scored_candidate = (
+        action == "continue" or action in REFINEMENT_ACTIONS or action == "stop"
+    )
     render_snapshot = (
         _snapshot_refinement_renders(
             path,
@@ -1655,10 +3085,94 @@ def review_module(
             verdict.get("reviewId"),
             evidence,
         )
-        if action in REFINEMENT_ACTIONS
+        if scored_candidate
         else {}
     )
+    candidate_checkpoint = (
+        _capture_module_candidate(
+            path,
+            manifest,
+            module_id,
+            implementation_hashes,
+            verdict,
+        )
+        if scored_candidate
+        else {}
+    )
+    champions = cache.setdefault("reviewChampions", {})
+    if not isinstance(champions, dict):
+        champions = {}
+        cache["reviewChampions"] = champions
+    baseline_champion = champions.get(module_id)
+    if not isinstance(baseline_champion, dict):
+        baseline_champion = None
+    quality_policy = _module_quality_policy(module)
+    if simplified_visual_gate_enabled(resolved_spec, preview_phase):
+        quality_policy = {
+            **quality_policy,
+            "requiredLayers": {},
+            "ownedLayers": [],
+            "protectedLayers": [],
+        }
+    candidate_quality = {
+        "overallScore": verdict.get("overallScore"),
+        "layerScores": verdict.get("layerScores", {}),
+        "diagnosticScores": diagnostic_quality_vector(evidence),
+        "sanityChecks": verdict.get("sanityChecks", {}),
+    }
+    disposition = (
+        quality_candidate_disposition(
+            baseline_champion,
+            candidate_quality,
+            owned_layers=quality_policy["ownedLayers"],
+            protected_layers=quality_policy["protectedLayers"],
+            required_layers=quality_policy["requiredLayers"],
+            minimum_delta=(
+                0.01
+                if simplified_visual_gate_enabled(resolved_spec, preview_phase)
+                else 0.02
+            ),
+            diagnostic_metrics=(
+                set()
+                if simplified_visual_gate_enabled(
+                    resolved_spec,
+                    preview_phase,
+                )
+                else None
+            ),
+            blind_scout_decision=(
+                verdict.get("blindScout", {}).get("decision")
+                if isinstance(verdict.get("blindScout"), dict)
+                else None
+            ),
+        )
+        if scored_candidate
+        else {
+            "disposition": "not-scored",
+            "meaningfulImprovement": False,
+            "improvedLayers": [],
+            "regressedLayers": [],
+        }
+    )
+    refinement_findings = (
+        _refinement_delta_failures(attempts, verdict)
+        if scored_candidate and _latest_pending_refinement_attempt(attempts) is not None
+        else []
+    )
+    lineage_failures = [
+        failure
+        for failure in refinement_findings
+        if "cannot be resolved and reopened" in failure
+        or "new blocking root cause" in failure
+    ]
+    if action in REFINEMENT_ACTIONS and lineage_failures:
+        disposition = {
+            **disposition,
+            "disposition": "rejected-invalid-lineage",
+            "meaningfulImprovement": False,
+        }
     quality_failures: list[str] = []
+    quality_failures.extend(lineage_failures)
     if action == "continue":
         quality_failures.extend(
             _continue_gate_failures(
@@ -1670,34 +3184,114 @@ def review_module(
                 diagnostics_preflighted=True,
             )
         )
-        quality_failures.extend(
-            _refinement_delta_failures(
-                attempts,
-                verdict,
-            )
+        quality_failures.extend(refinement_findings)
+    if scored_candidate and disposition["disposition"] == "rejected-regression":
+        quality_failures.append(
+            "challenger regressed independently scored layers: "
+            + ", ".join(disposition["regressedLayers"])
         )
-    accepted = action == "continue" and not quality_failures
+    if scored_candidate and disposition["disposition"] == "rejected-incomplete":
+        quality_failures.append(
+            "challenger is missing required independent scores: "
+            + ", ".join(disposition.get("missingLayers", []))
+        )
+    quality_failures = list(dict.fromkeys(quality_failures))
+    gate_pass_without_delta = (
+        action == "continue"
+        and not quality_failures
+        and disposition["disposition"] == "rejected-no-improvement"
+    )
+    if gate_pass_without_delta:
+        disposition = {**disposition, "disposition": "gate-pass"}
+    accepted = (
+        action == "continue"
+        and not quality_failures
+        and disposition["disposition"] in {"seed", "promoted", "gate-pass"}
+    )
     now = datetime.now(timezone.utc).isoformat()
-    attempt = {
-        "attempt": len(attempts) + 1,
-        "reviewId": verdict.get("reviewId"),
-        "action": action,
-        "accepted": accepted,
-        "recordedAt": now,
+    candidate_record = {
+        **candidate_checkpoint,
         "moduleHash": checked.get("moduleHash"),
         "implementationFiles": implementation_hashes,
         "implementationSemanticFiles": semantic_implementation_hashes,
         "representationSignature": context["representationSignature"],
-        "reviewVerdict": str(resolved_verdict_path),
-        "reviewVerdictSha256": file_sha256(resolved_verdict_path),
         "evidenceManifest": str(resolved_evidence_path),
         "evidenceSha256": file_sha256(resolved_evidence_path),
         "comparisonSha256": evidence.get("comparisonSha256"),
         "renderSha256": _render_hashes(evidence),
         "renderSnapshot": render_snapshot,
-        "reviewer": verdict.get("reviewer"),
         "overallScore": verdict.get("overallScore"),
         "layerScores": verdict.get("layerScores", {}),
+        "diagnosticScores": candidate_quality["diagnosticScores"],
+        "reviewId": verdict.get("reviewId"),
+        "blindScout": verdict.get("blindScout"),
+        "reviewerContextId": reviewer_context_id,
+        "previewPass": quality_policy["previewPass"],
+        "recordedAt": now,
+    }
+    promoted = (
+        scored_candidate
+        and action != "stop"
+        and disposition["disposition"] in {"seed", "promoted", "gate-pass"}
+    )
+    restored_checkpoint: dict[str, Any] = {}
+    if promoted:
+        champions[module_id] = candidate_record
+        active_record = candidate_record
+    elif scored_candidate and baseline_champion is not None:
+        restored_checkpoint = restore_checkpoint(
+            baseline_champion["checkpointManifest"],
+            path.parent,
+        )
+        active_record = baseline_champion
+    else:
+        active_record = candidate_record
+    attempt = {
+        "attempt": len(attempts) + 1,
+        "reviewId": verdict.get("reviewId"),
+        "blindScout": verdict.get("blindScout"),
+        "action": action,
+        "accepted": accepted,
+        "recordedAt": now,
+        "moduleHash": active_record.get("moduleHash"),
+        "implementationFiles": active_record.get("implementationFiles", {}),
+        "implementationSemanticFiles": active_record.get("implementationSemanticFiles", {}),
+        "representationSignature": active_record.get("representationSignature"),
+        "reviewVerdict": str(resolved_verdict_path),
+        "reviewVerdictSha256": file_sha256(resolved_verdict_path),
+        "evidenceManifest": active_record.get("evidenceManifest"),
+        "evidenceSha256": active_record.get("evidenceSha256"),
+        "comparisonSha256": active_record.get("comparisonSha256"),
+        "renderSha256": active_record.get("renderSha256", []),
+        "renderSnapshot": active_record.get("renderSnapshot", {}),
+        "candidateDisposition": disposition["disposition"],
+        "meaningfulImprovement": disposition.get("meaningfulImprovement", False),
+        "improvedLayers": disposition.get("improvedLayers", []),
+        "regressedLayers": disposition.get("regressedLayers", []),
+        "championCheckpointId": active_record.get("checkpointId"),
+        "championCheckpointManifest": active_record.get("checkpointManifest"),
+        "candidateCheckpointId": candidate_record.get("checkpointId"),
+        "candidateCheckpointManifest": candidate_record.get("checkpointManifest"),
+        "candidateModuleHash": candidate_record.get("moduleHash"),
+        "candidateImplementationFiles": candidate_record.get("implementationFiles", {}),
+        "candidateImplementationSemanticFiles": candidate_record.get(
+            "implementationSemanticFiles", {}
+        ),
+        "candidateRepresentationSignature": candidate_record.get("representationSignature"),
+        "candidateEvidenceManifest": candidate_record.get("evidenceManifest"),
+        "candidateEvidenceSha256": candidate_record.get("evidenceSha256"),
+        "candidateComparisonSha256": candidate_record.get("comparisonSha256"),
+        "candidateRenderSha256": candidate_record.get("renderSha256", []),
+        "candidateRenderSnapshot": candidate_record.get("renderSnapshot", {}),
+        "restoredCheckpoint": restored_checkpoint,
+        "reviewer": verdict.get("reviewer"),
+        "overallScore": active_record.get("overallScore"),
+        "layerScores": active_record.get("layerScores", {}),
+        "diagnosticScores": active_record.get("diagnosticScores", {}),
+        "candidateOverallScore": verdict.get("overallScore"),
+        "candidateLayerScores": verdict.get("layerScores", {}),
+        "candidateDiagnosticScores": candidate_quality["diagnosticScores"],
+        "sanityChecks": verdict.get("sanityChecks", {}),
         "featureReviews": verdict.get("featureReviews", []),
         "issues": verdict.get("issues", []),
         "corrections": verdict.get("corrections", []),
@@ -1727,11 +3321,13 @@ def review_module(
     records = cache.setdefault("modules", {})
     if accepted:
         records[module_id] = {
-            "moduleHash": checked.get("moduleHash"),
+            "moduleHash": candidate_record.get("moduleHash"),
             "interfaceHash": interface_hash(module),
             "gateType": "visual",
+            "evidenceScopeVersion": 1,
             "score": verdict.get("overallScore"),
             "layerScores": verdict.get("layerScores", {}),
+            "sanityChecks": verdict.get("sanityChecks", {}),
             "notes": verdict.get("summary", ""),
             "threshold": gate.get("minimumScore"),
             "evidenceManifest": str(resolved_evidence_path),
@@ -1748,11 +3344,11 @@ def review_module(
             "acceptedAt": now,
             "reviewId": verdict.get("reviewId"),
         }
-    else:
+    elif not restored_checkpoint:
         records.pop(module_id, None)
     cache["updatedAt"] = now
     write_spec_atomic(cache_path(path), cache)
-    status = module_status(path, manifest)
+    status = module_status(path, read_object(path, "manifest JSON"))
     status.update(
         {
             "reviewAccepted": accepted,
@@ -1760,6 +3356,46 @@ def review_module(
             "reviewFailures": quality_failures,
             "reviewAttempt": len(attempts),
             "pendingCorrectionBatch": correction_batch,
+            "candidateDisposition": disposition["disposition"],
+            "championCheckpointId": active_record.get("checkpointId"),
+            "restoredCheckpoint": restored_checkpoint,
         }
     )
+    candidate_disposition = str(disposition["disposition"])
+    artifact_state = (
+        "accepted-champion"
+        if accepted
+        else "rejected-challenger"
+        if candidate_disposition.startswith("rejected-")
+        else "candidate-champion"
+        if candidate_disposition in {"seed", "promoted", "gate-pass"}
+        else "candidate"
+    )
+    candidate_presentation = visual_checkpoint_presentation(
+        evidence,
+        checkpoint="module-review",
+        artifact_state=artifact_state,
+        progress=status.get("userProgress", {}),
+    )
+    candidate_presentation["reviewResult"] = {
+        "action": action,
+        "accepted": accepted,
+        "candidateDisposition": disposition["disposition"],
+        "overallScore": verdict.get("overallScore"),
+        "failures": quality_failures,
+    }
+    active_snapshot = active_record.get("renderSnapshot")
+    if restored_checkpoint and isinstance(active_snapshot, dict):
+        snapshot_views = active_snapshot.get("views")
+        champion_evidence = {
+            "views": snapshot_views if isinstance(snapshot_views, list) else [],
+            "comparisonImage": active_snapshot.get("comparisonImage", ""),
+        }
+        candidate_presentation["activeChampion"] = visual_checkpoint_presentation(
+            champion_evidence,
+            checkpoint="module-review-active-champion",
+            artifact_state="restored-champion",
+            progress=status.get("userProgress", {}),
+        )
+    status["userPresentation"] = candidate_presentation
     return status

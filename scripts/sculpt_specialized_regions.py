@@ -619,11 +619,11 @@ def validate_specialized_regions(
 
     region_ids: set[str] = set()
     feature_target_ids: set[str] = set()
-    requires_articulation_parts = spec.get("intendedUse") in {
-        "animated",
-        "playable",
-        "destructible",
-    }
+    interaction_contract = spec.get("interactionContract")
+    requires_articulation_parts = (
+        isinstance(interaction_contract, dict)
+        and interaction_contract.get("status") == "required"
+    )
     for index, region in enumerate(regions):
         label = f"preSpecAssessment.specializedRegions.regions[{index}]"
         if not isinstance(region, dict):
@@ -843,7 +843,7 @@ def validate_specialized_regions(
                 )
                 required_passes = {
                     pass_id
-                    for pass_id in ("form", "lookdev", "optimization")
+                    for pass_id in ("form", "lookdev")
                     if pass_id in known_passes
                 }
                 missing_passes = required_passes - target_passes
@@ -873,13 +873,13 @@ def validate_specialized_regions(
                 ),
                 errors,
             )
-            if has_interaction and "structure" in known_passes:
+            if has_interaction and "form" in known_passes:
                 target_pass_ids = target.get("passIds")
-                if "structure" not in (
+                if "form" not in (
                     set(target_pass_ids) if isinstance(target_pass_ids, list) else set()
                 ):
                     errors.append(
-                        f"{label} interacting hand feature target must include the structure pass"
+                        f"{label} interacting hand feature target must include the form pass"
                     )
 
 

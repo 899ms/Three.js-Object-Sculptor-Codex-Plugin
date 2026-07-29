@@ -2,7 +2,7 @@
 
 Use this reference only when the target contains a visible face or hand. These are perceptually sensitive regions: a small proportion, gaze, expression, digit, or contact error can make an otherwise acceptable model look wrong.
 
-This contract does not add a build pass and does not claim medical anatomy or automatic rigging. It strengthens the existing pre-spec, component hierarchy, form/lookdev review, and optimization no-regression gate.
+This contract does not add a build pass and does not claim medical anatomy or automatic rigging. It strengthens the existing pre-spec, component hierarchy, form/lookdev review, and optional post-quality performance no-regression audit.
 
 ## Declare The Region
 
@@ -56,7 +56,7 @@ When a hand touches an object, add `interaction` with:
 - the hand components forming the contact;
 - observable criteria for overlap, negative space, grip direction, penetration, and floating gaps.
 
-An interacting hand target includes the structure pass when that pass exists, then remains independently reviewed in form, lookdev, and real-time optimization when active.
+An interacting hand is structured during form, then remains independently reviewed in lookdev and interaction. An optional performance audit may not regress it.
 
 ## Close-Up Review
 

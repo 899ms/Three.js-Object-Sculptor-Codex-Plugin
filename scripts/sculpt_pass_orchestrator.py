@@ -14,8 +14,10 @@ from typing import Any
 from sculpt_contract import (
     check_pass as contract_check_pass,
     component_type,
+    detail_feature_count,
     load_spec_file,
     pass_order,  # compatibility re-export for existing script consumers
+    phase_work_packet,
     pipeline_status,
     sync_pipeline,
     write_spec_atomic,
@@ -25,6 +27,8 @@ from sculpt_geometry import (
     validate_geometry_component,
     validate_repetition_systems,
 )
+from sculpt_capabilities import capability_report
+from sculpt_perception import perceptual_context
 
 
 ATTACHMENT_ROLES = {
@@ -164,7 +168,11 @@ def _hero_material_ids(spec: dict[str, Any], materials: list[dict[str, Any]]) ->
     }
 
 
-def material_gaps(spec: dict[str, Any]) -> list[str]:
+def material_gaps(
+    spec: dict[str, Any],
+    *,
+    require_surface_descriptor: bool = False,
+) -> list[str]:
     materials = [item for item in spec.get("materials", []) if isinstance(item, dict)]
     if not materials:
         return ["materials array is empty"]
@@ -186,6 +194,15 @@ def material_gaps(spec: dict[str, Any]) -> list[str]:
         material_id = str(material.get("id") or "(unnamed)")
         if material.get("qualityTier") == "utility" or material_id not in hero_ids:
             continue
+        surface_descriptor = material.get("surfaceDescriptor")
+        if require_surface_descriptor and (
+            not isinstance(surface_descriptor, dict)
+            or surface_descriptor.get("status") != "assessed"
+        ):
+            gaps.append(
+                f"hero material {material_id!r} needs an assessed surfaceDescriptor "
+                "for rigidity, optical finish, microrelief, evidence, and confidence"
+            )
         intentional_uniform = _intentional_uniform_surface(material)
         variation = material.get("colorVariation")
         albedo = material.get("albedo")
@@ -301,23 +318,108 @@ def lighting_gaps(spec: dict[str, Any]) -> list[str]:
 
 
 def interaction_gaps(spec: dict[str, Any]) -> list[str]:
+    contract = spec.get("interactionContract")
+    if not isinstance(contract, dict) or contract.get("status") != "required":
+        return ["interactionContract.status must be required for an interaction pass"]
     readiness = spec.get("actionReadiness")
     if not isinstance(readiness, dict) or readiness.get("enabled") is not True:
         return ["actionReadiness.enabled must be true for an interaction pass"]
-    components = [
+    affordances = [
         item
+        for item in contract.get("motionAffordances", [])
+        if isinstance(item, dict) and item.get("enabledByDefault") is True
+    ]
+    if not affordances:
+        return ["interaction requires at least one enabled motion affordance"]
+    moving_ids = {
+        item.get("componentId")
+        for item in affordances
+        if isinstance(item.get("componentId"), str)
+    }
+    components = {
+        item.get("id"): item
         for item in spec.get("componentTree", [])
         if isinstance(item, dict) and component_type(item) != "assembly"
-    ]
+    }
     missing = [
-        str(item.get("id") or "(unnamed)")
-        for item in components
-        if item.get("level") in {"macro", "meso"}
-        and not isinstance(item.get("actionProfile"), dict)
+        str(component_id)
+        for component_id in sorted(moving_ids)
+        if component_id not in components
+        or not isinstance(components[component_id].get("actionProfile"), dict)
     ]
     if missing:
-        return ["macro/meso components missing actionProfile: " + ", ".join(missing)]
+        return ["moving components missing actionProfile: " + ", ".join(missing)]
     return []
+
+
+def interaction_assessment_gaps(spec: dict[str, Any]) -> list[str]:
+    contract = spec.get("interactionContract")
+    if not isinstance(contract, dict):
+        return ["interactionContract is required for the interaction phase"]
+    if contract.get("status") == "unassessed":
+        return [
+            "assess object-class motion affordances and set interactionContract.status to not-required or required"
+        ]
+    return []
+
+
+def view_hypothesis_decision_gaps(spec: dict[str, Any]) -> list[str]:
+    """Require 2x2 planning evidence before Blockout, with one narrow skip."""
+
+    if not has_non_empty(spec.get("sourceImage")):
+        return []
+    policy = spec.get("viewHypothesisPolicy")
+    if not isinstance(policy, dict):
+        return ["declare the pre-Blockout viewHypothesisPolicy"]
+    decision = policy.get("decision")
+    enabled = policy.get("enabled") is True
+    if decision in {"required", "not-needed"}:
+        if decision == "required" and not enabled:
+            return ["invoke imagegen and register the one cached 2x2 turnaround before Blockout build"]
+        if decision == "not-needed":
+            skip_gaps = view_hypothesis_skip_gaps(spec)
+            if skip_gaps:
+                return skip_gaps
+        return []
+    # Compatibility: an older policy explicitly enabled by the author is an
+    # already-resolved 'required' decision even when it lacks the new field.
+    if enabled:
+        return []
+    return [
+        "before the first Blockout build, invoke imagegen and register one 2x2 turnaround; "
+        "skip only after proving the object is both simple and symmetric"
+    ]
+
+
+def view_hypothesis_skip_gaps(spec: dict[str, Any]) -> list[str]:
+    policy = spec.get("viewHypothesisPolicy")
+    assessment = spec.get("preSpecAssessment")
+    complexity = assessment.get("complexity") if isinstance(assessment, dict) else None
+    tier = complexity.get("tier") if isinstance(complexity, dict) else None
+    skip = policy.get("skipAssessment") if isinstance(policy, dict) else None
+    gaps: list[str] = []
+    if tier != "simple":
+        gaps.append("2x2 turnaround may be skipped only when complexity.tier is simple")
+    if not isinstance(skip, dict):
+        return [*gaps, "2x2 turnaround skip requires a structured skipAssessment"]
+    if skip.get("objectIsSimple") is not True:
+        gaps.append("skipAssessment.objectIsSimple must be true")
+    if skip.get("symmetry") not in {"bilateral", "radial", "axial"}:
+        gaps.append(
+            "skipAssessment.symmetry must be bilateral, radial, or axial"
+        )
+    confidence = skip.get("confidence")
+    if not has_number(confidence) or float(confidence) < 0.8:
+        gaps.append("skipAssessment.confidence must be at least 0.8")
+    evidence = skip.get("evidenceRefs")
+    if not isinstance(evidence, list) or not any(
+        isinstance(item, str) and item.strip() for item in evidence
+    ):
+        gaps.append("skipAssessment.evidenceRefs must identify the symmetry evidence")
+    reason = skip.get("reason")
+    if not isinstance(reason, str) or len(reason.strip()) < 12:
+        gaps.append("skipAssessment.reason must explain why hidden views are safely inferable")
+    return gaps
 
 
 def pre_spec_gaps(spec: dict[str, Any]) -> list[str]:
@@ -331,7 +433,7 @@ def pre_spec_gaps(spec: dict[str, Any]) -> list[str]:
     else:
         if not has_non_empty(object_class.get("primaryType")):
             gaps.append("identify the primary object type from the reference")
-        for field in ("formLanguage", "structureKind", "materialFamilies"):
+        for field in ("formLanguage", "structureKind"):
             if not has_non_empty(object_class.get(field)):
                 gaps.append(f"fill preSpecAssessment.objectClass.{field} from visual inspection")
     silhouette = spec.get("silhouette")
@@ -355,11 +457,7 @@ def spec_depth_gaps(spec: dict[str, Any], include_micro: bool) -> list[str]:
     actual = {
         "macroComponents": sum(item.get("level") == "macro" for item in components),
         "mesoComponents": sum(item.get("level") == "meso" for item in components),
-        "microFeatureGroups": sum(
-            len(item.get("localFeatures", []))
-            for item in components
-            if isinstance(item.get("localFeatures"), list)
-        ),
+        "microFeatureGroups": detail_feature_count(spec),
     }
     fields = ("macroComponents", "mesoComponents")
     if include_micro:
@@ -369,6 +467,41 @@ def spec_depth_gaps(spec: dict[str, Any], include_micro: bool) -> list[str]:
         for field in fields
         if isinstance(minimums.get(field), int) and actual[field] < minimums[field]
     ]
+
+
+def detail_decomposition_gaps(
+    spec: dict[str, Any],
+    *,
+    include_all_components: bool,
+) -> list[str]:
+    contract = spec.get("detailDecompositionContract")
+    if not isinstance(contract, dict) or contract.get("status") != "planned":
+        return [
+            "detailDecompositionContract must be planned before geometry; inventory visible sub-detail first"
+        ]
+    gaps: list[str] = []
+    for component in spec.get("componentTree", []):
+        if not isinstance(component, dict):
+            continue
+        component_id = str(component.get("id") or "(unnamed)")
+        if component_type(component) == "assembly":
+            continue
+        if not include_all_components and component.get("level", "macro") != "macro":
+            continue
+        plan = component.get("detailPlan")
+        if not isinstance(plan, dict) or plan.get("status") != "planned":
+            gaps.append(f"component {component_id!r} detailPlan is not planned")
+            continue
+        if (
+            plan.get("observedComplexity") in {"compound", "complex"}
+            and plan.get("decompositionMode") == "atomic"
+        ):
+            gaps.append(
+                f"component {component_id!r} is compound/complex but detailPlan is atomic"
+            )
+        if not has_non_empty(plan.get("coverageNotes")):
+            gaps.append(f"component {component_id!r} detailPlan lacks coverageNotes")
+    return gaps
 
 
 def pass_specific_evidence(pass_id: str) -> list[str]:
@@ -387,21 +520,26 @@ def pass_specific_gaps(spec: dict[str, Any], pass_id: str) -> list[str]:
     gaps: list[str] = []
     if pass_id == "blockout":
         gaps.extend(pre_spec_gaps(spec))
+        gaps.extend(view_hypothesis_decision_gaps(spec))
     if pass_id in {"structure", "form", "structural-pass", "form-refinement"}:
         gaps.extend(attachment_gaps(spec))
+        gaps.extend(detail_decomposition_gaps(spec, include_all_components=True))
+        if pass_id in {"form", "form-refinement"}:
+            gaps.extend(view_hypothesis_decision_gaps(spec))
         gaps.extend(
             spec_depth_gaps(
                 spec,
                 include_micro=pass_id in {"form", "form-refinement"},
             )
         )
-    if pass_id in {"lookdev", "material-pass"}:
-        gaps.extend(material_gaps(spec))
+    if pass_id in {"lookdev", "material-pass", "surface-pass"}:
+        gaps.extend(material_gaps(spec, require_surface_descriptor=True))
     if pass_id in {"lookdev", "surface-pass"}:
         gaps.extend(surface_gaps(spec))
     if pass_id in {"lookdev", "lighting-pass"}:
         gaps.extend(lighting_gaps(spec))
     if pass_id in {"interaction", "interaction-pass"}:
+        gaps.extend(interaction_assessment_gaps(spec))
         gaps.extend(interaction_gaps(spec))
     return list(dict.fromkeys(gaps))
 
@@ -475,10 +613,38 @@ def status_payload(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def context_payload(spec: dict[str, Any]) -> dict[str, Any]:
+    """Emit one phase-local LLM packet instead of the full future-phase spec."""
+
+    status = pipeline_status(spec)
+    current = str(status.get("currentPass") or "complete")
+    packet = {} if current == "complete" else phase_work_packet(spec, current)
+    capability = capability_report(spec, None if current == "complete" else current)
+    return {
+        "targetName": spec.get("targetName"),
+        "currentPass": current,
+        "state": status.get("state"),
+        "userProgress": status.get("userProgress", {}),
+        "perceptualCore": perceptual_context(spec),
+        "capabilities": capability,
+        "activeBlockerPolicy": {
+            "maximum": 3,
+            "selection": "highest-salience-visible-blockers-inside-viewing-contract",
+            "unsupportedIssueResult": "capability-gap",
+            "numericScores": "trend-only",
+        },
+        "workPacket": packet,
+        "readRule": (
+            "Use workPacket.contextProjection for this cycle. Read future-phase fields only after "
+            "the current phase is promoted or a named validation failure proves they are required."
+        ),
+    }
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("status", "sync"):
+    for command in ("status", "sync", "context"):
         child = subparsers.add_parser(command)
         child.add_argument("spec", type=Path)
     check = subparsers.add_parser("check")
@@ -498,13 +664,17 @@ def main(argv: list[str]) -> int:
         raw_spec = read_raw_spec(path)
         if is_module_manifest(raw_spec):
             modular_status = module_status(path, raw_spec)
-            if args.command in {"status", "sync"}:
+            if args.command in {"status", "sync", "context"}:
                 if modular_status["assemblyReady"]:
                     document = load_document(path, allow_missing=False)
                     if args.command == "sync":
                         sync_pipeline(document.resolved)
                         save_document(document)
-                    modular_status["passWorkflow"] = status_payload(document.resolved)
+                    modular_status["passWorkflow"] = (
+                        context_payload(document.resolved)
+                        if args.command == "context"
+                        else status_payload(document.resolved)
+                    )
                 print(json.dumps(modular_status, indent=2, ensure_ascii=False))
                 return 0 if not modular_status["errors"] else 1
             if not modular_status["assemblyReady"]:
@@ -526,6 +696,9 @@ def main(argv: list[str]) -> int:
         spec = load_spec_file(path)
         if args.command == "status":
             print(json.dumps(status_payload(spec), indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "context":
+            print(json.dumps(context_payload(spec), indent=2, ensure_ascii=False))
             return 0
         if args.command == "sync":
             sync_pipeline(spec)

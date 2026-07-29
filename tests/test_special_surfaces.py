@@ -416,7 +416,10 @@ class SpecialGeometryContractTests(unittest.TestCase):
             intended_use="static-render",
         )
         self.assertEqual(pass_order(special_surface_spec()), pass_order(baseline))
-        self.assertEqual(pass_order(baseline), ["blockout", "form", "lookdev"])
+        self.assertEqual(
+            pass_order(baseline),
+            ["blockout", "form", "lookdev", "interaction"],
+        )
 
 
 class MaterialProfileValidationTests(unittest.TestCase):

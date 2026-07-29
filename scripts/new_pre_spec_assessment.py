@@ -15,8 +15,8 @@ def make_payload(
     target_name: str,
     image: str | None,
     complexity: str,
-    intended_use: str = "browser-prop",
-    quality_profile: str = "balanced",
+    intended_use: str | None = None,
+    quality_profile: str = "reference-fidelity",
 ) -> dict:
     spec = make_spec(
         target_name,
@@ -28,6 +28,7 @@ def make_payload(
     return {
         "targetName": target_name,
         "sourceImage": spec["sourceImage"],
+        "referencePreparation": spec["referencePreparation"],
         "preSpecAssessment": spec["preSpecAssessment"],
         "surfaceTopologyPlan": spec["surfaceTopologyPlan"],
         "qualityContract": spec["qualityContract"],
@@ -51,12 +52,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--intended-use",
         choices=("static-render", "browser-prop", "game-prop", "animated", "playable", "destructible"),
-        default="browser-prop",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--quality-profile",
         choices=("balanced", "reference-fidelity"),
-        default="balanced",
+        default="reference-fidelity",
     )
     parser.add_argument("--out", type=Path)
     parser.add_argument("--force", action="store_true")

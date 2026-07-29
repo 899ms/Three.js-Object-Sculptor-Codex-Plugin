@@ -2,6 +2,12 @@
 
 Use this reference while filling the integrated `preSpecAssessment` created by `sculpt init`. It is part of the same `ObjectSculptSpec`, not a separate required file.
 
+## Reference preparation gate
+
+Assess two independent conditions before describing geometry: subject/background separation, and whether source detail/quality is practical to reconstruct. Use the original directly when its boundary is readable and its construction is manageable; a white, neutral, transparent, or strongly contrasting background is acceptable. Use the `imagegen` skill when the subject mixes with its background, source defects obscure construction, or complexity would make direct procedural reconstruction impractical. ImageGen must produce a clean solid-white background with strong contrast, not transparency.
+
+The generated reference may simplify only declared non-signature microdetail, surface noise, tiny repeated detail, or ambiguous minor geometry. It must preserve object identity/class, macro silhouette and proportions, major component count/placement/attachments, signature features, dominant material/color zones, pose, and viewpoint. Store the generated result as `sourceImage`; retain the original as `originalImage`. Review fidelity against `sourceImage` and veto identity or macro-form drift against `originalImage`. An `unassessed` preparation, unvalidated white background, undeclared simplification, or missing identity guardrail blocks strict quality.
+
 Do not use fixed domain profiles. Assess the object from observed traits, complexity, and target fidelity.
 
 ## Soft Object Classification
@@ -15,6 +21,8 @@ Describe the object using multiple axes:
 
 These are descriptors, not domain templates. Use only what the image supports.
 
+Keep material observations short and executable. For every important material, fill `surfaceDescriptor` with three separate claims: physical `rigidity`, optical `finish`, and tactile `microRelief`. Each claim needs `basis: observed|inferred` and confidence, while the descriptor needs source `evidenceRefs`. Do not use “smooth” to mean glossy: smooth is relief, glossy is low roughness, and a rigid surface may still be matte or pebbled. The numeric `roughness` and selected `normal|bump|displacement` channel must agree with these claims before lookdev.
+
 ## Sensitive Face And Hand Regions
 
 Inspect visible faces and hands separately from general object complexity. Fill `preSpecAssessment.specializedRegions` and `surfaceTopologyPlan` before creating visual modules: use `declared` with one contract per visible region, or `none` with a reason. A clear region needs a named assembly, landmark-to-geometry mapping, proportion plus expression/pose constraints, dedicated crop views, and its own critical feature target. Landmark names do not require separate meshes; classify continuous tissue, real assemblies, fitted shells, embedded relief, strands, and material-only detail from visible evidence. Partial or occluded anatomy needs explicit unknowns; never infer hidden digits or facial forms as facts.
@@ -23,7 +31,12 @@ See `anatomical-regions.md` for the supported landmark, articulation, contact, a
 
 ## Complexity Scoring
 
-Score each axis from 0 to 3:
+Do not mix the two numeric contracts:
+
+- `globalSpec.scores.*` and `preSpecAssessment.complexity.scores.*`: ordinal **integers 0–3**. They measure axis strength or complexity, not quality percentage. For complexity, `0` means lowest/none and `3` means highest. For suitability, higher is better except `occlusion_risk`, where higher means worse.
+- Review `overallScore`, `layerScores.*`, `aiVisionScore`, `minimumScore`, and confidence: normalized **numbers 0–1**. Decimals such as `0.96` and `0.82` are valid and expected.
+
+Never convert `0.96 → 3` or otherwise map between these scales mechanically. Judge each ordinal axis from its meaning. Score each complexity axis from integer 0 to 3:
 
 - silhouette complexity: simple outline to heavily interrupted/organic silhouette
 - component count: one piece to many visible subparts
@@ -41,6 +54,15 @@ Map total judgment to:
 - `complex`: many parts, repeated systems, multiple materials, several hierarchy levels
 - `ultra`: dense organic/mechanical/architectural structure where fidelity depends on deep hierarchy and repeated microstructure
 
+## Bounded Uncertainty
+
+`preSpecAssessment.unknownsToResolveBeforeImplementation` is a temporary planning queue, not an implementation input. Before building geometry, resolve every entry or move it into exactly one structured record:
+
+- `assumptions[]`: `id`, `statement`, `scope`, `bounds`, `impactIfWrong`, and a concrete `falsifyingCheck`.
+- `risks[]`: `id`, `statement`, `scope`, `impact`, and `mitigation`; add `evidenceRefs` when available.
+
+Do not leave uncertainty as a plain sentence. An assumption must state where it applies and what would prove it wrong. A known risk must state its impact and the mitigation used while evidence is missing. `--strict-quality` blocks unresolved unknowns and unbounded legacy strings.
+
 ## Quality Contract
 
 Before generating code, define exactly what makes the model good enough:
@@ -49,7 +71,8 @@ Before generating code, define exactly what makes the model good enough:
 - minimum macro, meso, and micro feature counts
 - required repeated systems and their distribution rules
 - required material layers and local overrides
-- screenshot viewpoints required for visual comparison
+- screenshot viewpoints required for visual comparison; package two to four views in one 2x2 sheet
+- one ImageGen 2x2 turnaround for hidden-form planning by default; skip only for an explicitly assessed `simple` object with strong evidenced bilateral, radial, or axial symmetry
 - failure modes that should block `continue`
 
 Good feature groups are specific to the image:

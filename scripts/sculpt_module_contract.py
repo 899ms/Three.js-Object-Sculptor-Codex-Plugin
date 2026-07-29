@@ -15,8 +15,8 @@ MODULE_BUILD_RECEIPT_VERSION = 1
 MODULE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 RISK_TIERS = {"low", "medium", "high", "critical"}
 GATE_TYPES = {"visual", "structural"}
+MODULE_PREVIEW_PASSES = {"form", "lookdev"}
 DIAGNOSTIC_THRESHOLD_FIELDS = {
-    "minimumSilhouetteIou",
     "maximumCentroidDelta",
     "maximumAspectRatioDelta",
     "minimumDetailEnergyRatio",
@@ -245,6 +245,7 @@ def module_document_errors(
     module: dict[str, Any],
     entry: dict[str, Any],
     dependencies: dict[str, dict[str, Any]],
+    global_spec: dict[str, Any] | None = None,
 ) -> list[str]:
     """Validate ownership and only the cross-module interface, not implementation style."""
     errors: list[str] = []
@@ -266,6 +267,11 @@ def module_document_errors(
     else:
         if gate.get("type") != entry.get("gateType"):
             errors.append(f"module {module_id!r} gate type differs from its manifest entry")
+        preview_pass = gate.get("previewPass")
+        if preview_pass is not None and preview_pass not in MODULE_PREVIEW_PASSES:
+            errors.append(
+                f"module {module_id!r} qualityGate.previewPass must be form or lookdev"
+            )
         threshold = gate.get("minimumScore")
         if (
             not isinstance(threshold, (int, float))
@@ -285,7 +291,12 @@ def module_document_errors(
         if not isinstance(required_scores, dict):
             errors.append(f"module {module_id!r} qualityGate.requiredLayerScores must be an object")
         else:
-            if entry.get("gateType") == "visual" and not required_scores:
+            simplified_gate = (
+                isinstance(global_spec, dict)
+                and isinstance(global_spec.get("phaseExecutionContract"), dict)
+                and global_spec["phaseExecutionContract"].get("version") == 4
+            )
+            if entry.get("gateType") == "visual" and not required_scores and not simplified_gate:
                 errors.append(f"visual module {module_id!r} must declare required layer scores")
             for layer, minimum in required_scores.items():
                 if not isinstance(layer, str) or not layer.strip() or not isinstance(

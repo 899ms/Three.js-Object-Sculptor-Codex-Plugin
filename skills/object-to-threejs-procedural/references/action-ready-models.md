@@ -1,10 +1,16 @@
 # Action-Ready Procedural Models
 
-Use this reference only when intended use activates the `interaction` pass: animation, playable behavior, physics, or destruction. A static prop needs a stable root, but it does not need invented sockets, colliders, and fracture metadata.
+Assess this reference for every object, even when the user does not mention interaction. Set `interactionContract.status` to `not-required` with a concrete reason when no motion is justified. Set it to `required` only for user-requested motion, observed joints/mechanisms, or a strong object-class prior above the activation threshold. Do not invent sockets, colliders, physics, destruction, or hidden mechanisms.
 
 ## Design Goal
 
-The generated model should be a runtime-ready hierarchy, not a single decorative mesh. Future actions should be added by targeting named nodes, sockets, colliders, and destruction groups instead of rewriting the reconstruction.
+The form phase should preserve independently moving parts and stable pivots without forcing an interaction pass. When interaction is required, runtime behavior targets exact component and motion-affordance ids instead of rewriting the reconstruction.
+
+## Motion Affordance Contract
+
+Every active affordance declares `id`, `componentId`, `behavior`, numeric `pivot`, numeric `axis`, `limits` or `rate`, `source`, normalized `confidence`, `evidenceRefs`, and `enabledByDefault`. Automatically activate only observed or strong domain-prior motion at or above `activationThreshold`; a user request may activate explicitly. Lower-confidence motion remains a bounded assumption and must not animate by default.
+
+Typical strong priors include a helicopter main/tail rotor, fan blades, wheels, and clock hands. Doors, hatches, retractable landing gear, deformation, detachment, physics, and destruction require direct evidence or explicit user intent.
 
 ## Hierarchy Pattern
 
@@ -45,9 +51,10 @@ Use this structure:
 
 An active interaction pass succeeds when:
 
-- Every major part has a stable ID and pivot node.
-- Movable or breakable parts are not merged into unrelated geometry.
-- Sockets are named and placed in local coordinates.
-- Collider proxies exist for physics-relevant parts.
-- Destruction groups and fracture seams are explicit.
+- Every active affordance targets an exact component ID and stable pivot node.
+- Movable parts are not merged into unrelated geometry.
+- Numeric pivot, axis, limits/rate, and provenance match the approved contract.
+- A single 2x2 motion-state sheet exposes rest and key transformed states.
+- No tested state creates implausible intersection, detachment, imbalance, or visual regression.
+- Sockets, colliders, or destruction groups exist only when explicitly required.
 - `root.userData.sculptRuntime` exposes maps that later code can target.

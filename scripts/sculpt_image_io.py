@@ -122,6 +122,59 @@ def _rgb_bytes(width: int, height: int, pixels: bytes | bytearray | Iterable[RGB
     return payload
 
 
+def _rgba_bytes(
+    width: int,
+    height: int,
+    pixels: bytes | bytearray | Iterable[RGBA],
+) -> bytes:
+    if isinstance(pixels, (bytes, bytearray)):
+        payload = bytes(pixels)
+    else:
+        flat = bytearray()
+        for pixel in pixels:
+            if len(pixel) != 4 or any(
+                not isinstance(channel, int)
+                or isinstance(channel, bool)
+                or not 0 <= channel <= 255
+                for channel in pixel
+            ):
+                raise ValueError("RGBA channels must be integers from 0 to 255")
+            flat.extend(pixel)
+        payload = bytes(flat)
+    if len(payload) != width * height * 4:
+        raise ValueError("RGBA payload has the wrong size")
+    return payload
+
+
+def crop_rgba(
+    width: int,
+    height: int,
+    pixels: list[RGBA],
+    x: int,
+    y: int,
+    crop_width: int,
+    crop_height: int,
+) -> list[RGBA]:
+    """Crop one exact pixel rectangle without resizing or changing alpha."""
+
+    if len(pixels) != width * height:
+        raise ValueError("RGBA pixel payload has the wrong size")
+    if (
+        x < 0
+        or y < 0
+        or crop_width <= 0
+        or crop_height <= 0
+        or x + crop_width > width
+        or y + crop_height > height
+    ):
+        raise ValueError("crop rectangle must stay inside the source image")
+    cropped: list[RGBA] = []
+    for row in range(y, y + crop_height):
+        start = row * width + x
+        cropped.extend(pixels[start : start + crop_width])
+    return cropped
+
+
 def write_png_rgb(
     path: Path,
     width: int,
@@ -146,6 +199,44 @@ def write_png_rgb(
         + chunk(b"IDAT", zlib.compress(bytes(scanlines), level=6))
         + chunk(b"IEND", b"")
     )
+
+
+def encode_png_rgba(
+    width: int,
+    height: int,
+    pixels: bytes | bytearray | Iterable[RGBA],
+) -> bytes:
+    """Encode a deterministic 8-bit RGBA PNG."""
+
+    rgba = _rgba_bytes(width, height, pixels)
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        checksum = zlib.crc32(payload, zlib.crc32(kind)) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+    scanlines = bytearray()
+    stride = width * 4
+    for row in range(height):
+        scanlines.append(0)
+        scanlines.extend(rgba[row * stride : (row + 1) * stride])
+    return (
+        PNG_SIGNATURE
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(bytes(scanlines), level=6))
+        + chunk(b"IEND", b"")
+    )
+
+
+def write_png_rgba(
+    path: Path,
+    width: int,
+    height: int,
+    pixels: bytes | bytearray | Iterable[RGBA],
+) -> None:
+    """Write a deterministic 8-bit RGBA PNG."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(encode_png_rgba(width, height, pixels))
 
 
 def _sips_png(path: Path, max_dimension: int | None) -> tuple[int, int, list[RGBA]]:

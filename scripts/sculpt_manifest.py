@@ -9,9 +9,12 @@ from typing import Any, Iterable
 
 from sculpt_contract import (
     CURRENT_SCHEMA_VERSION,
+    MATERIAL_OWNER_ROLE_TOKENS,
+    SIMPLIFIED_AI_OVERALL_FLOOR,
     adaptive_hypothesis_views,
     parse_json,
     sync_pipeline,
+    simplified_visual_gate_enabled,
     write_spec_atomic,
 )
 from sculpt_geometry import validate_surface_topology_plan
@@ -180,29 +183,46 @@ def make_module(
     quality_profile = str(global_spec.get("qualityProfile") or "balanced")
     tier = _risk_tier(risk_score)
     threshold = _default_threshold(tier, quality_profile)
+    simplified = simplified_visual_gate_enabled(global_spec)
+    if simplified:
+        threshold = SIMPLIFIED_AI_OVERALL_FLOOR
     reference_fidelity = quality_profile == "reference-fidelity"
     assessment = global_spec.get("preSpecAssessment")
     complexity = assessment.get("complexity") if isinstance(assessment, dict) else None
     complexity_tier = complexity.get("tier") if isinstance(complexity, dict) else "moderate"
     policy = global_spec.get("viewHypothesisPolicy")
-    configured_diagnostics = policy.get("requiredViews") if isinstance(policy, dict) else None
+    hypotheses_enabled = isinstance(policy, dict) and policy.get("enabled") is True
+    configured_diagnostics = (
+        policy.get("requiredViews") if hypotheses_enabled else None
+    )
     canonical_diagnostics = adaptive_hypothesis_views(str(complexity_tier), quality_profile)
     selected_diagnostics = (
         [item for item in configured_diagnostics if isinstance(item, str) and item]
         if isinstance(configured_diagnostics, list)
         else []
     )
-    diagnostic_views = list(dict.fromkeys([*canonical_diagnostics, *selected_diagnostics]))
+    diagnostic_views = (
+        list(dict.fromkeys([*canonical_diagnostics, *selected_diagnostics]))
+        if hypotheses_enabled
+        else []
+    )
     role_tokens = role.lower()
+    material_owner = any(token in role_tokens for token in MATERIAL_OWNER_ROLE_TOKENS)
     required_scores = {
         "silhouetteProportion": max(0.7, threshold - 0.04),
         "componentStructure": max(0.7, threshold - 0.04),
         "formDetail": max(0.7, threshold - 0.04),
+        "assemblyCorrectness": max(0.7, threshold - 0.04),
+        "proportionBalance": max(0.7, threshold - 0.04),
+        "shapeSilhouette": max(0.7, threshold - 0.04),
+        "signatureDetail": max(0.68, threshold - 0.06),
     }
     if any(token in role_tokens for token in ("identity", "face", "hand", "character")):
         required_scores["identity"] = threshold
-    if any(token in role_tokens for token in ("material", "surface", "lookdev", "fabric", "fiber")):
+    if material_owner:
         required_scores["materialSurface"] = threshold
+        required_scores["materialPlausibility"] = max(0.7, threshold - 0.04)
+        required_scores["surfaceQuality"] = max(0.68, threshold - 0.06)
     payload: dict[str, Any] = {
         "componentTree": [],
         "materials": [],
@@ -236,8 +256,6 @@ def make_module(
         )
         payload["componentTree"] = [component]
         payload["materials"] = [make_base_material(quality_profile)]
-    if gate_type == "visual" and payload["materials"]:
-        required_scores.setdefault("materialSurface", threshold)
     return {
         "schemaVersion": MODULE_SCHEMA_VERSION,
         "moduleId": module_id,
@@ -247,21 +265,24 @@ def make_module(
         "risk": {"score": risk_score, "tier": tier, "reasons": []},
         "qualityGate": {
             "type": gate_type,
+            "previewPass": (
+                "lookdev" if gate_type == "visual" and material_owner else
+                "form"
+            ),
             "minimumScore": threshold,
             "requiredViews": ["reference"],
             "diagnosticViews": diagnostic_views if gate_type == "visual" else [],
             "requiredLayerScores": required_scores if gate_type == "visual" else {},
             "diagnosticThresholds": (
                 {
-                    "minimumSilhouetteIou": 0.63 if reference_fidelity else 0.50,
-                    "maximumCentroidDelta": 0.08 if reference_fidelity else 0.12,
-                    "maximumAspectRatioDelta": 0.15 if reference_fidelity else 0.22,
-                    "minimumDetailEnergyRatio": 0.35 if reference_fidelity else 0.25,
-                    "minimumEdgeDensityRatio": 0.25 if reference_fidelity else 0.15,
-                    "minimumHistogramIntersection": 0.30 if reference_fidelity else 0.20,
-                    "maximumMeanColorDelta": 0.42 if reference_fidelity else 0.55,
-                    "minimumHighlightCoverageRatio": 0.12 if reference_fidelity else 0.08,
-                    "minimumHighlightEnergyRatio": 0.12 if reference_fidelity else 0.08,
+                    "maximumCentroidDelta": 1.0 if simplified else (0.08 if reference_fidelity else 0.12),
+                    "maximumAspectRatioDelta": 1.0 if simplified else (0.15 if reference_fidelity else 0.22),
+                    "minimumDetailEnergyRatio": 0.0 if simplified else (0.35 if reference_fidelity else 0.25),
+                    "minimumEdgeDensityRatio": 0.0 if simplified else (0.25 if reference_fidelity else 0.15),
+                    "minimumHistogramIntersection": 0.0 if simplified else (0.30 if reference_fidelity else 0.20),
+                    "maximumMeanColorDelta": 1.0 if simplified else (0.42 if reference_fidelity else 0.55),
+                    "minimumHighlightCoverageRatio": 0.0 if simplified else (0.12 if reference_fidelity else 0.08),
+                    "minimumHighlightEnergyRatio": 0.0 if simplified else (0.12 if reference_fidelity else 0.08),
                 }
                 if gate_type == "visual"
                 else {}
@@ -386,7 +407,13 @@ def resolve_manifest(
             if dependency in modules
         }
         contract_errors.extend(
-            module_document_errors(module_id, module, entries[module_id], dependencies)
+            module_document_errors(
+                module_id,
+                module,
+                entries[module_id],
+                dependencies,
+                raw.get("globalSpec") if isinstance(raw.get("globalSpec"), dict) else None,
+            )
         )
     if contract_errors:
         raise ValueError("invalid module contract: " + "; ".join(dict.fromkeys(contract_errors)))
@@ -554,6 +581,15 @@ def add_module(
         if not owns_topology:
             raise ValueError(
                 f"visual module {module_id!r} needs at least one surfaceTopologyPlan group with matching ownerModuleId"
+            )
+        detail_contract = global_spec.get("detailDecompositionContract")
+        if not isinstance(detail_contract, dict):
+            raise ValueError(
+                "a visual module requires globalSpec.detailDecompositionContract"
+            )
+        if detail_contract.get("status") != "planned":
+            raise ValueError(
+                "detailDecompositionContract must be planned before visual module specs are created"
             )
     entries = entry_by_id(manifest)
     if module_id in entries:

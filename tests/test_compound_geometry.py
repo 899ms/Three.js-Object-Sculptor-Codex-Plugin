@@ -163,6 +163,7 @@ def compound_musician_mascot_spec() -> dict[str, Any]:
         intended_use="static-render",
     )
     spec["schemaVersion"] = "3.1"
+    spec["intendedUse"] = "static-render"
     _fill_pre_spec(spec)
     spec["componentTree"] = [
         _assembly("root", None),
@@ -340,6 +341,7 @@ class CompoundSchemaTests(unittest.TestCase):
             intended_use="static-render",
         )
         legacy["schemaVersion"] = "3.0"
+        legacy["intendedUse"] = "static-render"
         _fill_pre_spec(legacy)
         root = legacy["componentTree"][0]
         root.pop("componentType", None)
@@ -361,6 +363,7 @@ class CompoundSchemaTests(unittest.TestCase):
             intended_use="static-render",
         )
         legacy["schemaVersion"] = "3.0"
+        legacy["intendedUse"] = "static-render"
         legacy_root = legacy["componentTree"][0]
         legacy_root.pop("componentType", None)
         legacy_root["geometryDescriptor"].pop("parameters", None)
@@ -376,7 +379,9 @@ class CompoundSchemaTests(unittest.TestCase):
         migrated, report = migrate_spec(legacy)
 
         self.assertEqual(legacy, original, "migration must not mutate the caller's input")
-        self.assertEqual(migrated["schemaVersion"], "3.1")
+        self.assertEqual(migrated["schemaVersion"], "3.2")
+        self.assertNotIn("intendedUse", migrated)
+        self.assertEqual(migrated["legacyIntent"]["value"], "static-render")
         self.assertEqual(migrated["componentTree"][0]["componentType"], "part")
         self.assertEqual(
             migrated["componentTree"][0]["geometryDescriptor"]["parameters"],
@@ -394,6 +399,7 @@ class CompoundSchemaTests(unittest.TestCase):
             intended_use="static-render",
         )
         legacy["schemaVersion"] = "3.0"
+        legacy["intendedUse"] = "static-render"
         legacy["componentTree"][0].pop("componentType", None)
         legacy["componentTree"][0]["geometryDescriptor"].pop("parameters", None)
 
@@ -402,6 +408,41 @@ class CompoundSchemaTests(unittest.TestCase):
 
         self.assertEqual(twice, once)
         self.assertFalse(report["changed"])
+
+    def test_current_schema_migration_refreshes_blind_rubric_and_preserves_history(
+        self,
+    ) -> None:
+        spec = make_spec(
+            "Stale Blind Rubric",
+            None,
+            complexity="simple",
+            intended_use="static-render",
+        )
+        spec["reviewHistory"] = [
+            {
+                "passId": "blockout",
+                "action": "refine-code",
+                "summary": "Historical review must remain untouched.",
+            }
+        ]
+        original_history = copy.deepcopy(spec["reviewHistory"])
+        stale_rubric = spec["phaseExecutionContract"]["visualScout"][
+            "phaseRubrics"
+        ]["form"]
+        stale_rubric.pop("mandatoryChecks")
+        stale_rubric.pop("coverageRule")
+
+        migrated, report = migrate_spec(spec)
+
+        refreshed = migrated["phaseExecutionContract"]["visualScout"][
+            "phaseRubrics"
+        ]["form"]
+        self.assertTrue(refreshed["mandatoryChecks"])
+        self.assertIn("three highest-impact", refreshed["coverageRule"])
+        self.assertEqual(migrated["reviewHistory"], original_history)
+        self.assertTrue(report["changed"])
+        self.assertGreater(report["phaseExecutionContractUpdates"], 0)
+        self.assertTrue(report["reviewHistoryPreserved"])
 
 
 class GeometryHandlerTests(unittest.TestCase):
@@ -652,7 +693,10 @@ class GeometryHandlerTests(unittest.TestCase):
         )
         compound = compound_musician_mascot_spec()
         self.assertEqual(pass_order(compound), pass_order(baseline))
-        self.assertEqual(pass_order(compound), ["blockout", "structure", "form", "lookdev"])
+        self.assertEqual(
+            pass_order(compound),
+            ["blockout", "form", "lookdev", "interaction"],
+        )
 
 
 if __name__ == "__main__":

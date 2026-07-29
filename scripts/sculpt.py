@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single entry point for the adaptive Three.js object-sculpt workflow."""
+"""Single entry point for the quality-first Three.js object-sculpt workflow."""
 
 from __future__ import annotations
 
@@ -14,7 +14,10 @@ import migrate_sculpt_spec
 import new_sculpt_spec
 import probe_reference_image
 import sculpt_modules
+import sculpt_capabilities
+import sculpt_corrections
 import sculpt_pass_orchestrator
+import sculpt_user_approval
 import sculpt_view_hypotheses
 import validate_sculpt_spec
 
@@ -23,11 +26,15 @@ Command = tuple[str, Callable[[list[str]], int]]
 
 
 COMMANDS: dict[str, Command] = {
-    "init": ("Create one spec with integrated pre-spec and an adaptive pass plan.", new_sculpt_spec.main),
+    "init": ("Create one spec with integrated pre-spec, motion assessment, and quality passes.", new_sculpt_spec.main),
     "validate": ("Validate the spec, optionally for one pass.", validate_sculpt_spec.main),
     "status": (
-        "Show the authoritative current pass and required evidence.",
+        "Show the authoritative current pass, user progress, ETA policy, and required evidence.",
         lambda argv: sculpt_pass_orchestrator.main(["status", *argv]),
+    ),
+    "context": (
+        "Show the concise stable-core plus current-phase work packet for the next visual cycle.",
+        lambda argv: sculpt_pass_orchestrator.main(["context", *argv]),
     ),
     "sync": (
         "Refresh the derived pipeline status stored in the spec.",
@@ -40,11 +47,23 @@ COMMANDS: dict[str, Command] = {
     "generate": ("Generate the current pass into a user-safe *.generated.ts file.", generate_threejs_factory.main),
     "compare": ("Create a no-crop single- or multi-view comparison sheet.", make_visual_comparison_sheet.main),
     "review": ("Record one visual, runtime, or metrics review for the current pass.", append_sculpt_review.main),
+    "approve": (
+        "Record explicit user approval or structured change feedback after the system gate passes.",
+        sculpt_user_approval.main,
+    ),
     "probe": ("Inspect basic reference-image properties.", probe_reference_image.main),
     "pbr": ("Extract inferred PBR maps from a confirmed material crop.", extract_reference_pbr.main),
     "views": (
         "Register or inspect cached ImageGen unseen-view hypotheses.",
         sculpt_view_hypotheses.main,
+    ),
+    "capabilities": (
+        "Route components to executable perceptual capability packs and report gaps.",
+        sculpt_capabilities.main,
+    ),
+    "correct": (
+        "Validate and apply one typed perceptual correction batch to a challenger spec.",
+        sculpt_corrections.main,
     ),
     "migrate": ("Migrate a spec explicitly without rewriting review evidence.", migrate_sculpt_spec.main),
     "module": (

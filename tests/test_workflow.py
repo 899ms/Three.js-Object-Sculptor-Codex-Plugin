@@ -31,18 +31,30 @@ from make_visual_comparison_sheet import (  # noqa: E402
 )
 from new_sculpt_spec import make_spec  # noqa: E402
 from sculpt_contract import (  # noqa: E402
+    blind_scout_entry_failures,
     build_pass_plan,
     correction_batch_from_verdict,
+    effective_pass_config,
     file_sha256,
+    generation_validation_hash,
+    phase_work_packet,
     pipeline_status,
+    phase_review_key,
+    quality_candidate_disposition,
+    refinement_budget,
+    record_user_phase_decision,
+    review_target_catalog,
     review_failures,
     review_spec_hash,
     sculpt_representation_signature,
+    sync_pipeline,
     visual_evidence_integrity_failures,
+    visual_evidence_authority_failures,
     visual_evidence_manifest_sha256,
     write_spec_atomic,
 )
 from sculpt_pass_orchestrator import pass_specific_gaps  # noqa: E402
+from sculpt_view_hypotheses import register_views  # noqa: E402
 from validate_sculpt_spec import load_spec, validate_spec  # noqa: E402
 
 
@@ -64,6 +76,60 @@ def fill_pre_spec(spec: dict) -> None:
             "dominantCurves": ["rounded upper contour"],
         }
     )
+    spec["interactionContract"].update(
+        {
+            "status": "not-required",
+            "assessmentReason": "The static test prop has no observed or inferred moving parts.",
+        }
+    )
+    spec["viewHypothesisPolicy"].update(
+        {
+            "enabled": False,
+            "decision": "not-needed",
+            "decisionReason": "The synthetic test fixture is simple and symmetric in depth.",
+            "skipAssessment": {
+                "objectIsSimple": True,
+                "symmetry": "bilateral",
+                "confidence": 0.95,
+                "evidenceRefs": ["full-object"],
+                "reason": "The observed fixture has one simple mirrored continuous volume.",
+            },
+        }
+    )
+    spec["detailDecompositionContract"]["status"] = "planned"
+    for component in spec.get("componentTree", []):
+        if not isinstance(component, dict):
+            continue
+        component["detailPlan"].update(
+            {
+                "status": "planned",
+                "observedComplexity": "simple",
+                "decompositionMode": "atomic",
+                "atomicityReason": "The synthetic test fixture is one continuous simple volume.",
+                "coverageNotes": "The full outline and the intentionally featureless test surface were checked.",
+            }
+        )
+    for material in spec.get("materials", []):
+        material["surfaceDescriptor"] = {
+            "status": "assessed",
+            "rigidity": {
+                "value": "rigid",
+                "basis": "inferred",
+                "confidence": 0.8,
+            },
+            "finish": {
+                "value": "matte",
+                "basis": "observed",
+                "confidence": 0.8,
+            },
+            "microRelief": {
+                "value": "pebbled",
+                "channel": "normal",
+                "basis": "observed",
+                "confidence": 0.75,
+            },
+            "evidenceRefs": ["full-object"],
+        }
 
 
 def comparison_manifest(root: Path, label: str, view_id: str = "primary") -> dict:
@@ -111,11 +177,42 @@ def visual_entry(spec: dict, pass_id: str, root: Path, view_id: str = "primary")
         if pass_id in target["passIds"]
     ]
     layers = {
-        "blockout": {"silhouette": 0.82},
-        "form": {"silhouette": 0.83, "structure": 0.81},
-        "structure": {"structure": 0.82},
-        "lookdev": {"material": 0.81, "lighting": 0.78},
-        "optimization": {"silhouette": 0.83, "material": 0.81, "lighting": 0.78},
+        "blockout": {
+            "silhouette": 0.82,
+            "assemblyCorrectness": 0.82,
+            "proportionBalance": 0.82,
+            "shapeSilhouette": 0.82,
+        },
+        "form": {
+            "silhouette": 0.83,
+            "structure": 0.81,
+            "formDetail": 0.78,
+            "assemblyCorrectness": 0.82,
+            "proportionBalance": 0.82,
+            "shapeSilhouette": 0.82,
+            "signatureDetail": 0.78,
+        },
+        "structure": {"silhouette": 0.82, "structure": 0.82},
+        "lookdev": {
+            "silhouette": 0.83,
+            "structure": 0.81,
+            "formDetail": 0.78,
+            "assemblyCorrectness": 0.82,
+            "proportionBalance": 0.82,
+            "shapeSilhouette": 0.82,
+            "signatureDetail": 0.78,
+            "material": 0.81,
+            "lighting": 0.78,
+            "materialPlausibility": 0.81,
+            "surfaceQuality": 0.78,
+        },
+        "optimization": {
+            "silhouette": 0.83,
+            "structure": 0.81,
+            "formDetail": 0.78,
+            "material": 0.81,
+            "lighting": 0.78,
+        },
     }[pass_id]
     evidence = comparison_manifest(root, pass_id, view_id)
     evidence["type"] = "visual"
@@ -138,8 +235,32 @@ def visual_entry(spec: dict, pass_id: str, root: Path, view_id: str = "primary")
             "reviewedArtifactSha256": evidence["comparisonSha256"],
             "reviewedAt": "2026-07-15T00:00:00+00:00",
         },
+        "blindScout": {
+            "artifactType": "threejs-sculpt-blind-scout",
+            "version": 2,
+            "phaseId": pass_id,
+            "decision": "approve",
+            "comparisonSha256": evidence["comparisonSha256"],
+            "reviewedAt": "2026-07-15T00:00:00+00:00",
+            "reviewer": {
+                "role": "blind-visual-scout",
+                "contextId": f"test-scout-{pass_id}-{view_id}",
+                "model": "test-blind-scout",
+            },
+            "observations": [],
+        },
         "aiVisionNotes": "Synthetic evidence matches the expected test silhouette.",
     }
+
+
+def approve_current_phase(spec: dict, pass_id: str) -> dict:
+    return record_user_phase_decision(
+        spec,
+        pass_id,
+        "approved",
+        user_statement=f"User explicitly approved {pass_id}.",
+        recorded_at="2026-01-01T00:00:00+00:00",
+    )
 
 
 class PassPlanTests(unittest.TestCase):
@@ -155,7 +276,7 @@ class PassPlanTests(unittest.TestCase):
         self.assertEqual(simple_static, ["blockout", "form", "lookdev"])
         self.assertEqual(
             complex_playable,
-            ["blockout", "structure", "form", "lookdev", "interaction", "optimization"],
+            ["blockout", "form", "lookdev", "interaction"],
         )
         lookdev = next(
             item
@@ -170,6 +291,9 @@ class PassPlanTests(unittest.TestCase):
             if item["id"] == "form"
         )
         self.assertEqual(form["requiredLayerScores"]["formDetail"], 0.82)
+        self.assertEqual(form["visualBaselinePassId"], "blockout")
+        self.assertIn("assemblyCorrectness", form["requiredLayerScores"])
+        self.assertTrue(form["visualSanity"]["obviousErrorVeto"])
 
     def test_reference_fidelity_raises_visual_bar_without_changing_balanced(self) -> None:
         balanced = make_spec(
@@ -195,17 +319,763 @@ class PassPlanTests(unittest.TestCase):
             quality["qualityTargets"]["diagnosticTargets"]["acceptanceAuthority"]
         )
 
-    def test_init_integrates_pre_spec_and_has_one_fps_source(self) -> None:
+    def test_init_integrates_pre_spec_and_separates_performance_audit(self) -> None:
         spec = make_spec("Test", None, complexity="simple", intended_use="browser-prop")
-        self.assertEqual(spec["schemaVersion"], "3.1")
+        self.assertEqual(spec["schemaVersion"], "3.2")
         self.assertIn("preSpecAssessment", spec)
         self.assertNotIn("visualEvidence", spec)
+        self.assertNotIn("intendedUse", spec)
         self.assertNotIn("fpsTarget", spec["qualityTargets"])
-        self.assertEqual(spec["performanceBudget"]["fpsTarget"], 60)
+        self.assertFalse(spec["performanceAudit"]["enabled"])
         self.assertEqual(spec["sculptPipeline"]["passGateMode"], "adaptive-sequential")
+        progress = spec["sculptPipeline"]["userProgress"]
+        self.assertTrue(progress["reportRequired"])
+        self.assertEqual(progress["completedGates"], 0)
+        self.assertEqual(progress["totalGates"], 4)
+        self.assertEqual(progress["currentStep"], "blockout")
+        self.assertTrue(progress["eta"]["recalculateAfterEveryStep"])
+
+    def test_interaction_is_added_from_motion_contract_not_intended_use(self) -> None:
+        spec = make_spec("Fan", None, complexity="simple", quality_profile="balanced")
+        self.assertEqual(
+            [item["id"] for item in spec["buildPasses"]],
+            ["blockout", "form", "lookdev", "interaction"],
+        )
+
+        spec["interactionContract"].update(
+            {
+                "status": "required",
+                "assessmentReason": "The observed fan blades rotate around the central hub.",
+                "motionAffordances": [
+                    {
+                        "id": "fan-blade-spin",
+                        "componentId": "root",
+                        "behavior": "continuous-rotation",
+                        "pivot": [0, 0, 0],
+                        "axis": [0, 0, 1],
+                        "rate": 6.0,
+                        "source": "domain-prior",
+                        "confidence": 0.95,
+                        "evidenceRefs": ["full-object"],
+                        "enabledByDefault": True,
+                    }
+                ],
+            }
+        )
+        spec["actionReadiness"]["enabled"] = True
+        sync_pipeline(spec)
+        self.assertEqual(
+            [item["id"] for item in spec["buildPasses"]],
+            ["blockout", "form", "lookdev", "interaction"],
+        )
+
+        spec["interactionContract"].update(
+            {
+                "status": "not-required",
+                "assessmentReason": "This static housing has no meaningful object-specific motion.",
+                "motionAffordances": [],
+            }
+        )
+        spec["actionReadiness"]["enabled"] = False
+        sync_pipeline(spec)
+        self.assertEqual(
+            [item["id"] for item in spec["buildPasses"]],
+            ["blockout", "form", "lookdev"],
+        )
+
+    def test_blockout_context_defers_future_phase_spec(self) -> None:
+        spec = make_spec(
+            "Helicopter",
+            "helicopter.png",
+            complexity="complex",
+            quality_profile="reference-fidelity",
+            reference_background="clear",
+        )
+        packet = phase_work_packet(spec, "blockout")
+        projection = packet["contextProjection"]
+
+        self.assertEqual(spec["phaseExecutionContract"]["mode"], "progressive-visual-loop")
+        self.assertEqual(spec["phaseExecutionContract"]["version"], 4)
+        form_packet = phase_work_packet(spec, "form")
+        lookdev_packet = phase_work_packet(spec, "lookdev")
+        interaction_packet = phase_work_packet(spec, "interaction")
+        self.assertNotIn("maximumSilhouetteIouRegression", packet)
+        self.assertNotIn("maximumSilhouetteIouRegression", form_packet)
+        self.assertEqual(
+            lookdev_packet["specDeltaContract"]["activePhaseOwnedPaths"],
+            ["materials", "lookDevTargets", "lightingFromPhoto"],
+        )
+        self.assertIn(
+            "componentTree",
+            lookdev_packet["specDeltaContract"]["repairablePriorPhasePaths"],
+        )
+        self.assertIn(
+            "componentTree",
+            lookdev_packet["specDeltaContract"]["editablePaths"],
+        )
+        self.assertIn(
+            "materials",
+            interaction_packet["specDeltaContract"]["repairablePriorPhasePaths"],
+        )
+        self.assertEqual(lookdev_packet["editableComponentIds"], ["root"])
+        self.assertEqual(interaction_packet["editableMaterialIds"], ["base"])
+        authority = lookdev_packet["specDeltaContract"]["correctionAuthority"]
+        self.assertEqual(authority["mode"], "cumulative-prior-phase-repair")
+        self.assertTrue(authority["impactAssessmentRequired"])
+        self.assertTrue(authority["challengerOnly"])
+        self.assertTrue(authority["protectedPhaseRegressionVeto"])
+        self.assertTrue(authority["priorPhaseReviewRequired"])
+        self.assertTrue(authority["priorPhaseImprovementAllowed"])
+        self.assertTrue(authority["priorPhaseIsNotFrozen"])
+        self.assertIn("blind-visual-scout", form_packet["visualCycle"]["steps"])
+        scout = form_packet["visualScout"]
+        self.assertEqual(
+            scout["inputAllowlist"],
+            [
+                "originalImage",
+                "currentRender",
+                "previousRender",
+                "sideBySideComparison",
+                "phaseId",
+                "phaseRubric",
+            ],
+        )
+        self.assertIn("spec", scout["inputDenylist"])
+        self.assertFalse(scout["output"]["advisoryOnly"])
+        self.assertTrue(scout["output"]["gateAuthority"])
+        self.assertEqual(scout["output"]["decisionValues"], ["approve", "reject"])
+        self.assertEqual(scout["output"]["maxObservations"], 3)
+        self.assertEqual(scout["output"]["artifactVersion"], 2)
+        self.assertTrue(scout["output"]["priorPhaseReviewRequired"])
+        self.assertTrue(scout["output"]["priorPhaseImprovementAllowed"])
+        self.assertTrue(scout["output"]["priorPhaseIsNotFrozen"])
+        active_rubric = scout["activePhaseInput"]["phaseRubric"]
+        self.assertEqual(
+            active_rubric["reviewOrder"],
+            ["prior-phase-quality-sweep", "current-phase-review"],
+        )
+        form_checks = {
+            item["category"]: item for item in active_rubric["mandatoryChecks"]
+        }
+        self.assertIn("socket", form_checks["attachment"]["inspection"])
+        self.assertIn("asymmetry", form_checks["balance"]["inspection"])
+        self.assertIn("invented", form_checks["signature-detail"]["inspection"])
+        self.assertIn("three highest-impact", active_rubric["coverageRule"])
+        self.assertIn(
+            "generic realism preferences",
+            active_rubric["referenceComparisonRule"],
+        )
+        self.assertIn("critical", active_rubric["severityPolicy"])
+        lookdev_checks = {
+            item["category"]: item
+            for item in lookdev_packet["visualScout"]["activePhaseInput"][
+                "phaseRubric"
+            ]["mandatoryChecks"]
+        }
+        self.assertEqual(lookdev_checks["attachment"]["phaseScope"], "protected")
+        self.assertEqual(lookdev_checks["material"]["phaseScope"], "current")
+        self.assertIn(
+            "visibly poorer than",
+            lookdev_checks["material"]["inspection"],
+        )
+        self.assertIn("silhouette", active_rubric["priorPhaseCategories"])
+        self.assertEqual(
+            scout["phaseRubrics"]["blockout"]["currentPhaseCategories"],
+            ["silhouette", "framing", "proportion", "major-part", "assembly"],
+        )
+        self.assertEqual(
+            packet["visualScout"]["activePhaseInput"]["phaseId"],
+            "blockout",
+        )
+        self.assertTrue(scout["output"]["scoresForbidden"])
+        self.assertFalse(scout["output"]["verdictForbidden"])
+        self.assertTrue(scout["output"]["numericFixesForbidden"])
+        self.assertEqual(packet["qualityGate"]["mode"], "ai-scout-human")
+        self.assertNotIn("iouFloor", packet["qualityGate"])
+        self.assertNotIn("silhouetteIou", json.dumps(spec))
+        self.assertNotIn("maximumSilhouetteIouRegression", json.dumps(spec))
+        self.assertEqual(packet["qualityGate"]["aiOverallFloor"], 0.70)
+        self.assertEqual(
+            spec["phaseExecutionContract"]["cycle"]["steps"][-2:],
+            ["system-promote-or-rollback", "user-approval"],
+        )
+        self.assertTrue(spec["phaseExecutionContract"]["humanApproval"]["required"])
+        invalid_scout = copy.deepcopy(spec)
+        invalid_scout["phaseExecutionContract"]["visualScout"]["output"][
+            "componentScanFields"
+        ].append("score")
+        errors, _ = validate_spec(invalid_scout)
+        self.assertTrue(
+            any("componentScanFields must contain only" in error for error in errors)
+        )
+        incomplete_rubric = copy.deepcopy(spec)
+        incomplete_rubric["phaseExecutionContract"]["visualScout"][
+            "phaseRubrics"
+        ]["form"].pop("mandatoryChecks")
+        errors, _ = validate_spec(incomplete_rubric)
+        self.assertTrue(
+            any(
+                "canonical phase-scoped review categories" in error
+                for error in errors
+            )
+        )
+
+        legacy = copy.deepcopy(spec)
+        legacy_contract = legacy["phaseExecutionContract"]
+        legacy_contract["version"] = 1
+        legacy_contract.pop("visualScout")
+        legacy_contract.pop("humanApproval")
+        legacy_contract["cycle"]["steps"] = [
+            "spec-delta",
+            "build-render",
+            "reference-comparison",
+            "independent-review",
+            "promote-or-rollback",
+        ]
+        legacy_contract["cycle"]["comparisonAuthority"] = "observed-reference"
+        errors, warnings = validate_spec(legacy)
+        self.assertFalse(
+            [error for error in errors if "phaseExecutionContract" in error],
+            errors,
+        )
+        self.assertTrue(any("version 1 has no blind visual scout" in item for item in warnings))
+        self.assertNotIn("materials", projection)
+        self.assertNotIn("interactionContract", projection)
+        self.assertNotIn("detailDecompositionContract", projection)
+        self.assertNotIn(
+            "materialFamilies",
+            projection["preSpecAssessment"]["objectClass"],
+        )
+        self.assertNotIn(
+            "motionPotential",
+            projection["preSpecAssessment"]["objectClass"],
+        )
+        self.assertEqual(spec["viewHypothesisPolicy"]["decision"], "pending")
+        self.assertFalse(spec["viewHypothesisPolicy"]["enabled"])
+        self.assertEqual(
+            projection["viewHypothesisPolicy"]["activationPhase"],
+            "blockout",
+        )
+        self.assertTrue(
+            any(
+                "invoke imagegen" in gap
+                for gap in pass_specific_gaps(spec, "blockout")
+            )
+        )
+        self.assertEqual(spec["buildPasses"][0]["diagnosticViews"], [])
+        self.assertFalse(
+            [
+                gap
+                for gap in pass_specific_gaps(spec, "blockout")
+                if any(token in gap.lower() for token in ("detail", "topology", "material", "interaction"))
+            ]
+        )
+        self.assertEqual(
+            packet["visualCycle"]["maximumNonVisualOperationsBeforeRender"],
+            2,
+        )
+        form_components = phase_work_packet(spec, "form")["contextProjection"][
+            "componentTree"
+        ]
+        self.assertTrue(form_components)
+        self.assertTrue(
+            all(
+                "material" not in component
+                and "materialLayers" not in component
+                and "actionProfile" not in component
+                for component in form_components
+            )
+        )
+        spec["viewHypothesisPolicy"].update(
+            {
+                "decision": "not-needed",
+                "decisionReason": "The observed object is symmetric enough for bounded form inference.",
+            }
+        )
+        self.assertEqual(effective_pass_config(spec, "form")["diagnosticViews"], [])
+        spec["viewHypothesisPolicy"].update(
+            {
+                "enabled": True,
+                "decision": "required",
+                "decisionReason": "The hidden attachment layout can change the form implementation.",
+            }
+        )
+        self.assertEqual(
+            effective_pass_config(spec, "form")["diagnosticViews"],
+            ["three-quarter", "side", "back"],
+        )
+
+    def test_blockout_hashes_ignore_future_phase_only_edits(self) -> None:
+        spec = make_spec(
+            "Helicopter",
+            "helicopter.png",
+            complexity="complex",
+            quality_profile="reference-fidelity",
+            reference_background="clear",
+        )
+        generation_hash = generation_validation_hash(spec, "blockout")
+        review_hash = review_spec_hash(spec, "blockout")
+
+        future = copy.deepcopy(spec)
+        future["materials"][0]["roughness"] = 0.17
+        future["componentTree"][0]["actionProfile"] = {
+            "mode": "rotate",
+            "axis": [0, 1, 0],
+        }
+        future["componentTree"][0]["detailPlan"] = {
+            "decompositionMode": "compound",
+            "featureGroups": [{"id": "future-rivets"}],
+        }
+        future["repetitionSystems"] = [
+            {"id": "future-rivets", "type": "grid", "counts": [2, 2, 1]}
+        ]
+        future["qualityContract"]["featureGroups"][-1]["qualityCriteria"] = [
+            "A future Lookdev-only criterion changed."
+        ]
+        future["qualityTargets"]["mustMatch"][-1] = "updated material response"
+        future["qualityTargets"]["niceToHave"] = ["revised micro wear"]
+        future["qualityTargets"]["reviewViewpoints"] = ["revised grazing"]
+        future["qualityTargets"]["diagnosticTargets"][
+            "minimumHighlightEnergyRatio"
+        ] = 0.45
+        self.assertEqual(
+            generation_validation_hash(future, "blockout"),
+            generation_hash,
+        )
+        self.assertEqual(review_spec_hash(future, "blockout"), review_hash)
+
+        blockout_targets = phase_work_packet(future, "blockout")[
+            "contextProjection"
+        ]["qualityTargets"]
+        self.assertNotIn("niceToHave", blockout_targets)
+        self.assertNotIn("reviewViewpoints", blockout_targets)
+        self.assertNotIn("minimumHighlightEnergyRatio", blockout_targets["diagnosticTargets"])
+        self.assertFalse(
+            any("material" in item.lower() for item in blockout_targets["mustMatch"])
+        )
+
+        relevant = copy.deepcopy(spec)
+        relevant["qualityTargets"]["mustMatch"][0] = "silhouette with exact negative space"
+        self.assertNotEqual(review_spec_hash(relevant, "blockout"), review_hash)
+
+        future["componentTree"][0]["transform"]["scale"] = [1.2, 1.0, 1.0]
+        self.assertNotEqual(
+            generation_validation_hash(future, "blockout"),
+            generation_hash,
+        )
+        self.assertNotEqual(review_spec_hash(future, "blockout"), review_hash)
+
+    def test_monolithic_turnaround_registration_is_allowed_during_blockout_preparation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            turnaround = root / "turnaround-2x2.png"
+            write_png_rgb(source, 8, 8, [(40, 90, 180)] * 64)
+            write_png_rgb(turnaround, 16, 16, [(55, 105, 190)] * 256)
+            spec_path = root / "spec.json"
+            spec = make_spec(
+                "Blockout-prepared views",
+                str(source),
+                complexity="complex",
+                reference_background="clear",
+            )
+            write_spec_atomic(spec_path, spec)
+            result = register_views(spec_path, [], sheet_path=turnaround)
+            self.assertTrue(result["ok"])
+            registered = load_spec(spec_path)["viewHypothesisPolicy"]
+            self.assertEqual(registered["activationPhase"], "blockout")
+            self.assertEqual(registered["decision"], "required")
+            self.assertTrue(registered["enabled"])
+
+    def test_small_score_regression_requires_blind_scout_visual_regression(self) -> None:
+        baseline = {
+            "overallScore": 0.80,
+            "layerScores": {"silhouette": 0.80},
+            "diagnosticScores": {},
+        }
+        candidate = {
+            "overallScore": 0.79,
+            "layerScores": {"silhouette": 0.79},
+            "diagnosticScores": {},
+        }
+        approved = quality_candidate_disposition(
+            baseline,
+            candidate,
+            owned_layers=["silhouette"],
+            maximum_regression=0.0,
+            blind_scout_decision="approve",
+        )
+        self.assertEqual(approved["disposition"], "gate-pass")
+        self.assertTrue(approved["regressionAcceptedByBlindScout"])
+
+        rejected = quality_candidate_disposition(
+            baseline,
+            candidate,
+            owned_layers=["silhouette"],
+            maximum_regression=0.0,
+            blind_scout_decision="reject",
+        )
+        self.assertEqual(rejected["disposition"], "rejected-regression")
+
+    def test_imagegen_prepares_white_background_for_mixed_or_impractical_references(self) -> None:
+        unassessed = make_spec("Reference", "original.png", complexity="simple")
+        errors, warnings = validate_spec(unassessed)
+        self.assertFalse(
+            [item for item in errors if "referencePreparation" in item]
+        )
+        self.assertTrue(
+            any("reference preparation is unassessed" in item for item in warnings)
+        )
+
+        clear = make_spec(
+            "Reference",
+            "white-background.png",
+            complexity="simple",
+            reference_background="clear",
+        )
+        errors, warnings = validate_spec(clear)
+        self.assertFalse(
+            [item for item in errors if "referencePreparation" in item]
+        )
+        self.assertFalse(
+            [item for item in warnings if "subject/background separation" in item]
+        )
+        self.assertEqual(clear["sourceImage"], "white-background.png")
+        self.assertEqual(
+            clear["referencePreparation"]["subjectBackgroundSeparation"],
+            "clear",
+        )
+
+        prepared = make_spec(
+            "Reference",
+            "prepared-white.png",
+            complexity="simple",
+            reference_background="mixed",
+            original_image="original.png",
+            background_removal_mode="white-background-cleanup",
+        )
+        errors, warnings = validate_spec(prepared)
+        self.assertFalse(
+            [item for item in errors if "referencePreparation" in item]
+        )
+        self.assertFalse(
+            [item for item in warnings if "subject/background separation" in item]
+        )
+
+        self.assertEqual(
+            prepared["referencePreparation"]["outputBackground"],
+            "solid-white",
+        )
+        prepared["referencePreparation"]["whiteBackgroundValidated"] = False
+        errors, _ = validate_spec(prepared)
+        self.assertTrue(
+            any("whiteBackgroundValidated must be true" in item for item in errors)
+        )
+
+        simplified = make_spec(
+            "Dense vehicle",
+            "simplified-white.png",
+            complexity="ultra",
+            reference_background="clear",
+            original_image="dense-original.png",
+            background_removal_mode="white-background-simplification",
+            imagegen_trigger="excessive-complexity",
+            declared_simplifications=[
+                "merge non-signature rivet rows into material detail",
+            ],
+        )
+        errors, _ = validate_spec(simplified)
+        self.assertFalse(
+            [item for item in errors if "referencePreparation" in item],
+            errors,
+        )
+        self.assertEqual(simplified["sourceImage"], "simplified-white.png")
+        self.assertEqual(
+            simplified["referencePreparation"]["modificationPolicy"]["mode"],
+            "bounded-simplification",
+        )
+        self.assertEqual(
+            simplified["referencePreparation"]["comparisonPolicy"]["identityGuardrail"],
+            "originalImage",
+        )
+        self.assertEqual(
+            visual_evidence_authority_failures(
+                {
+                    "views": [
+                        {
+                            "viewId": "primary",
+                            "referenceProvenance": {
+                                "origin": "prepared-reference",
+                                "allowedUse": "acceptance",
+                            },
+                        }
+                    ]
+                }
+            ),
+            [],
+        )
 
 
 class StateContractTests(unittest.TestCase):
+    def test_system_pass_waits_for_user_and_change_feedback_reopens_phase(self) -> None:
+        spec = make_spec("Human Gate", None, complexity="simple")
+        fill_pre_spec(spec)
+        blockout = visual_entry(spec, "blockout", self.evidence_root)
+        spec["reviewHistory"] = [blockout]
+
+        waiting = pipeline_status(spec)
+        self.assertEqual(waiting["state"], "awaiting-user-approval")
+        self.assertEqual(waiting["currentPass"], "blockout")
+        self.assertEqual(waiting["completedPasses"], [])
+        self.assertTrue(waiting["pendingUserApproval"]["systemPassed"])
+        self.assertEqual(
+            waiting["pendingUserApproval"]["reviewKey"],
+            phase_review_key(blockout),
+        )
+
+        feedback = [
+            {
+                "visualRegion": "upper housing",
+                "problem": "The housing is too narrow and sits too far back.",
+                "expectedDirection": "Widen it and move it forward to match the reference.",
+            }
+        ]
+        record_user_phase_decision(
+            spec,
+            "blockout",
+            "changes-requested",
+            user_statement="The upper housing still looks wrong.",
+            feedback=feedback,
+            recorded_at="2026-01-01T00:00:00+00:00",
+        )
+        rejected = pipeline_status(spec)
+        self.assertEqual(rejected["state"], "needs-user-refinement")
+        self.assertEqual(rejected["userFeedback"], feedback)
+
+        spec["silhouette"]["boundingShape"] = "wider upper housing shifted forward"
+        reopened = pipeline_status(spec)
+        self.assertEqual(reopened["state"], "ready")
+        self.assertEqual(reopened["currentPass"], "blockout")
+        self.assertEqual(reopened["userFeedback"], feedback)
+
+        revised = visual_entry(spec, "blockout", self.evidence_root)
+        spec["reviewHistory"].append(revised)
+        self.assertEqual(
+            pipeline_status(spec)["state"],
+            "awaiting-user-approval",
+        )
+        approve_current_phase(spec, "blockout")
+        promoted = pipeline_status(spec)
+        self.assertEqual(promoted["completedPasses"], ["blockout"])
+        self.assertEqual(promoted["currentPass"], "form")
+
+    def test_user_decision_cannot_be_recorded_before_system_pass(self) -> None:
+        spec = make_spec("No Premature Approval", None, complexity="simple")
+        fill_pre_spec(spec)
+        with self.assertRaisesRegex(ValueError, "only after"):
+            record_user_phase_decision(
+                spec,
+                "blockout",
+                "approved",
+                user_statement="Approve without evidence.",
+            )
+        spec["reviewHistory"] = [visual_entry(spec, "blockout", self.evidence_root)]
+        with self.assertRaisesRegex(ValueError, "requires feedback items"):
+            record_user_phase_decision(
+                spec,
+                "blockout",
+                "changes-requested",
+                user_statement="It is wrong.",
+                feedback=[],
+            )
+
+    def test_default_2x2_can_be_skipped_only_for_simple_symmetric_objects(self) -> None:
+        complex_spec = make_spec(
+            "Complex Vehicle",
+            "vehicle.png",
+            complexity="complex",
+            reference_background="clear",
+        )
+        policy = complex_spec["viewHypothesisPolicy"]
+        self.assertEqual(policy["defaultDecision"], "required")
+        self.assertEqual(
+            policy["activationMode"],
+            "pre-blockout-unless-simple-symmetric",
+        )
+        self.assertEqual(policy["activationPhase"], "blockout")
+        self.assertTrue(
+            any(
+                "before the first Blockout build" in gap
+                for gap in pass_specific_gaps(complex_spec, "blockout")
+            )
+        )
+        policy.update(
+            {
+                "decision": "not-needed",
+                "decisionReason": "Try to skip the turnaround despite complexity.",
+                "skipAssessment": {
+                    "objectIsSimple": True,
+                    "symmetry": "bilateral",
+                    "confidence": 0.95,
+                    "evidenceRefs": ["full-object"],
+                    "reason": "The visible front appears approximately mirrored.",
+                },
+            }
+        )
+        self.assertTrue(
+            any(
+                "complexity.tier is simple" in gap
+                for gap in pass_specific_gaps(complex_spec, "form")
+            )
+        )
+        errors, _ = validate_spec(complex_spec)
+        self.assertTrue(
+            any("complexity.tier is simple" in error for error in errors)
+        )
+
+        simple_spec = make_spec(
+            "Simple Symmetric Knob",
+            "knob.png",
+            complexity="simple",
+            reference_background="clear",
+        )
+        fill_pre_spec(simple_spec)
+        self.assertFalse(
+            [
+                gap
+                for gap in pass_specific_gaps(simple_spec, "blockout")
+                if "2x2" in gap or "skipAssessment" in gap
+            ]
+        )
+
+    def test_champion_policy_rejects_any_regression_and_stops_after_three_misses(self) -> None:
+        baseline = {
+            "overallScore": 0.90,
+            "layerScores": {"silhouette": 0.80, "formDetail": 0.76},
+        }
+        promoted = quality_candidate_disposition(
+            baseline,
+            {
+                "overallScore": 0.91,
+                "layerScores": {"silhouette": 0.80, "formDetail": 0.79},
+            },
+            owned_layers=["formDetail"],
+            protected_layers=["silhouette"],
+            required_layers={"formDetail": 0.72},
+        )
+        self.assertEqual(promoted["disposition"], "promoted")
+        regressed = quality_candidate_disposition(
+            baseline,
+            {
+                "overallScore": 0.92,
+                "layerScores": {"silhouette": 0.79, "formDetail": 0.82},
+            },
+            owned_layers=["formDetail"],
+            protected_layers=["silhouette"],
+            required_layers={"formDetail": 0.72},
+        )
+        self.assertEqual(regressed["disposition"], "rejected-regression")
+        overall_regressed = quality_candidate_disposition(
+            baseline,
+            {
+                "overallScore": 0.60,
+                "layerScores": {"silhouette": 0.80, "formDetail": 0.82},
+            },
+            owned_layers=["formDetail"],
+            protected_layers=["silhouette"],
+            required_layers={"formDetail": 0.72},
+        )
+        self.assertEqual(overall_regressed["disposition"], "rejected-regression")
+        self.assertIn("overallScore", overall_regressed["regressedLayers"])
+        unrelated_layer_regressed = quality_candidate_disposition(
+            {
+                **baseline,
+                "layerScores": {
+                    **baseline["layerScores"],
+                    "identity": 0.90,
+                },
+            },
+            {
+                "overallScore": 0.92,
+                "layerScores": {
+                    "silhouette": 0.80,
+                    "formDetail": 0.82,
+                    "identity": 0.10,
+                },
+            },
+            owned_layers=["formDetail"],
+            protected_layers=["silhouette"],
+        )
+        self.assertEqual(unrelated_layer_regressed["disposition"], "rejected-regression")
+        self.assertIn("identity", unrelated_layer_regressed["regressedLayers"])
+        incomplete_seed = quality_candidate_disposition(
+            None,
+            {"overallScore": 0.90, "layerScores": {}},
+            owned_layers=["formDetail"],
+            protected_layers=["silhouette"],
+        )
+        self.assertEqual(incomplete_seed["disposition"], "rejected-incomplete")
+        self.assertEqual(
+            set(incomplete_seed["missingLayers"]),
+            {"formDetail", "silhouette"},
+        )
+        repaired_legacy_seed = quality_candidate_disposition(
+            {"overallScore": 0.90, "layerScores": {}},
+            {
+                "overallScore": 0.91,
+                "layerScores": {"formDetail": 0.80, "silhouette": 0.82},
+            },
+            owned_layers=["formDetail"],
+            protected_layers=["silhouette"],
+        )
+        self.assertEqual(repaired_legacy_seed["disposition"], "seed")
+        budget = refinement_budget(
+            [
+                {"action": "refine-code", "candidateDisposition": "seed"},
+                {"action": "refine-code", "candidateDisposition": "rejected-no-improvement"},
+                {"action": "refine-code", "candidateDisposition": "rejected-regression"},
+                {"action": "refine-code", "candidateDisposition": "rejected-no-improvement"},
+            ]
+        )
+        self.assertTrue(budget["exhausted"])
+        self.assertEqual(budget["exhaustedReason"], "three-consecutive-non-improvements")
+        recovered = refinement_budget(
+            [
+                {"action": "refine-code", "candidateDisposition": "rejected-no-improvement"},
+                {"action": "refine-code", "candidateDisposition": "promoted"},
+                {"action": "refine-code", "candidateDisposition": "rejected-no-improvement"},
+            ]
+        )
+        self.assertFalse(recovered["exhausted"])
+        self.assertEqual(recovered["consecutiveNonImprovements"], 1)
+        rejected_continues = refinement_budget(
+            [
+                {
+                    "action": "continue",
+                    "accepted": False,
+                    "candidateDisposition": "rejected-regression",
+                }
+                for _ in range(3)
+            ]
+        )
+        self.assertEqual(rejected_continues["usedAttempts"], 3)
+        self.assertEqual(rejected_continues["consecutiveNonImprovements"], 3)
+        self.assertTrue(rejected_continues["exhausted"])
+
+    def test_v4_later_phase_does_not_require_duplicate_protected_layers(self) -> None:
+        self.spec["reviewHistory"] = [
+            visual_entry(self.spec, "form", self.evidence_root)
+        ]
+        lookdev = visual_entry(self.spec, "lookdev", self.evidence_root, "reference")
+        lookdev["layerScores"].pop("structure")
+
+        failures = review_failures(self.spec, lookdev, "lookdev")
+
+        self.assertFalse(
+            any("protected layer" in item for item in failures),
+            failures,
+        )
+
     def test_second_independent_pass_batch_requires_progress_and_closed_blockers(self) -> None:
         spec = {"reviewHistory": [
             {
@@ -307,7 +1177,12 @@ class StateContractTests(unittest.TestCase):
         self.assertTrue(
             any(
                 "different topology/geometry" in item
-                for item in _pending_pass_batch_failures(spec, "blockout", evidence)
+                for item in _pending_pass_batch_failures(
+                    spec,
+                    "blockout",
+                    evidence,
+                    {},
+                )
             )
         )
         tuned = copy.deepcopy(spec)
@@ -341,11 +1216,23 @@ class StateContractTests(unittest.TestCase):
             corrections = json.dumps(
                 [
                     {
+                        "targetType": "component",
                         "target": "root",
-                        "parameterPath": "transform.scale",
-                        "action": "scale",
+                        "parameterPath": "implementation.transform.scale",
+                        "operation": "scale",
+                        "beforeValue": [1.0, 1.0, 1.0],
+                        "value": [1.08, 1.08, 1.08],
+                        "expectedValue": [1.08, 1.08, 1.08],
+                        "unit": "relative-scale",
                         "reason": "silhouette is too small in frame",
-                        "value": 1.08,
+                        "expectedDelta": {
+                            "metric": "silhouetteCoverage",
+                            "from": 0.72,
+                            "to": 0.78,
+                            "tolerance": 0.02,
+                            "unit": "ratio",
+                            "viewIds": ["reference"],
+                        },
                     }
                 ]
             )
@@ -363,6 +1250,23 @@ class StateContractTests(unittest.TestCase):
                         "camera-framing",
                         "--correction-plan-json",
                         corrections,
+                        "--impact-assessment-json",
+                        json.dumps(
+                            {
+                                "targetIds": ["root"],
+                                "allowedPaths": ["implementation.transform.scale"],
+                                "protectedComponentIds": [],
+                                "expectedEffect": "Increase only the root framing scale.",
+                                "possibleSideEffects": ["Frame-edge clearance may tighten."],
+                                "structuralInvariants": [
+                                    "Component hierarchy and local proportions remain unchanged."
+                                ],
+                                "risk": "low",
+                                "rollbackCheckpoint": "Current blockout champion.",
+                                "strategyChange": False,
+                                "verdict": "safe-to-apply",
+                            }
+                        ),
                         "--in-place",
                     ]
                 ),
@@ -371,7 +1275,7 @@ class StateContractTests(unittest.TestCase):
             updated = load_spec(spec_path)
             entry = updated["reviewHistory"][-1]
             self.assertEqual(entry["rootCause"], "camera-framing")
-            self.assertEqual(entry["correctionPlan"][0]["action"], "scale")
+            self.assertEqual(entry["correctionPlan"][0]["operation"], "scale")
             self.assertTrue(entry["correctionBatch"]["atomic"])
             self.assertEqual(entry["correctionBatch"]["correctionCount"], 1)
             second_args = [
@@ -386,9 +1290,27 @@ class StateContractTests(unittest.TestCase):
                 "camera-framing",
                 "--correction-plan-json",
                 corrections,
+                "--impact-assessment-json",
+                json.dumps(
+                    {
+                        "targetIds": ["root"],
+                        "allowedPaths": ["implementation.transform.scale"],
+                        "protectedComponentIds": [],
+                        "expectedEffect": "Increase only the root framing scale.",
+                        "possibleSideEffects": ["Frame-edge clearance may tighten."],
+                        "structuralInvariants": [
+                            "Component hierarchy and local proportions remain unchanged."
+                        ],
+                        "risk": "low",
+                        "rollbackCheckpoint": "Current blockout champion.",
+                        "strategyChange": False,
+                        "verdict": "safe-to-apply",
+                    }
+                ),
                 "--in-place",
             ]
-            self.assertEqual(append_review(second_args), 0)
+            for _ in range(5):
+                self.assertEqual(append_review(second_args), 0)
             self.assertTrue(
                 pipeline_status(load_spec(spec_path))["refinementBudget"]["exhausted"]
             )
@@ -409,6 +1331,7 @@ class StateContractTests(unittest.TestCase):
         form = visual_entry(self.spec, "form", self.evidence_root)
         blockout = visual_entry(self.spec, "blockout", self.evidence_root)
         self.spec["reviewHistory"] = [form, blockout]
+        approve_current_phase(self.spec, "blockout")
         status = pipeline_status(self.spec)
         self.assertEqual(status["completedPasses"], ["blockout"])
         self.assertEqual(status["currentPass"], "form")
@@ -420,19 +1343,45 @@ class StateContractTests(unittest.TestCase):
             "issues": [
                 {
                     "id": "shape",
+                    "rootCauseKey": "root-silhouette-width",
+                    "failureClass": "proportion",
                     "severity": "major",
                     "status": "open",
-                    "target": "silhouette",
+                    "targetType": "component",
+                    "target": "root",
                     "reason": "The silhouette is too wide.",
+                    "observedMismatch": {
+                        "parameterPath": "implementation.geometryDescriptor.parameters.profile",
+                        "actual": 0.92,
+                        "expected": 0.82,
+                        "unit": "width-ratio",
+                        "tolerance": 0.02,
+                        "viewIds": ["reference"],
+                    },
+                    "evidenceCheck": "Measure the root silhouette width in the reference view.",
                 }
             ],
             "corrections": [
                 {
                     "issueId": "shape",
+                    "scope": "code",
+                    "targetType": "component",
                     "target": "root",
-                    "parameterPath": "geometryDescriptor.parameters.profile",
+                    "parameterPath": "implementation.geometryDescriptor.parameters.profile",
+                    "operation": "replace",
+                    "beforeValue": "wide-profile",
+                    "value": "narrow-profile",
+                    "expectedValue": "narrow-profile",
+                    "unit": "implementation-state",
                     "change": "Narrow the executable profile.",
-                    "expectedDelta": "The next render has a narrower silhouette.",
+                    "expectedDelta": {
+                        "metric": "silhouette-width-ratio",
+                        "from": 0.92,
+                        "to": 0.82,
+                        "tolerance": 0.02,
+                        "unit": "ratio",
+                        "viewIds": ["reference"],
+                    },
                 }
             ],
         }
@@ -469,34 +1418,20 @@ class StateContractTests(unittest.TestCase):
             visual_entry(stable, "blockout", self.evidence_root),
             visual_entry(stable, "form", self.evidence_root),
         ]
+        approve_current_phase(stable, "blockout")
+        approve_current_phase(stable, "form")
         stable["lightingFromPhoto"] = ["new lookdev-only light"]
         self.assertEqual(pipeline_status(stable)["currentPass"], "lookdev")
 
-    def test_metrics_pass_requires_real_measurements(self) -> None:
+    def test_performance_is_not_a_quality_pass(self) -> None:
         spec = make_spec("Metrics", None, complexity="simple", intended_use="browser-prop")
-        entry = {
-            "passId": "optimization",
-            "action": "continue",
-            "specHash": review_spec_hash(spec, "optimization"),
-            "metrics": {"fps": 58, "drawCalls": 80, "triangles": 150000},
-            "artifacts": {"performanceCapture": "capture.json"},
-        }
-        failures = review_failures(spec, entry, "optimization")
-        self.assertTrue(any("fps" in failure for failure in failures))
-        self.assertTrue(any("visual" in failure for failure in failures))
-        entry["metrics"]["fps"] = 61
-        baseline = visual_entry(spec, "lookdev", self.evidence_root, "reference")
-        spec["reviewHistory"] = [baseline]
-        visual = visual_entry(spec, "optimization", self.evidence_root, "reference")
-        entry.update(
-            {
-                key: value
-                for key, value in visual.items()
-                if key not in {"passId", "action", "specHash"}
-            }
+        self.assertNotIn(
+            "optimization",
+            [item["id"] for item in spec["buildPasses"]],
         )
-        entry["specHash"] = review_spec_hash(spec, "optimization")
-        self.assertEqual(review_failures(spec, entry, "optimization"), [])
+        self.assertFalse(spec["performanceAudit"]["enabled"])
+        self.assertFalse(spec["performanceAudit"]["blocking"])
+        self.assertEqual(spec["performanceAudit"]["maximumVisualRegression"], 0.0)
 
     def test_runtime_pass_requires_named_boolean_checks(self) -> None:
         spec = make_spec("Runtime", None, complexity="simple", intended_use="animated")
@@ -508,6 +1443,8 @@ class StateContractTests(unittest.TestCase):
         }
         self.assertTrue(any("interaction" in failure for failure in review_failures(spec, entry, "interaction")))
         entry["runtimeChecks"]["interaction"] = True
+        entry["runtimeChecks"]["motion-clearance"] = True
+        entry["runtimeChecks"]["visual-no-regression"] = True
         self.assertEqual(review_failures(spec, entry, "interaction"), [])
 
     def test_reference_pbr_needs_confirmed_crop_and_browser_urls(self) -> None:
@@ -518,6 +1455,7 @@ class StateContractTests(unittest.TestCase):
             intended_use="static-render",
             quality_profile="reference-fidelity",
         )
+        fill_pre_spec(spec)
         spec["componentTree"][0]["surfaceDetail"]["notes"] = "intentionally smooth surface"
         spec["lightingFromPhoto"] = [
             "key light",
@@ -539,6 +1477,106 @@ class StateContractTests(unittest.TestCase):
 
 
 class GeneratorAndValidatorTests(unittest.TestCase):
+    @staticmethod
+    def detail_feature(target_id: str = "cockpit-frame-rivet") -> dict:
+        return {
+            "id": "cockpit-frame-fastener",
+            "name": "Cockpit frame fastener",
+            "hostComponentId": "root",
+            "scaleBand": "micro",
+            "featureClass": "fastener",
+            "geometryEffect": "surface",
+            "placement": {
+                "referenceFrame": "host-local",
+                "position": [0.2, 0.25, 0.51],
+                "rotation": [0, 0, 0],
+                "size": [0.03, 0.03, 0.015],
+                "units": "relative",
+            },
+            "realization": {"mode": "local-feature", "targetId": target_id},
+            "materialRefs": ["base"],
+            "evidenceRefs": ["full-object"],
+            "confidence": 0.9,
+            "acceptance": {
+                "evidenceRefs": ["full-object"],
+                "criteria": ["Fastener is visible on the cockpit frame at the declared local position."],
+            },
+        }
+
+    def test_complex_component_cannot_be_declared_atomic(self) -> None:
+        spec = make_spec("Complex Hull", None, complexity="simple")
+        fill_pre_spec(spec)
+        spec["componentTree"][0]["detailPlan"]["observedComplexity"] = "complex"
+        errors, _ = validate_spec(spec)
+        self.assertTrue(any("cannot be atomic" in item for item in errors), errors)
+
+    def test_detail_inventory_maps_to_executable_target_and_review_id(self) -> None:
+        spec = make_spec("Detailed Hull", None, complexity="simple")
+        fill_pre_spec(spec)
+        component = spec["componentTree"][0]
+        component["localFeatures"] = [
+            {
+                "id": "cockpit-frame-rivet",
+                "type": "rivet",
+                "position": [0.2, 0.25, 0.51],
+                "radius": 0.015,
+            }
+        ]
+        component["detailPlan"].update(
+            {
+                "observedComplexity": "compound",
+                "decompositionMode": "features",
+                "atomicityReason": "",
+                "features": [self.detail_feature()],
+                "coverageNotes": "The cockpit frame fastener and surrounding shell boundary were inventoried.",
+            }
+        )
+        errors, _ = validate_spec(spec)
+        self.assertFalse([item for item in errors if "detailPlan" in item], errors)
+        self.assertIn(
+            "cockpit-frame-fastener",
+            review_target_catalog(spec)["detail-feature"],
+        )
+
+    def test_detail_inventory_rejects_unknown_realization_target(self) -> None:
+        spec = make_spec("Detailed Hull", None, complexity="simple")
+        fill_pre_spec(spec)
+        component = spec["componentTree"][0]
+        component["detailPlan"].update(
+            {
+                "observedComplexity": "compound",
+                "decompositionMode": "features",
+                "features": [self.detail_feature("missing-rivet")],
+                "coverageNotes": "The cockpit frame fastener and surrounding shell boundary were inventoried.",
+            }
+        )
+        errors, _ = validate_spec(spec)
+        self.assertTrue(
+            any("references unknown local feature 'missing-rivet'" in item for item in errors),
+            errors,
+        )
+
+    def test_detail_inventory_rejects_id_from_ignored_geometry_metadata(self) -> None:
+        spec = make_spec("Detailed Hull", None, complexity="simple")
+        fill_pre_spec(spec)
+        component = spec["componentTree"][0]
+        component["geometryDescriptor"]["ignoredMetadata"] = {"id": "fake-ridge"}
+        feature = self.detail_feature()
+        feature["realization"] = {"mode": "geometry-feature", "targetId": "fake-ridge"}
+        component["detailPlan"].update(
+            {
+                "observedComplexity": "compound",
+                "decompositionMode": "features",
+                "features": [feature],
+                "coverageNotes": "The claimed ridge and surrounding shell boundary were inventoried.",
+            }
+        )
+        errors, _ = validate_spec(spec)
+        self.assertTrue(
+            any("unknown named host geometry feature 'fake-ridge'" in item for item in errors),
+            errors,
+        )
+
     def test_dimensions_and_transform_scale_are_multiplied(self) -> None:
         value = scale_vector(
             {"dimensions": {"width": 2, "height": 3, "depth": 4}},
@@ -557,7 +1595,10 @@ class GeneratorAndValidatorTests(unittest.TestCase):
         output = generate(spec, "blockout")
         self.assertIn("{ '$root': root }", output)
         self.assertIn("@generated by threejs-object-sculptor", output)
-        self.assertIn('materialMap["base"] = new THREE.MeshStandardMaterial', output)
+        self.assertIn(
+            'materialMap["__phase-neutral__"] = new THREE.MeshStandardMaterial',
+            output,
+        )
         self.assertIn("wireframe: options.wireframe ?? false });", output)
         self.assertNotIn("wireframe: options.wireframe ?? false }});", output)
         self.assertNotIn("Record<string, any>", output)
@@ -577,7 +1618,7 @@ class GeneratorAndValidatorTests(unittest.TestCase):
         self.assertIn("applyProfileSurface", output)
         self.assertIn("componentSurfaceMaterial", output)
         self.assertIn(".castShadow = true;", output)
-        self.assertIn("object-sculpt-3.1/evidence-v1", output)
+        self.assertIn("object-sculpt-3.2/evidence-v1", output)
         self.assertIn("configureQualityRigLookDevRenderer", output)
         self.assertIn("frameQualityRigForReview", output)
         self.assertIn("createQualityRigContactShadow", output)
@@ -609,7 +1650,7 @@ class GeneratorAndValidatorTests(unittest.TestCase):
                 "color": "#817666",
                 "roughnessDelta": 0.2,
                 "heightDelta": 0.01,
-                "evidenceRefs": ["front-material-closeup"],
+                "evidenceRefs": ["full-object"],
                 "mask": {
                     "pattern": "cavity",
                     "frequency": 24,
@@ -632,6 +1673,83 @@ class GeneratorAndValidatorTests(unittest.TestCase):
         self.assertIn("localMaterialLayerCount", output)
         errors, _ = validate_spec(spec)
         self.assertFalse(any("localOverrides" in error for error in errors), errors)
+
+    def test_hard_surface_materials_emit_environment_projection_and_corrosion(self) -> None:
+        spec = make_spec(
+            "Reflective Machine",
+            None,
+            complexity="simple",
+            intended_use="static-render",
+            quality_profile="reference-fidelity",
+        )
+        fill_pre_spec(spec)
+        material = spec["materials"][0]
+        material.update(
+            {
+                "materialProfile": "standard",
+                "metalness": {"base": 0.92, "variation": 0.04},
+                "roughness": {
+                    "base": 0.28,
+                    "variation": 0.16,
+                    "map": "independent-procedural-field",
+                },
+                "anisotropy": {"amount": 0.68},
+                "anisotropyRotation": {"angle": 0.4},
+                "textureProjection": {
+                    "mode": "cylindrical",
+                    "axis": "y",
+                    "repeat": [3.0, 2.0],
+                    "anisotropy": 8,
+                    "texelDensityIntent": "Stable around the observed housing.",
+                },
+                "localOverrides": [
+                    {
+                        "id": "observed-rust",
+                        "type": "rust",
+                        "amount": 0.55,
+                        "color": "#8C3F1F",
+                        "evidenceRefs": ["full-object"],
+                        "mask": {
+                            "pattern": "cavity",
+                            "frequency": 20,
+                            "cavityBias": 0.9,
+                        },
+                    }
+                ],
+            }
+        )
+
+        output = generate(spec, "lookdev")
+
+        self.assertIn("applySculptMaterialProjectionToGeometry", output)
+        self.assertIn("if (mode === 'uv') return;", output)
+        self.assertIn("mode !== 'planar'", output)
+        self.assertIn("mode === 'cylindrical'", output)
+        self.assertIn("type === 'rust'", output)
+        self.assertIn("spec.anisotropy !== undefined", output)
+        self.assertIn("new THREE.PMREMGenerator(renderer)", output)
+        self.assertIn("pmrem.fromEquirectangular(source)", output)
+        self.assertIn("pmrem.fromScene(studio", output)
+        self.assertIn("scene.environment = target.texture", output)
+        self.assertIn("configureReflectiveMachineLookDevEnvironment", output)
+        errors, _ = validate_spec(spec)
+        self.assertFalse(any("localOverrides" in error for error in errors), errors)
+        invalid = copy.deepcopy(spec)
+        invalid["materials"][0]["localOverrides"][0]["evidenceRefs"] = [
+            "missing-material-evidence"
+        ]
+        invalid_errors, _ = validate_spec(invalid)
+        self.assertTrue(
+            any("unknown evidence ids" in error for error in invalid_errors),
+            invalid_errors,
+        )
+        invalid_axis = copy.deepcopy(spec)
+        invalid_axis["materials"][0]["textureProjection"]["axis"] = "diagonal"
+        axis_errors, _ = validate_spec(invalid_axis)
+        self.assertTrue(
+            any("textureProjection.axis" in error for error in axis_errors),
+            axis_errors,
+        )
 
         invalid = copy.deepcopy(spec)
         invalid["materials"][0]["localOverrides"][0].pop("mask")
@@ -722,9 +1840,63 @@ class ComparisonTests(unittest.TestCase):
             comparison_main(["--help"])
         self.assertEqual(raised.exception.code, 0)
         help_text = output.getvalue()
-        self.assertIn("referenceProvenance={origin: observed|synthetic-", help_text)
+        self.assertIn("referenceProvenance={origin: observed|prepared-", help_text)
+        self.assertIn("reference|synthetic-hypothesis", help_text)
         self.assertIn("hypothesis", help_text)
-        self.assertIn("allowedUse: acceptance|planning-veto", help_text)
+        self.assertIn("allowedUse:", help_text)
+        self.assertIn("acceptance|planning-veto", help_text)
+        self.assertIn("--render-receipt", help_text)
+
+    def test_standalone_render_receipt_is_bound_into_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            render = root / "render.png"
+            comparison = root / "comparison.png"
+            manifest = root / "evidence.json"
+            receipt_path = root / "render-receipt.json"
+            pixels = [(80, 110, 140)] * 16
+            write_png_rgb(reference, 4, 4, pixels)
+            write_png_rgb(render, 4, 4, pixels)
+            receipt = {
+                "artifactType": "threejs-sculpt-render-receipt",
+                "version": 1,
+                "contractSha256": "test-contract",
+                "resolvedMode": "native-msaa",
+                "antialiasVerified": True,
+                "frameCount": 1,
+                "disposed": False,
+                "passChain": ["renderer"],
+            }
+            write_spec_atomic(receipt_path, receipt)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = comparison_main(
+                    [
+                        "--reference",
+                        str(reference),
+                        "--render",
+                        str(render),
+                        "--render-receipt",
+                        str(receipt_path),
+                        "--out",
+                        str(comparison),
+                        "--manifest-out",
+                        str(manifest),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            provenance = payload["renderProvenance"]
+            self.assertEqual(provenance["version"], 3)
+            self.assertEqual(provenance["renderReceipt"], receipt)
+            self.assertEqual(
+                provenance["renderReceiptSha256"],
+                file_sha256(receipt_path),
+            )
 
     def test_contain_preserves_wide_image_edges(self) -> None:
         pixels = [
@@ -755,6 +1927,12 @@ class ComparisonTests(unittest.TestCase):
                 [
                     {"viewId": "front", "referenceImage": reference, "renderScreenshot": render},
                     {"viewId": "side", "referenceImage": reference, "renderScreenshot": render},
+                    {"viewId": "back", "referenceImage": reference, "renderScreenshot": render},
+                    {
+                        "viewId": "three-quarter",
+                        "referenceImage": reference,
+                        "renderScreenshot": render,
+                    },
                 ],
                 out,
                 128,
@@ -762,10 +1940,28 @@ class ComparisonTests(unittest.TestCase):
                 6,
             )
             self.assertTrue(out.exists())
-            self.assertEqual(len(payload["evidenceSet"]), 2)
+            self.assertEqual(len(payload["evidenceSet"]), 4)
             self.assertTrue(all(item["comparisonImage"] == str(out.resolve()) for item in payload["evidenceSet"]))
             self.assertTrue(
                 all(item["fitDiagnostics"]["acceptanceAuthority"] is False for item in payload["evidenceSet"])
+            )
+            self.assertEqual(payload["layoutMode"], "grid-2x2")
+            presentation = payload["userPresentation"]
+            self.assertTrue(presentation["displayRequired"])
+            self.assertTrue(presentation["displayBeforeNextStep"])
+            self.assertEqual(presentation["renderOutputs"], [str(render.resolve())])
+            self.assertEqual(presentation["sideBySideComparison"], str(out.resolve()))
+            self.assertIn("Markdown images", presentation["markdownRule"])
+            self.assertEqual(
+                len({tuple(item["comparisonRegion"].values()) for item in payload["evidenceSet"]}),
+                4,
+            )
+            self.assertTrue(
+                all(
+                    item["referenceDimensions"] == {"width": 4, "height": 4}
+                    and item["renderDimensions"] == {"width": 4, "height": 4}
+                    for item in payload["evidenceSet"]
+                )
             )
             appearance = payload["evidenceSet"][0]["fitDiagnostics"]["appearance"]
             self.assertIn("highlightCoverageRatio", appearance)
@@ -773,7 +1969,7 @@ class ComparisonTests(unittest.TestCase):
             self.assertIn("edgeDensityRatio", appearance)
             self.assertIn("foregroundHistogramIntersection", appearance)
             width, height, _ = read_png(out)
-            self.assertEqual(width, 128 * 2 + 6 * 3)
+            self.assertEqual(width, (128 * 2 + 6 * 3) * 2)
             self.assertGreater(height, 128 * 2)
 
     def test_silhouette_diagnostics_expose_alignment_without_approving(self) -> None:
@@ -804,9 +2000,88 @@ class ComparisonTests(unittest.TestCase):
             evidence = payload["evidenceSet"][0]
             diagnostics = evidence["fitDiagnostics"]
             self.assertFalse(diagnostics["acceptanceAuthority"])
-            self.assertLess(diagnostics["silhouetteIou"], 1.0)
+            self.assertNotIn("silhouetteIou", diagnostics)
             self.assertLess(diagnostics["alignmentHints"]["translateX"], 0.0)
             self.assertTrue(Path(evidence["diagnosticOverlay"]).exists())
+
+
+class SurfaceDescriptorTests(unittest.TestCase):
+    def make_spec(self) -> dict:
+        spec = make_spec(
+            "Surface Contract",
+            None,
+            complexity="simple",
+            intended_use="static-render",
+            quality_profile="balanced",
+        )
+        fill_pre_spec(spec)
+        return spec
+
+    def test_unassessed_surface_descriptor_blocks_lookdev_not_blockout(self) -> None:
+        spec = self.make_spec()
+        spec["materials"][0]["surfaceDescriptor"] = {
+            "status": "unassessed",
+            "evidenceRefs": ["full-object"],
+        }
+        blockout_errors, blockout_warnings = validate_spec(spec, "blockout")
+        self.assertFalse(
+            any("surfaceDescriptor" in item for item in [*blockout_errors, *blockout_warnings]),
+            [*blockout_errors, *blockout_warnings],
+        )
+        lookdev_errors, lookdev_warnings = validate_spec(spec, "lookdev")
+        self.assertTrue(
+            any("surfaceDescriptor" in item for item in [*lookdev_errors, *lookdev_warnings]),
+            [*lookdev_errors, *lookdev_warnings],
+        )
+
+    def test_surface_descriptor_rejects_finish_and_relief_contradictions(self) -> None:
+        spec = self.make_spec()
+        material = spec["materials"][0]
+        material["roughness"]["base"] = 0.1
+        material["surfaceDescriptor"]["microRelief"] = {
+            "value": "smooth",
+            "channel": "none",
+            "basis": "observed",
+            "confidence": 0.8,
+        }
+        blockout_errors, _ = validate_spec(spec, "blockout")
+        self.assertFalse(
+            any("surfaceDescriptor" in item or "finish contradicts" in item for item in blockout_errors),
+            blockout_errors,
+        )
+        errors, _ = validate_spec(spec)
+        self.assertTrue(any("matte finish contradicts" in item for item in errors), errors)
+        self.assertTrue(any("smooth microRelief contradicts" in item for item in errors), errors)
+
+    def test_surface_descriptor_requires_traceable_evidence(self) -> None:
+        spec = self.make_spec()
+        spec["materials"][0]["surfaceDescriptor"]["evidenceRefs"] = ["missing-crop"]
+        errors, _ = validate_spec(spec)
+        self.assertTrue(
+            any("surfaceDescriptor references missing evidence" in item for item in errors),
+            errors,
+        )
+
+        spec["viewEvidence"] = []
+        errors, _ = validate_spec(spec)
+        self.assertTrue(
+            any("surfaceDescriptor references missing evidence" in item for item in errors),
+            errors,
+        )
+
+    def test_custom_surface_relief_requires_an_executable_description(self) -> None:
+        spec = self.make_spec()
+        spec["materials"][0]["surfaceDescriptor"]["microRelief"] = {
+            "value": "custom",
+            "channel": "normal",
+            "basis": "observed",
+            "confidence": 0.8,
+        }
+        errors, _ = validate_spec(spec)
+        self.assertTrue(
+            any("description is required when value is custom" in item for item in errors),
+            errors,
+        )
 
 
 class QualityGateRegressionTests(unittest.TestCase):
@@ -869,7 +2144,7 @@ class QualityGateRegressionTests(unittest.TestCase):
             entry["evidence"]
         )
         failures = review_failures(self.spec, entry, "lookdev")
-        self.assertTrue(any("detailEnergyRatio" in item for item in failures))
+        self.assertFalse(any("detailEnergyRatio" in item for item in failures))
 
         entry = visual_entry(self.spec, "lookdev", self.root, "reference")
         entry["evidence"]["views"][0]["fitDiagnostics"]["appearance"][
@@ -879,7 +2154,300 @@ class QualityGateRegressionTests(unittest.TestCase):
             entry["evidence"]
         )
         failures = review_failures(self.spec, entry, "lookdev")
-        self.assertTrue(any("highlightEnergyRatio" in item for item in failures))
+        self.assertFalse(any("highlightEnergyRatio" in item for item in failures))
+
+    def test_blind_scout_is_a_hash_bound_binary_gate(self) -> None:
+        entry = visual_entry(self.spec, "blockout", self.root)
+        self.assertEqual(
+            blind_scout_entry_failures(
+                self.spec,
+                entry,
+                "blockout",
+                require_approve=True,
+            ),
+            [],
+        )
+
+        missing = copy.deepcopy(entry)
+        missing.pop("blindScout")
+        self.assertTrue(
+            any(
+                "blindScout is required" in failure
+                for failure in blind_scout_entry_failures(
+                    self.spec,
+                    missing,
+                    "blockout",
+                    require_approve=True,
+                )
+            )
+        )
+
+        rejected = copy.deepcopy(entry)
+        rejected["blindScout"]["decision"] = "reject"
+        rejected["blindScout"]["observations"] = [
+            {
+                "visualRegion": "upper housing",
+                "category": "proportion",
+                "phaseScope": "current",
+                "direction": "too narrow",
+                "severity": "major",
+                "viewIds": ["primary"],
+            }
+        ]
+        self.assertEqual(
+            blind_scout_entry_failures(self.spec, rejected, "blockout"),
+            [],
+        )
+        self.assertTrue(
+            any(
+                "must be approve before phase promotion" in failure
+                for failure in blind_scout_entry_failures(
+                    self.spec,
+                    rejected,
+                    "blockout",
+                    require_approve=True,
+                )
+            )
+        )
+
+        deferred_material = copy.deepcopy(entry)
+        deferred_material["blindScout"]["observations"] = [
+            {
+                "visualRegion": "main body paint",
+                "category": "material",
+                "phaseScope": "deferred",
+                "direction": "surface appears too glossy",
+                "severity": "major",
+                "viewIds": ["primary"],
+            }
+        ]
+        self.assertEqual(
+            blind_scout_entry_failures(
+                self.spec,
+                deferred_material,
+                "blockout",
+                require_approve=True,
+            ),
+            [],
+        )
+
+        wrong_scope = copy.deepcopy(deferred_material)
+        wrong_scope["blindScout"]["observations"][0]["phaseScope"] = "current"
+        self.assertTrue(
+            any(
+                "phaseScope must be 'deferred'" in failure
+                for failure in blind_scout_entry_failures(
+                    self.spec,
+                    wrong_scope,
+                    "blockout",
+                )
+            )
+        )
+
+        deferred_reject = copy.deepcopy(deferred_material)
+        deferred_reject["blindScout"]["decision"] = "reject"
+        self.assertTrue(
+            any(
+                "requires at least one current/protected" in failure
+                for failure in blind_scout_entry_failures(
+                    self.spec,
+                    deferred_reject,
+                    "blockout",
+                )
+            )
+        )
+
+        lookdev_material = visual_entry(self.spec, "lookdev", self.root, "reference")
+        lookdev_material["blindScout"]["decision"] = "reject"
+        lookdev_material["blindScout"]["observations"] = [
+            {
+                "visualRegion": "main body paint",
+                "category": "material",
+                "phaseScope": "current",
+                "direction": "surface appears too glossy",
+                "severity": "major",
+                "viewIds": ["reference"],
+            }
+        ]
+        self.assertEqual(
+            blind_scout_entry_failures(
+                self.spec,
+                lookdev_material,
+                "lookdev",
+            ),
+            [],
+        )
+
+        lookdev_form_regression = visual_entry(
+            self.spec,
+            "lookdev",
+            self.root,
+            "reference",
+        )
+        lookdev_form_regression["blindScout"]["decision"] = "reject"
+        lookdev_form_regression["blindScout"]["observations"] = [
+            {
+                "visualRegion": "main body profile",
+                "category": "shape",
+                "phaseScope": "protected",
+                "direction": "accepted form has become distorted",
+                "severity": "major",
+                "viewIds": ["reference"],
+            }
+        ]
+        self.assertEqual(
+            blind_scout_entry_failures(
+                self.spec,
+                lookdev_form_regression,
+                "lookdev",
+            ),
+            [],
+        )
+
+        tampered = copy.deepcopy(entry)
+        tampered["blindScout"]["comparisonSha256"] = "0" * 64
+        self.assertTrue(
+            any(
+                "not bound to the comparison hash" in failure
+                for failure in blind_scout_entry_failures(
+                    self.spec,
+                    tampered,
+                    "blockout",
+                    require_approve=True,
+                )
+            )
+        )
+
+        contaminated = copy.deepcopy(entry)
+        contaminated["blindScout"]["spec"] = {"componentTree": []}
+        contaminated["blindScout"]["observations"] = [
+            {
+                "visualRegion": "main body",
+                "category": "proportion",
+                "direction": "increase width by 0.2",
+                "severity": "minor",
+                "viewIds": ["primary"],
+                "componentId": "body",
+            }
+        ]
+        contaminated_failures = blind_scout_entry_failures(
+            self.spec,
+            contaminated,
+            "blockout",
+        )
+        self.assertTrue(
+            any("contains forbidden fields" in failure for failure in contaminated_failures)
+        )
+        self.assertTrue(
+            any("must not contain a numeric fix" in failure for failure in contaminated_failures)
+        )
+
+        advisory_primary_issue = copy.deepcopy(entry)
+        advisory_primary_issue["reviewIssues"] = [
+            {
+                "id": "primary-direction",
+                "severity": "major",
+                "status": "open",
+            }
+        ]
+        self.assertFalse(
+            any(
+                "blocking primary-review issue" in failure
+                for failure in review_failures(
+                    self.spec,
+                    advisory_primary_issue,
+                    "blockout",
+                )
+            )
+        )
+
+    def test_blind_scout_rejects_reference_visible_construction_and_material_defects(
+        self,
+    ) -> None:
+        cases = [
+            (
+                "blockout",
+                "assembly",
+                "current",
+                "support and housing are visibly detached",
+            ),
+            (
+                "form",
+                "attachment",
+                "current",
+                "joint is off-center and penetrates its socket",
+            ),
+            (
+                "form",
+                "balance",
+                "current",
+                "left and right supports lose the reference balance",
+            ),
+            (
+                "form",
+                "signature-detail",
+                "current",
+                "reference-defining fastener is malformed and misplaced",
+            ),
+            (
+                "lookdev",
+                "material",
+                "current",
+                "layered metal response is reduced to a flat uniform surface",
+            ),
+            (
+                "lookdev",
+                "attachment",
+                "protected",
+                "accepted handle connection has shifted away from its mount",
+            ),
+            (
+                "lookdev",
+                "proportion",
+                "protected",
+                "main housing is visibly too wide relative to the reference",
+            ),
+        ]
+        for phase_id, category, phase_scope, direction in cases:
+            with self.subTest(phase_id=phase_id, category=category):
+                view_id = "reference" if phase_id == "lookdev" else "primary"
+                entry = visual_entry(self.spec, phase_id, self.root, view_id)
+                entry["blindScout"]["decision"] = "reject"
+                entry["blindScout"]["observations"] = [
+                    {
+                        "visualRegion": "visible object region",
+                        "category": category,
+                        "phaseScope": phase_scope,
+                        "direction": direction,
+                        "severity": "major",
+                        "viewIds": [view_id],
+                    }
+                ]
+                self.assertEqual(
+                    blind_scout_entry_failures(self.spec, entry, phase_id),
+                    [],
+                )
+
+        minor = visual_entry(self.spec, "form", self.root)
+        minor["blindScout"]["observations"] = [
+            {
+                "visualRegion": "small lower seam",
+                "category": "attachment",
+                "phaseScope": "current",
+                "direction": "contact edge could align more cleanly",
+                "severity": "minor",
+                "viewIds": ["primary"],
+            }
+        ]
+        self.assertEqual(
+            blind_scout_entry_failures(
+                self.spec,
+                minor,
+                "form",
+                require_approve=True,
+            ),
+            [],
+        )
 
     def test_synthetic_side_material_is_not_treated_as_observed_truth(self) -> None:
         entry = visual_entry(self.spec, "lookdev", self.root, "reference")
@@ -956,7 +2524,29 @@ class EndToEndReviewTests(unittest.TestCase):
             spec_path.write_text(json.dumps(spec), encoding="utf-8")
 
             def record(pass_id: str, view_id: str, layers: dict, features: list[str]) -> None:
+                current_spec = load_spec(spec_path)
+                config = effective_pass_config(current_spec, pass_id)
+                for layer in [
+                    *config.get("requiredLayerScores", {}),
+                    *config.get("preserveLayers", []),
+                ]:
+                    layers.setdefault(layer, 0.84)
                 evidence = json.dumps(comparison_manifest(root, pass_id, view_id))
+                evidence_manifest = json.loads(evidence)
+                blind_scout = {
+                    "artifactType": "threejs-sculpt-blind-scout",
+                    "version": 2,
+                    "phaseId": pass_id,
+                    "decision": "approve",
+                    "comparisonSha256": evidence_manifest["comparisonSha256"],
+                    "reviewedAt": "2026-07-15T00:00:00+00:00",
+                    "reviewer": {
+                        "role": "blind-visual-scout",
+                        "contextId": f"e2e-scout-{pass_id}-{view_id}",
+                        "model": "test-blind-scout",
+                    },
+                    "observations": [],
+                }
                 argv = [
                     str(spec_path),
                     "--pass-id", pass_id,
@@ -970,17 +2560,25 @@ class EndToEndReviewTests(unittest.TestCase):
                     "--feature-reviews-json", json.dumps(
                         [{"id": feature, "score": 0.86, "visible": True} for feature in features]
                     ),
+                    "--blind-scout-json", json.dumps(blind_scout),
                     "--in-place",
                 ]
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(append_review(argv), 0)
+                approved = load_spec(spec_path)
+                self.assertEqual(
+                    pipeline_status(approved)["state"],
+                    "awaiting-user-approval",
+                )
+                approve_current_phase(approved, pass_id)
+                write_spec_atomic(spec_path, approved)
 
             record("blockout", "primary", {"silhouette": 0.8}, ["overall-silhouette"])
             self.assertEqual(pipeline_status(load_spec(spec_path))["currentPass"], "form")
             record(
                 "form",
                 "primary",
-                {"silhouette": 0.82, "structure": 0.8},
+                {"silhouette": 0.82, "structure": 0.8, "formDetail": 0.78},
                 ["overall-silhouette", "primary-structure"],
             )
 
@@ -998,7 +2596,13 @@ class EndToEndReviewTests(unittest.TestCase):
             record(
                 "lookdev",
                 "reference",
-                {"material": 0.8, "lighting": 0.75},
+                {
+                    "silhouette": 0.82,
+                    "structure": 0.8,
+                    "formDetail": 0.78,
+                    "material": 0.8,
+                    "lighting": 0.75,
+                },
                 ["reference-lookdev"],
             )
             status = pipeline_status(load_spec(spec_path))

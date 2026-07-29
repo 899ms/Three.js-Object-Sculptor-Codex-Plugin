@@ -10,13 +10,20 @@ from pathlib import Path
 from typing import Any
 
 from sculpt_contract import (
+    MATERIAL_OWNER_ROLE_TOKENS,
     REFINEMENT_ACTIONS,
     STRATEGY_RESET_ACTION,
     component_type,
     file_sha256,
-    pipeline_status,
+    is_pending_quality_attempt,
+    phase_spec_projection,
+    phase_work_packet,
     refinement_budget,
+    resolve_correction_parameter,
+    review_target_catalog,
+    simplified_visual_gate_enabled,
     sculpt_representation_signature,
+    user_progress_contract,
     visual_evidence_authority_failures,
     visual_evidence_integrity_failures,
     write_spec_atomic,
@@ -32,6 +39,7 @@ from sculpt_module_contract import MANIFEST_SCHEMA_VERSION, SEGMENTED_FIELDS, ma
 
 GLOBAL_DERIVED_FIELDS = {
     "reviewHistory",
+    "userPhaseApprovals",
     "visualEvidence",
     "sculptPipeline",
     "pbrExtractionHistory",
@@ -79,18 +87,6 @@ def module_representation_signature(
         }
     )
 IDENTITY_ROLE_TOKENS = ("identity", "face", "hand", "character", "grip")
-MATERIAL_ROLE_TOKENS = (
-    "material",
-    "surface",
-    "lookdev",
-    "fabric",
-    "fiber",
-    "fur",
-    "hair",
-    "cloth",
-    "costume",
-    "knit",
-)
 IMPLEMENTATION_SOURCE_SUFFIXES = {
     ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".html", ".css", ".glsl", ".wgsl", ".vert", ".frag"
 }
@@ -210,6 +206,59 @@ def _load_cache(manifest_path: Path) -> dict[str, Any]:
     return payload
 
 
+def recorded_reviewer_context_ids(
+    manifest_path: Path,
+    manifest: dict[str, Any] | None = None,
+) -> set[str]:
+    """Return reviewer contexts used anywhere in the modular workflow.
+
+    Module attempts live in the sidecar cache while assembled-pass attempts live
+    in globalSpec.reviewHistory. Reading both prevents a reviewer context from
+    being recycled merely by crossing that storage boundary.
+    """
+
+    path = manifest_path.expanduser().resolve()
+    raw = manifest if isinstance(manifest, dict) else read_object(path, "manifest JSON")
+    spec = (
+        raw.get("globalSpec")
+        if raw.get("schemaVersion") == MANIFEST_SCHEMA_VERSION
+        and isinstance(raw.get("globalSpec"), dict)
+        else raw
+    )
+    context_ids: set[str] = set()
+    history = spec.get("reviewHistory", []) if isinstance(spec, dict) else []
+    if isinstance(history, list):
+        for record in history:
+            if not isinstance(record, dict):
+                continue
+            evidence = record.get("reviewerEvidence")
+            context_id = (
+                evidence.get("reviewerContextId")
+                if isinstance(evidence, dict)
+                else None
+            )
+            if isinstance(context_id, str) and context_id.strip():
+                context_ids.add(context_id.strip())
+
+    attempts_by_module = _load_cache(path).get("reviewAttempts", {})
+    if isinstance(attempts_by_module, dict):
+        for attempts in attempts_by_module.values():
+            if not isinstance(attempts, list):
+                continue
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
+                reviewer = attempt.get("reviewer")
+                context_id = (
+                    reviewer.get("contextId")
+                    if isinstance(reviewer, dict)
+                    else attempt.get("reviewerContextId")
+                )
+                if isinstance(context_id, str) and context_id.strip():
+                    context_ids.add(context_id.strip())
+    return context_ids
+
+
 def interface_hash(module: dict[str, Any]) -> str:
     payload = {
         "contract": module.get("contract", {}),
@@ -244,11 +293,14 @@ def module_hash(
         for dependency in entries[module_id].get("dependsOn", [])
         if dependency in loaded
     }
+    module_phase = module_preview_pass(loaded[module_id][1])
     global_contract = (
         {
-            key: value
-            for key, value in global_spec.items()
-            if key not in GLOBAL_DERIVED_FIELDS and key not in SEGMENTED_FIELDS
+            "phaseProjection": phase_spec_projection(global_spec, module_phase),
+            "qualityProfile": global_spec.get("qualityProfile"),
+            "qualityTargets": global_spec.get("qualityTargets", {}),
+            "reviewGovernance": global_spec.get("reviewGovernance", {}),
+            "phaseExecutionContract": global_spec.get("phaseExecutionContract", {}),
         }
         if isinstance(global_spec, dict)
         else {}
@@ -273,6 +325,8 @@ def _cached_acceptance_valid(record: Any, current_hash: str) -> bool:
         return False
     gate_type = record.get("gateType")
     if gate_type == "visual":
+        if record.get("evidenceScopeVersion") != 1:
+            return False
         verdict_path = record.get("reviewVerdict")
         implementation_files = record.get("implementationFiles")
         if not isinstance(verdict_path, str) or not verdict_path:
@@ -351,19 +405,31 @@ def _blockout_fidelity_failures(module: dict[str, Any]) -> list[str]:
 
 
 def visual_gate_floor(manifest: dict[str, Any], entry: dict[str, Any]) -> float:
+    global_spec = manifest.get("globalSpec")
+    if isinstance(global_spec, dict) and simplified_visual_gate_enabled(global_spec):
+        return 0.70
     tier = str(entry.get("riskTier") or "low")
     floor = VISUAL_SCORE_FLOORS.get(tier, VISUAL_SCORE_FLOORS["low"])
-    global_spec = manifest.get("globalSpec")
     profile = global_spec.get("qualityProfile") if isinstance(global_spec, dict) else None
     return max(floor, 0.85 if profile == "reference-fidelity" else 0.0)
 
 
 def diagnostic_floor_contract(manifest: dict[str, Any]) -> dict[str, float]:
     global_spec = manifest.get("globalSpec")
+    if isinstance(global_spec, dict) and simplified_visual_gate_enabled(global_spec):
+        return {
+            "maximumCentroidDelta": 1.0,
+            "maximumAspectRatioDelta": 1.0,
+            "minimumDetailEnergyRatio": 0.0,
+            "minimumEdgeDensityRatio": 0.0,
+            "minimumHistogramIntersection": 0.0,
+            "maximumMeanColorDelta": 1.0,
+            "minimumHighlightCoverageRatio": 0.0,
+            "minimumHighlightEnergyRatio": 0.0,
+        }
     profile = global_spec.get("qualityProfile") if isinstance(global_spec, dict) else None
     if profile == "reference-fidelity":
         return {
-            "minimumSilhouetteIou": 0.63,
             "maximumCentroidDelta": 0.08,
             "maximumAspectRatioDelta": 0.15,
             "minimumDetailEnergyRatio": 0.35,
@@ -374,7 +440,6 @@ def diagnostic_floor_contract(manifest: dict[str, Any]) -> dict[str, float]:
             "minimumHighlightEnergyRatio": 0.12,
         }
     return {
-        "minimumSilhouetteIou": 0.50,
         "maximumCentroidDelta": 0.12,
         "maximumAspectRatioDelta": 0.22,
         "minimumDetailEnergyRatio": 0.25,
@@ -383,6 +448,41 @@ def diagnostic_floor_contract(manifest: dict[str, Any]) -> dict[str, float]:
         "maximumMeanColorDelta": 0.55,
         "minimumHighlightCoverageRatio": 0.08,
         "minimumHighlightEnergyRatio": 0.08,
+    }
+
+
+def module_preview_pass(module: dict[str, Any]) -> str:
+    """Return the private pass used to prove that a module is ready to assemble."""
+
+    gate = module.get("qualityGate") if isinstance(module.get("qualityGate"), dict) else {}
+    configured = gate.get("previewPass")
+    if configured in {"form", "lookdev"}:
+        return str(configured)
+    role = str(module.get("role") or "").lower()
+    return "lookdev" if any(token in role for token in MATERIAL_OWNER_ROLE_TOKENS) else "form"
+
+
+def module_required_layer_scores(module: dict[str, Any]) -> dict[str, float]:
+    """Project a possibly legacy gate onto the module's declared preview phase."""
+
+    gate = module.get("qualityGate") if isinstance(module.get("qualityGate"), dict) else {}
+    scores = gate.get("requiredLayerScores")
+    if not isinstance(scores, dict):
+        return {}
+    preview_pass = module_preview_pass(module)
+    if preview_pass == "lookdev":
+        return {
+            str(layer): float(value)
+            for layer, value in scores.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+    excluded_tokens = ("material", "surface", "lighting", "light", "shadow")
+    return {
+        str(layer): float(value)
+        for layer, value in scores.items()
+        if isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and not any(token in str(layer).lower() for token in excluded_tokens)
     }
 
 
@@ -398,10 +498,11 @@ def _visual_gate_contract_failures(
             f"visual minimumScore {float(minimum):.3f} is below non-lowerable {entry.get('riskTier')} "
             f"floor {floor:.3f}"
         )
-    scores = gate.get("requiredLayerScores") if isinstance(gate.get("requiredLayerScores"), dict) else {}
+    scores = module_required_layer_scores(module)
     role = str(module.get("role") or "").lower()
     payload = module.get("payload") if isinstance(module.get("payload"), dict) else {}
     global_spec = manifest.get("globalSpec") if isinstance(manifest.get("globalSpec"), dict) else {}
+    simplified = simplified_visual_gate_enabled(global_spec)
     quality_contract = (
         global_spec.get("qualityContract")
         if isinstance(global_spec.get("qualityContract"), dict)
@@ -421,10 +522,15 @@ def _visual_gate_contract_failures(
         ],
         ensure_ascii=False,
     ).lower()
+    if simplified:
+        # v4 delegates component-level qualitative checking to the blind
+        # scout; module metadata remains useful for diagnostics but does not
+        # recreate the old layer ladder.
+        return failures
     groups = dict(BASE_VISUAL_LAYER_GROUPS)
     if any(token in role or token in semantic_text for token in IDENTITY_ROLE_TOKENS):
         groups["identity"] = ("identity",)
-    if payload.get("materials") or any(token in role for token in MATERIAL_ROLE_TOKENS):
+    if any(token in role for token in MATERIAL_OWNER_ROLE_TOKENS):
         groups["material"] = ("materialSurface", "material")
     for group, aliases in groups.items():
         present = [alias for alias in aliases if alias in scores]
@@ -605,6 +711,23 @@ def _pending_correction_attempt(attempts: Any) -> dict[str, Any] | None:
     return None
 
 
+def _pending_quality_retry(attempts: Any) -> dict[str, Any] | None:
+    if not isinstance(attempts, list):
+        return None
+    for attempt in reversed(attempts):
+        if not isinstance(attempt, dict):
+            continue
+        if attempt.get("accepted") is True or attempt.get("action") in {
+            "request-input",
+            "stop",
+            STRATEGY_RESET_ACTION,
+        }:
+            return None
+        if is_pending_quality_attempt(attempt):
+            return attempt
+    return None
+
+
 def _pending_strategy_reset(attempts: Any) -> dict[str, Any] | None:
     if not isinstance(attempts, list):
         return None
@@ -614,7 +737,7 @@ def _pending_strategy_reset(attempts: Any) -> dict[str, Any] | None:
         action = attempt.get("action")
         if attempt.get("accepted") is True or action in {"request-input", "stop"}:
             return None
-        if action in REFINEMENT_ACTIONS:
+        if is_pending_quality_attempt(attempt):
             return None
         if action == STRATEGY_RESET_ACTION:
             return attempt
@@ -669,8 +792,39 @@ def _correction_batch_progress(
         scope for scope in batch.get("scopes", []) if scope in {"spec", "code"}
     }
     changed: set[str] = set()
+    correction_progress: list[dict[str, Any]] = []
     if "spec" in scopes and attempt.get("moduleHash") != current_module_hash:
-        changed.add("spec")
+        if batch.get("version") == 2:
+            payload = module.get("payload") if isinstance(module.get("payload"), dict) else {}
+            catalog = review_target_catalog(payload)
+            spec_corrections = [
+                correction
+                for correction in batch.get("corrections", [])
+                if isinstance(correction, dict) and correction.get("scope") == "spec"
+            ]
+            for correction in spec_corrections:
+                resolved, current_value = resolve_correction_parameter(
+                    catalog,
+                    correction.get("targetType"),
+                    correction.get("target"),
+                    correction.get("parameterPath"),
+                )
+                applied = resolved and current_value == correction.get("expectedValue")
+                correction_progress.append(
+                    {
+                        "issueId": correction.get("issueId"),
+                        "targetType": correction.get("targetType"),
+                        "target": correction.get("target"),
+                        "parameterPath": correction.get("parameterPath"),
+                        "expectedValue": correction.get("expectedValue"),
+                        "currentValue": current_value if resolved else None,
+                        "applied": applied,
+                    }
+                )
+            if spec_corrections and all(item["applied"] for item in correction_progress):
+                changed.add("spec")
+        else:
+            changed.add("spec")
     if "code" in scopes:
         try:
             current_semantics = implementation_semantic_hashes(
@@ -690,6 +844,7 @@ def _correction_batch_progress(
         "changedScopes": sorted(changed),
         "remainingScopes": remaining,
         "readyToRender": bool(scopes) and not remaining,
+        "corrections": correction_progress,
     }
 
 
@@ -722,7 +877,19 @@ def module_status(
             if isinstance(review_attempts, dict)
             else []
         )
+        latest_attempt = next(
+            (item for item in reversed(attempts) if isinstance(item, dict)),
+            None,
+        ) if isinstance(attempts, list) else None
+        quality_direction_stop = (
+            isinstance(latest_attempt, dict)
+            and latest_attempt.get("action") == "stop"
+            and str(latest_attempt.get("candidateDisposition") or "").startswith(
+                "rejected-"
+            )
+        )
         pending_attempt = _pending_correction_attempt(attempts)
+        pending_quality_retry = _pending_quality_retry(attempts)
         pending_strategy = _pending_strategy_reset(attempts)
         pending_input = _pending_input_request(attempts)
         pending_batch = (
@@ -763,10 +930,12 @@ def module_status(
                 "cacheHit": valid,
                 "gateContractFailures": gate_contract_failures,
                 "pendingCorrectionBatch": pending_batch,
+                "pendingQualityRetry": bool(pending_quality_retry),
                 "correctionBatchProgress": batch_progress,
                 "refinementBudget": batch_budget,
                 "pendingStrategyReset": strategy_progress,
                 "pendingInputRequest": pending_input or {},
+                "qualityDirectionStop": quality_direction_stop,
             }
         )
     ready = [
@@ -821,6 +990,12 @@ def module_status(
     pending_input = (
         current.get("pendingInputRequest", {}) if isinstance(current, dict) else {}
     )
+    pending_quality_retry = (
+        current.get("pendingQualityRetry", False) if isinstance(current, dict) else False
+    )
+    quality_direction_stop = (
+        current.get("qualityDirectionStop", False) if isinstance(current, dict) else False
+    )
     workflow_state = (
         "awaiting-input"
         if pending_input
@@ -828,14 +1003,22 @@ def module_status(
         if pending_strategy and pending_strategy.get("materialChangeReady") is True
         else "needs-strategy-change"
         if pending_strategy
+        else "needs-strategy-change"
+        if batch_budget.get("exhausted") is True
+        else "needs-strategy-change"
+        if quality_direction_stop
         else "ready-to-render"
         if pending_batch and batch_progress.get("readyToRender") is True
         else "needs-refinement"
         if pending_batch
+        else "needs-refinement"
+        if pending_quality_retry
         else "assembly-ready"
         if accepted_all and not assembly_errors
         else "ready"
     )
+    accepted_module_ids = [row["id"] for row in rows if row["state"] == "accepted"]
+    remaining_module_ids = [row["id"] for row in rows if row["state"] != "accepted"]
     return {
         "schemaVersion": MANIFEST_SCHEMA_VERSION,
         "targetName": raw.get("targetName"),
@@ -847,11 +1030,20 @@ def module_status(
         "refinementBudget": batch_budget,
         "pendingStrategyReset": pending_strategy,
         "pendingInputRequest": pending_input,
+        "pendingQualityRetry": pending_quality_retry,
+        "qualityDirectionStop": quality_direction_stop,
         "assemblyReady": _validate_assembly and accepted_all and not assembly_errors,
         "coverage": coverage,
         "assemblyValidationErrors": assembly_errors,
-        "acceptedModules": [row["id"] for row in rows if row["state"] == "accepted"],
+        "acceptedModules": accepted_module_ids,
         "modules": rows,
+        "userProgress": user_progress_contract(
+            "module-quality-gates",
+            len(accepted_module_ids),
+            len(rows),
+            current["id"] if current else ("assembly" if accepted_all else "module-planning"),
+            remaining_module_ids,
+        ),
         "errors": all_errors,
         "cachePath": str(cache_path(path)),
     }
@@ -998,16 +1190,43 @@ def module_context(
         "surfaceTopologyGroups": module_topology_groups,
         "qualityGate": {
             "type": gate.get("type"),
+            "previewPass": module_preview_pass(module) if gate_type == "visual" else "form",
             "minimumScore": gate.get("minimumScore"),
             "requiredViews": gate.get("requiredViews", []),
             "diagnosticViews": gate.get("diagnosticViews", []),
-            "requiredLayerScores": gate.get("requiredLayerScores", {}),
+            "requiredLayerScores": module_required_layer_scores(module),
+            "evaluationScope": (
+                {
+                    "kind": "module-local",
+                    "moduleId": selected,
+                    "componentIds": [
+                        item["id"]
+                        for item in module_payload.get("componentTree", [])
+                        if isinstance(item, dict) and isinstance(item.get("id"), str)
+                    ],
+                    "referenceRule": (
+                        "Each pair must carry this exact module/component scope plus "
+                        "referenceIsolation provenance for a module-only crop/mask. "
+                        "Never compare the full-object sourceImage with an isolated module render."
+                    ),
+                    "scopeMismatchDisposition": (
+                        "evidence-scope-mismatch; no score, reviewer, retry, or rollback"
+                    ),
+                }
+                if gate_type == "visual"
+                else {}
+            ),
         },
+        "phaseWorkPacket": phase_work_packet(
+            resolve_manifest(path, manifest, [selected]),
+            module_preview_pass(module) if gate_type == "visual" else "form",
+        ),
         "pendingCorrectionBatch": status.get("pendingCorrectionBatch", {}),
         "correctionBatchProgress": status.get("correctionBatchProgress", {}),
         "refinementBudget": status.get("refinementBudget", {}),
         "pendingStrategyReset": status.get("pendingStrategyReset", {}),
         "pendingInputRequest": status.get("pendingInputRequest", {}),
+        "userProgress": status.get("userProgress", {}),
         "implementationWarning": implementation_warning,
         "next": (
             {
@@ -1053,6 +1272,7 @@ def check_module(
     blocking_warnings: list[str] = []
     resolved_spec: dict[str, Any] | None = None
     validation_proof: object | None = None
+    selected_generation_pass: str | None = None
     status = module_status(path, manifest)
     if module_id not in entry_by_id(manifest):
         errors.append(f"unknown module {module_id!r}")
@@ -1067,16 +1287,15 @@ def check_module(
     if not errors:
         try:
             spec = resolve_manifest(path, manifest, [module_id])
-            selected_generation_pass: str | None = None
             if prepare_generation:
-                selected_generation_pass = generation_pass
-                if selected_generation_pass is None:
-                    pass_status = pipeline_status(spec)
-                    selected_generation_pass = (
-                        str(pass_status["lastCompletedPass"] or pass_status["passOrder"][-1])
-                        if pass_status["currentPass"] == "complete"
-                        else str(pass_status["currentPass"])
+                module = load_modules(path, manifest, [module_id])[module_id][1]
+                expected_preview_pass = module_preview_pass(module)
+                if generation_pass is not None and generation_pass != expected_preview_pass:
+                    raise ValueError(
+                        f"module preview pass is fixed by its quality gate: "
+                        f"expected {expected_preview_pass!r}, received {generation_pass!r}"
                     )
+                selected_generation_pass = expected_preview_pass
             if selected_generation_pass is not None:
                 from generate_threejs_factory import _validate_generation_spec
 
@@ -1161,11 +1380,22 @@ def check_module(
             else:
                 errors.extend(_structural_gate_contract_failures(module))
             for warning in warnings:
-                if "preSpecAssessment" in warning or "surfaceTopologyPlan" in warning:
+                if any(
+                    token in warning
+                    for token in (
+                        "preSpecAssessment",
+                        "surfaceTopologyPlan",
+                        "detailDecompositionContract",
+                        "detailPlan",
+                    )
+                ):
                     blocking_warnings.append(warning)
                 elif any(repr(item_id) in warning or item_id in warning for item_id in owned_ids):
                     blocking_warnings.append(warning)
-                elif any(token in role for token in ("material", "surface", "lookdev", "lighting")) and "lookdev" in warning:
+                elif any(
+                    token in role
+                    for token in (*MATERIAL_OWNER_ROLE_TOKENS, "lighting")
+                ) and "lookdev" in warning:
                     blocking_warnings.append(warning)
         except (OSError, ValueError) as exc:
             errors.append(str(exc))
@@ -1184,6 +1414,7 @@ def check_module(
         "blockingWarnings": list(dict.fromkeys(blocking_warnings)),
         "moduleHash": row.get("moduleHash"),
         "cacheHit": row.get("cacheHit", False),
+        "previewPass": selected_generation_pass,
     }
     if result["ok"] and resolved_spec is not None and validation_proof is not None:
         result["_resolvedSpec"] = resolved_spec

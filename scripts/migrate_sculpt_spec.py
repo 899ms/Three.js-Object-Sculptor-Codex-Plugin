@@ -17,10 +17,50 @@ from sculpt_contract import (
     write_spec_atomic,
 )
 from sculpt_modules import is_module_manifest, read_raw_spec
+from new_sculpt_spec import (
+    make_detail_decomposition_contract,
+    make_detail_plan,
+    make_phase_execution_contract,
+)
+from sculpt_perception import ensure_perceptual_fields
 
 
 TARGET_SCHEMA = CURRENT_SCHEMA_VERSION
-SUPPORTED_SOURCE_VERSIONS = {(2, 0, 0), (3, 0, 0), (3, 1, 0)}
+SUPPORTED_SOURCE_VERSIONS = {(2, 0, 0), (3, 0, 0), (3, 1, 0), (3, 2, 0)}
+
+
+def add_detail_decomposition_scaffolding(spec: dict[str, Any]) -> int:
+    updated = 0
+    if not isinstance(spec.get("detailDecompositionContract"), dict):
+        spec["detailDecompositionContract"] = make_detail_decomposition_contract()
+        updated += 1
+    components = spec.get("componentTree")
+    if isinstance(components, list):
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            if (
+                component.get("componentType") != "assembly"
+                and not isinstance(component.get("detailPlan"), dict)
+            ):
+                component["detailPlan"] = make_detail_plan()
+                updated += 1
+    return updated
+
+
+def add_progressive_execution_contract(spec: dict[str, Any]) -> int:
+    existing = spec.get("phaseExecutionContract")
+    if isinstance(existing, dict) and existing.get("version") == 4:
+        current = make_phase_execution_contract()
+        updates = 0
+        for field in ("visualScout", "stableCoreFields", "phaseOwnedFields"):
+            if existing.get(field) != current.get(field):
+                existing[field] = copy.deepcopy(current[field])
+                updates += 1
+        return updates
+    spec["phaseExecutionContract"] = make_phase_execution_contract()
+    spec.setdefault("userPhaseApprovals", [])
+    return 1
 
 
 def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -33,15 +73,91 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
     if source_version not in SUPPORTED_SOURCE_VERSIONS:
         raise ValueError(f"unsupported source schemaVersion {source!r}")
     if source == target:
-        return copy.deepcopy(spec), {
-            "changed": False,
+        migrated = copy.deepcopy(spec)
+        detail_updates = add_detail_decomposition_scaffolding(migrated)
+        execution_updates = add_progressive_execution_contract(migrated)
+        perceptual_updates = ensure_perceptual_fields(migrated)
+        if detail_updates or execution_updates or perceptual_updates:
+            revision = migrated.get("specRevision", 0)
+            migrated["specRevision"] = revision + 1 if isinstance(revision, int) else 1
+            sync_pipeline(migrated)
+        return migrated, {
+            "changed": detail_updates > 0 or execution_updates > 0 or perceptual_updates > 0,
             "fromVersion": source,
             "toVersion": target,
             "componentsUpdated": 0,
+            "detailDecompositionUpdates": detail_updates,
+            "phaseExecutionContractUpdates": execution_updates,
+            "perceptualContractUpdates": perceptual_updates,
             "reviewHistoryPreserved": True,
         }
 
     migrated = copy.deepcopy(spec)
+    legacy_intent = migrated.pop("intendedUse", None)
+    if isinstance(legacy_intent, str) and legacy_intent:
+        migrated["legacyIntent"] = {
+            "value": legacy_intent,
+            "deprecated": True,
+            "rule": "Migration hint only; it does not select quality or performance passes.",
+        }
+    interaction_required = legacy_intent in {"animated", "playable", "destructible"}
+    migrated["interactionContract"] = {
+        "version": 1,
+        "status": "required" if interaction_required else "unassessed",
+        "assessmentReason": (
+            "Legacy intent required interaction; declare exact motion affordances before form."
+            if interaction_required
+            else ""
+        ),
+        "policy": "auto-infer",
+        "activationThreshold": 0.8,
+        "motionAffordances": [],
+        "rules": [
+            "Infer motion from observed joints or a strong object-class prior even when the user is silent.",
+            "Auto-activate only high-confidence motion; keep lower-confidence motion as a bounded assumption.",
+            "Never infer physics, destruction, or speculative hidden mechanisms.",
+            "Every active motion must target an exact component id and numeric pivot, axis, and limits or rate.",
+        ],
+        "legacyIntentHint": legacy_intent or "",
+    }
+    readiness = migrated.get("actionReadiness")
+    if isinstance(readiness, dict):
+        readiness["enabled"] = interaction_required
+    migrated["performanceAudit"] = {
+        "enabled": False,
+        "blocking": False,
+        "activation": "explicit-user-budget-only",
+        "maximumVisualRegression": 0.0,
+        "policy": (
+            "Run only after lookdev acceptance and restore the visual champion on any regression."
+        ),
+    }
+    loop = migrated.get("selfCorrectLoop")
+    if isinstance(loop, dict):
+        loop["visualSanity"] = {
+            "enabled": True,
+            "obviousErrorVeto": True,
+            "requiredVerdictField": "sanityChecks",
+            "categories": [
+                "assemblyCorrectness",
+                "proportionBalance",
+                "shapeSilhouette",
+                "materialPlausibility",
+                "surfaceQuality",
+                "signatureDetail",
+            ],
+            "rule": (
+                "Critical or major placement, balance, shape, material, surface, or detail defects veto acceptance."
+            ),
+        }
+    for target_entry in migrated.get("featureReviewTargets", []):
+        if not isinstance(target_entry, dict) or not isinstance(target_entry.get("passIds"), list):
+            continue
+        target_entry["passIds"] = [
+            item
+            for item in target_entry["passIds"]
+            if item not in {"structure", "structural-pass", "optimization", "optimization-pass"}
+        ]
     updated = 0
     components = migrated.get("componentTree")
     if isinstance(components, list):
@@ -58,6 +174,9 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
                     component["geometryDescriptor"] = descriptor
                 if isinstance(descriptor, dict):
                     descriptor.setdefault("parameters", {})
+    detail_updates = add_detail_decomposition_scaffolding(migrated)
+    execution_updates = add_progressive_execution_contract(migrated)
+    perceptual_updates = ensure_perceptual_fields(migrated)
 
     migrated["schemaVersion"] = target
     revision = migrated.get("specRevision", 0)
@@ -68,7 +187,12 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
         "fromVersion": source,
         "toVersion": target,
         "componentsUpdated": updated,
+        "detailDecompositionUpdates": detail_updates,
+        "phaseExecutionContractUpdates": execution_updates,
+        "perceptualContractUpdates": perceptual_updates,
         "reviewHistoryPreserved": True,
+        "retiredPasses": ["structure", "optimization"],
+        "interactionRequiresFreshAssessment": not interaction_required,
         "reviewPolicy": (
             "Review history is retained for audit. Relevant reviews remain stale until the migrated "
             "geometry is validated again; hashes are never rewritten to manufacture a pass."
@@ -90,8 +214,8 @@ def main(argv: list[str]) -> int:
     raw_spec = read_raw_spec(source)
     if is_module_manifest(raw_spec):
         raise ValueError(
-            "schema 4.0 is already the compositional manifest; use `sculpt module resolve` "
-            "to export a schema 3.1 compatibility spec"
+            "the compositional manifest is migrated through its global spec; use `sculpt module resolve` "
+            f"to export a schema {CURRENT_SCHEMA_VERSION} compatibility spec"
         )
     migrated, report = migrate_spec(raw_spec, args.to)
     output = source if args.in_place else (args.out.expanduser().resolve() if args.out else None)

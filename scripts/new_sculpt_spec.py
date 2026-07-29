@@ -12,12 +12,14 @@ from typing import Any
 
 from sculpt_contract import (
     CURRENT_SCHEMA_VERSION,
+    blind_scout_execution_contract,
     build_pass_plan,
     complexity_minimums,
     parse_json,
     sync_pipeline,
     write_spec_atomic,
 )
+from sculpt_perception import make_perceptual_fields
 from sculpt_view_hypotheses import make_view_hypothesis_policy
 
 
@@ -29,7 +31,7 @@ def slugify(value: str) -> str:
 def make_pre_spec_assessment(
     target_name: str,
     complexity: str = "moderate",
-    intended_use: str = "browser-prop",
+    intended_use: str | None = None,
 ) -> dict[str, Any]:
     minimums = complexity_minimums(complexity)
     return {
@@ -43,6 +45,13 @@ def make_pre_spec_assessment(
         },
         "complexity": {
             "tier": complexity,
+            "scoreScale": {
+                "type": "integer-ordinal",
+                "minimum": 0,
+                "maximum": 3,
+                "meaning": "Complexity magnitude: 0 is lowest/none and 3 is highest; higher does not mean better quality.",
+                "conversionRule": "Never convert normalized 0-to-1 review quality scores into this scale.",
+            },
             "scores": {
                 "silhouetteComplexity": 0,
                 "componentCount": 0,
@@ -79,7 +88,10 @@ def make_pre_spec_assessment(
             "needsMaterialLocalOverrides": complexity != "simple",
             "needsMultipleReviewViews": False,
             "needsActionReadyHierarchy": intended_use in {"animated", "playable", "destructible"},
-            "rationale": "Use only the depth needed to preserve the visible identity and intended behavior.",
+            "rationale": (
+                "Use only the depth needed to preserve visible identity. Assess motion affordances "
+                "before form even when the user did not request interaction."
+            ),
         },
         "specializedRegions": {
             "status": "unassessed",
@@ -145,10 +157,179 @@ def make_quality_contract(
         ],
         "antiShallowSpecRules": [
             "Do not generate blockout before the integrated pre-spec fields and silhouette are filled.",
+            "Every component id/name must identify its observed construction role; generic or placeholder names are invalid.",
             "Do not continue a visual pass without a hash-bound comparison manifest and artifact-bound AI review.",
             "Do not lower global or pass-specific thresholds from a review command.",
-            "Do not mark optimization complete without measured metrics and a fresh no-regression visual review.",
+            "Do not use polygon, draw-call, FPS, or receipt success to compensate for a failed visual gate.",
         ],
+    }
+
+
+def make_phase_execution_contract() -> dict[str, Any]:
+    """Describe the lean LLM-facing path and its three-signal visual gate."""
+
+    return {
+        "version": 4,
+        "mode": "progressive-visual-loop",
+        "phaseOrder": ["blockout", "form", "lookdev", "interaction"],
+        "specStrategy": "stable-core-plus-phase-delta",
+        "stableCoreFields": [
+            "targetName",
+            "sourceImage",
+            "referencePreparation",
+            "perceptualContract",
+            "viewingContract",
+            "evidenceAuthority",
+            "visualIdentitySpec",
+            "representationPlan",
+            "capabilityPlan",
+            "coordinateFrame",
+            "silhouette",
+            "viewEvidence",
+            "componentNamingContract",
+            "assumptions",
+            "risks",
+        ],
+        "phaseOwnedFields": {
+            "blockout": [
+                "preSpecAssessment.objectClass",
+                "preSpecAssessment.complexity.tier",
+                "componentTree[macro]",
+                "qualityTargets",
+                "viewingContract",
+                "visualIdentitySpec",
+                "representationPlan",
+            ],
+            "form": [
+                "componentTree",
+                "surfaceTopologyPlan",
+                "detailDecompositionContract",
+                "repetitionSystems",
+                "featureReviewTargets",
+                "viewHypothesisPolicy",
+                "capabilityPlan",
+                "representationPlan",
+            ],
+            "lookdev": [
+                "materials",
+                "lookDevTargets",
+                "lightingFromPhoto",
+            ],
+            "interaction": [
+                "interactionContract",
+                "actionReadiness",
+                "componentTree[*].actionProfile",
+            ],
+        },
+        "correctionAuthority": {
+            "mode": "cumulative-prior-phase-repair",
+            "laterPhaseMayRepairEarlierPhase": True,
+            "futurePhaseEditsForbidden": True,
+            "impactAssessmentRequired": True,
+            "challengerOnly": True,
+            "previousRenderComparisonRequired": True,
+            "protectedPhaseRegressionVeto": True,
+            "priorPhaseReviewRequired": True,
+            "priorPhaseImprovementAllowed": True,
+            "priorPhaseIsNotFrozen": True,
+            "rule": (
+                "The active phase must review its own and every earlier phase's visible "
+                "quality, and may improve any earlier phase when evidence exposes a "
+                "defect or clear opportunity. Assess impact first, edit only a "
+                "challenger, and promote only when the whole cumulative result is "
+                "better or unchanged; rollback only when the challenger visibly regresses."
+            ),
+        },
+        "cycle": {
+            "steps": [
+                "spec-delta",
+                "build-render",
+                "reference-comparison",
+                "blind-visual-scout",
+                "independent-review",
+                "system-promote-or-rollback",
+                "user-approval",
+            ],
+            "maximumNonVisualOperationsBeforeRender": 2,
+            "visualProgressRequired": True,
+            "comparisonRequired": True,
+            "comparisonAuthority": "prepared-target-with-original-identity-guardrail",
+            "maximumConsecutiveNonImprovements": 3,
+            "rollbackTarget": "highest-scoring-compatible-champion",
+            "strategyChangeAfterExhaustion": True,
+        },
+        "visualScout": blind_scout_execution_contract(),
+        "qualityGate": {
+            "mode": "ai-scout-human",
+            "signals": [
+                "aiOverallScore>=0.70",
+                "blindScoutDecision=approve",
+                "humanApproval=approved",
+            ],
+            "aiOverallFloor": 0.70,
+            "blindScoutDecisions": ["approve", "reject"],
+            "maxBlindScoutObservations": 3,
+            "centroidAndAspect": "diagnostic-only",
+            "humanApprovalAfterSystemPass": True,
+        },
+        "humanApproval": {
+            "required": True,
+            "scope": "every-active-phase",
+            "order": "after-system-pass-before-next-phase",
+            "systemPassPrerequisite": True,
+            "approvalDecisions": ["approved", "changes-requested"],
+            "bindingFields": [
+                "passId",
+                "reviewKey",
+                "specHash",
+                "reviewedArtifactSha256",
+            ],
+            "changesRequestedFields": [
+                "visualRegion",
+                "problem",
+                "expectedDirection",
+            ],
+            "rules": [
+                "Never ask the user to approve before deterministic preflight, the composite AI review, and blind scout approve pass.",
+                "Show the current output and exact comparison or runtime evidence when requesting approval.",
+                "Only explicit user approval completes the phase and unlocks the next phase.",
+                "If the user requests changes, record where the problem is, what is wrong, and the expected direction; refine and rerun the composite AI review and blind scout before asking again.",
+                "The builder must never infer, fabricate, or self-record user approval.",
+            ],
+        },
+        "deferredWork": {
+            "form": ["recursive detail plans", "attachments", "default 2x2 turnaround"],
+            "lookdev": ["PBR extraction", "surface descriptors", "lighting refinement"],
+            "interaction": ["motion pivots", "runtime receipts", "motion clearance"],
+            "finalization": ["full project typecheck", "final provenance audit"],
+        },
+        "progressRule": (
+            "Count accepted phase gates and visible score deltas, never raw commands, schema fixes, "
+            "receipts, screenshots, or reviewer setup as modeling progress."
+        ),
+    }
+
+
+def make_interaction_contract(intended_use: str | None = None) -> dict[str, Any]:
+    legacy_required = intended_use in {"animated", "playable", "destructible"}
+    return {
+        "version": 1,
+        "status": "required" if legacy_required else "unassessed",
+        "assessmentReason": (
+            "Legacy user intent requires interaction; identify exact moving components before form."
+            if legacy_required
+            else ""
+        ),
+        "policy": "auto-infer",
+        "activationThreshold": 0.8,
+        "motionAffordances": [],
+        "rules": [
+            "Infer motion from observed joints or a strong object-class prior even when the user is silent.",
+            "Auto-activate only high-confidence motion; keep lower-confidence motion as a bounded assumption.",
+            "Never infer physics, destruction, or speculative hidden mechanisms.",
+            "Every active motion must target an exact component id and numeric pivot, axis, and limits or rate.",
+        ],
+        "legacyIntentHint": intended_use or "",
     }
 
 
@@ -160,6 +341,10 @@ def make_base_material(quality_profile: str = "balanced") -> dict[str, Any]:
         "type": "standard",
         "shaderModel": "MeshStandardMaterial",
         "baseColor": "#8A7A5F",
+        "surfaceDescriptor": {
+            "status": "unassessed",
+            "evidenceRefs": ["full-object"],
+        },
         "albedo": {
             "dominant": "#8A7A5F",
             "secondary": ["#6E614B", "#A08F70"],
@@ -198,6 +383,40 @@ def make_base_material(quality_profile: str = "balanced") -> dict[str, Any]:
         "shaderNotes": [
             "Replace generic values with observed evidence before lookdev review.",
             "Never reuse albedo as roughness, height, normal, or AO.",
+        ],
+    }
+
+
+def make_detail_plan() -> dict[str, Any]:
+    """Return an explicit, fail-closed detail plan for one component.
+
+    A component may remain one continuous mesh, but it may not remain one
+    undifferentiated idea.  Every visible sub-detail must eventually be mapped
+    to executable geometry, topology, repetition, or material data.
+    """
+
+    return {
+        "status": "unassessed",
+        "observedComplexity": "unassessed",
+        "decompositionMode": "unassessed",
+        "atomicityReason": "",
+        "childComponentIds": [],
+        "features": [],
+        "evidenceRefs": ["full-object"],
+        "coverageNotes": "",
+    }
+
+
+def make_detail_decomposition_contract() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "status": "unassessed",
+        "rules": [
+            "Inventory every visible macro, meso, and identity-critical micro detail before form generation.",
+            "A compound or complex component may not use atomic decomposition.",
+            "Every inventoried feature must name its host component and map to an executable target id.",
+            "One continuous mesh may contain many named features; mesh count is never a substitute for detail coverage.",
+            "Reviewer corrections must target the exact component id or detail-feature id and give numeric actions.",
         ],
     }
 
@@ -271,6 +490,7 @@ def make_root_component(target_name: str, interactive: bool = False) -> dict[str
         "joints": [],
         "seams": [],
         "localFeatures": [],
+        "detailPlan": make_detail_plan(),
         "surfaceDetail": {
             "macroRoughness": 0.0,
             "microRoughness": 0.0,
@@ -311,11 +531,19 @@ def make_spec(
     image: str | None,
     assessment_payload: dict[str, Any] | None = None,
     complexity: str = "moderate",
-    intended_use: str = "browser-prop",
+    intended_use: str | None = None,
     quality_profile: str = "balanced",
+    reference_background: str = "unassessed",
+    original_image: str | None = None,
+    background_removal_mode: str | None = None,
+    imagegen_trigger: str | None = None,
+    declared_simplifications: list[str] | None = None,
+    approval_mode: str = "phase-by-phase",
+    perceptual_enforcement: str = "advisory",
 ) -> dict[str, Any]:
     pre_spec = make_pre_spec_assessment(target_name, complexity, intended_use)
     quality_contract = make_quality_contract(complexity, quality_profile)
+    detail_decomposition_contract = make_detail_decomposition_contract()
     surface_topology_plan: dict[str, Any] = {
         "status": "unassessed",
         "reason": "",
@@ -332,13 +560,21 @@ def make_spec(
             quality_contract = assessment_payload["qualityContract"]
         if isinstance(assessment_payload.get("surfaceTopologyPlan"), dict):
             surface_topology_plan = assessment_payload["surfaceTopologyPlan"]
+        if isinstance(assessment_payload.get("detailDecompositionContract"), dict):
+            detail_decomposition_contract = assessment_payload["detailDecompositionContract"]
         if not image and isinstance(assessment_payload.get("sourceImage"), str):
             image = assessment_payload["sourceImage"]
 
-    passes = build_pass_plan(complexity, intended_use, quality_profile)
+    interactive = intended_use in {"animated", "playable", "destructible"}
+    interaction_contract = make_interaction_contract(intended_use)
+    passes = build_pass_plan(
+        complexity,
+        intended_use,
+        quality_profile,
+        interaction_required=interactive,
+    )
     pass_ids = [item["id"] for item in passes]
     visual_pass_ids = [item["id"] for item in passes if item["evidenceType"] == "visual"]
-    interactive = intended_use in {"animated", "playable", "destructible"}
     review_views = ["neutral", "grazing", "reference"] if quality_profile == "reference-fidelity" else ["reference"]
     reference_fidelity = quality_profile == "reference-fidelity"
     visual_threshold = 0.85 if reference_fidelity else 0.7
@@ -352,20 +588,244 @@ def make_spec(
         )
     target_id = slugify(target_name)
 
+    declared_simplifications = [
+        item.strip()
+        for item in (declared_simplifications or [])
+        if isinstance(item, str) and item.strip()
+    ]
+    if not image:
+        if (
+            reference_background != "unassessed"
+            or original_image
+            or background_removal_mode
+            or imagegen_trigger
+            or declared_simplifications
+        ):
+            raise ValueError(
+                "reference preparation options require --image"
+            )
+        reference_preparation = {
+            "version": 2,
+            "originalImage": "",
+            "subjectBackgroundSeparation": "not-applicable",
+            "preparationTrigger": "not-applicable",
+            "requiredSkill": "imagegen",
+            "method": "not-required",
+            "imagegenMode": "not-applicable",
+            "outputImage": "",
+            "outputBackground": "not-applicable",
+            "whiteBackgroundValidated": False,
+            "subjectContrastValidated": False,
+            "identityGuardrailValidated": False,
+            "modificationPolicy": {
+                "mode": "none",
+                "allowedChanges": [],
+                "protectedTraits": [],
+                "declaredChanges": [],
+            },
+            "comparisonPolicy": {
+                "reconstructionTarget": "sourceImage",
+                "identityGuardrail": "originalImage",
+            },
+            "usageRule": "No reference image is available.",
+        }
+    else:
+        if reference_background not in {
+            "unassessed",
+            "mixed",
+            "clear",
+            "present",
+            "absent",
+        }:
+            raise ValueError(
+                "reference_background must be unassessed, mixed, clear, present, or absent"
+            )
+        if reference_background == "present":
+            reference_background = "mixed"
+        approved_modes = {
+            "white-background-cleanup",
+            "white-background-simplification",
+        }
+        if background_removal_mode in {
+            "built-in-chroma-key",
+            "cli-native-transparency",
+        }:
+            raise ValueError(
+                "transparent ImageGen output is unsupported; use "
+                "background_removal_mode='white-background-cleanup' or "
+                "'white-background-simplification'"
+            )
+        if background_removal_mode and background_removal_mode not in approved_modes:
+            raise ValueError(
+                "background_removal_mode must be white-background-cleanup or "
+                "white-background-simplification"
+            )
+        valid_triggers = {
+            "background-mixing",
+            "excessive-complexity",
+            "low-source-quality",
+            "combined",
+        }
+        if imagegen_trigger and imagegen_trigger not in valid_triggers:
+            raise ValueError(
+                "imagegen_trigger must be background-mixing, excessive-complexity, "
+                "low-source-quality, or combined"
+            )
+
+        imagegen_requested = background_removal_mode is not None
+        if reference_background == "mixed":
+            if not imagegen_requested:
+                raise ValueError(
+                    "background_removal_mode is required when subject and background are mixed"
+                )
+            if imagegen_trigger is None:
+                imagegen_trigger = "background-mixing"
+            if background_removal_mode == "white-background-simplification":
+                imagegen_trigger = "combined"
+        if imagegen_trigger and not imagegen_requested:
+            raise ValueError("imagegen_trigger requires an ImageGen preparation mode")
+
+        if imagegen_requested:
+            if not original_image:
+                raise ValueError(
+                    "original_image is required when ImageGen prepares the reconstruction target"
+                )
+            if original_image == image:
+                raise ValueError(
+                    "image must be the generated white-background output, not original_image"
+                )
+            if imagegen_trigger is None:
+                raise ValueError(
+                    "imagegen_trigger is required when a clear-background reference is regenerated"
+                )
+            if (
+                background_removal_mode == "white-background-cleanup"
+                and imagegen_trigger == "excessive-complexity"
+            ):
+                raise ValueError(
+                    "excessive-complexity requires white-background-simplification"
+                )
+            if (
+                background_removal_mode == "white-background-simplification"
+                and not declared_simplifications
+            ):
+                raise ValueError(
+                    "white-background-simplification requires at least one declared simplification"
+                )
+            method = "imagegen-prepared-reference"
+            mode = background_removal_mode
+            prepared = True
+        elif reference_background in {"clear", "absent"}:
+            if original_image and original_image != image:
+                raise ValueError(
+                    "original_image must equal image when no background removal is required"
+                )
+            method = "not-required"
+            mode = "not-applicable"
+            prepared = False
+        else:
+            if background_removal_mode:
+                raise ValueError(
+                    "background_removal_mode requires reference_background='mixed'"
+                )
+            method = "unassessed"
+            mode = "unassessed"
+            prepared = False
+        simplification = mode == "white-background-simplification"
+        reference_preparation = {
+            "version": 2,
+            "originalImage": original_image or image,
+            "subjectBackgroundSeparation": reference_background,
+            "preparationTrigger": imagegen_trigger or (
+                "unassessed" if reference_background == "unassessed" else "not-required"
+            ),
+            "requiredSkill": "imagegen",
+            "method": method,
+            "imagegenMode": mode,
+            "outputImage": image,
+            "outputBackground": "solid-white" if prepared else (
+                "unassessed" if reference_background == "unassessed" else "original"
+            ),
+            "whiteBackgroundValidated": prepared,
+            "subjectContrastValidated": prepared,
+            "identityGuardrailValidated": prepared,
+            "modificationPolicy": {
+                "mode": "bounded-simplification" if simplification else (
+                    "cleanup-only" if prepared else "none"
+                ),
+                "allowedChanges": (
+                    [
+                        "remove background artifacts and clarify ambiguous edges",
+                        "reduce compression noise and non-signature surface noise",
+                        "merge or omit tiny repeated details that do not affect silhouette or material zones",
+                        "regularize ambiguous minor geometry for practical procedural construction",
+                    ]
+                    if simplification
+                    else (
+                        [
+                            "remove background artifacts and clarify ambiguous edges",
+                            "clean minor compression or surface noise without changing recognizable form",
+                        ]
+                        if prepared
+                        else []
+                    )
+                ),
+                "protectedTraits": (
+                    [
+                        "object class and recognizable identity",
+                        "primary silhouette and macro proportions",
+                        "major component count, placement, and attachment relationships",
+                        "signature features and dominant material/color zones",
+                        "primary viewpoint, pose, and framing",
+                    ]
+                    if prepared
+                    else []
+                ),
+                "declaredChanges": declared_simplifications,
+            },
+            "comparisonPolicy": {
+                "reconstructionTarget": "sourceImage",
+                "identityGuardrail": "originalImage",
+            },
+            "usageRule": (
+                "Use the original directly when its subject boundary is clear, including a "
+                "white or strongly contrasting background, and reconstruction is manageable. "
+                "Use ImageGen with a solid white output when the subject mixes with the background, "
+                "the source is too poor, or the object is impractically complex. sourceImage is the "
+                "active reconstruction target; originalImage remains the identity and macro-form guardrail."
+            ),
+        }
+
     spec: dict[str, Any] = {
         "targetName": target_name,
         "targetId": target_id,
         "schemaVersion": CURRENT_SCHEMA_VERSION,
         "specRevision": 1,
-        "intendedUse": intended_use,
         "qualityProfile": quality_profile,
         "sourceImage": image or "",
+        "referencePreparation": reference_preparation,
         "viewHypothesisPolicy": make_view_hypothesis_policy(
             complexity,
             quality_profile,
             image,
         ),
         "suitability": "conditional",
+        "scoreScale": {
+            "type": "integer-ordinal",
+            "minimum": 0,
+            "maximum": 3,
+            "meaning": "Suitability evidence strength is field-specific; occlusion_risk is the only inverse/risk axis.",
+            "higherIsBetter": [
+                "object_isolation",
+                "silhouette_readability",
+                "depth_inference",
+                "primitive_decomposition",
+                "material_procedurality",
+                "interaction_fit",
+            ],
+            "higherIsWorse": ["occlusion_risk"],
+            "conversionRule": "Never place decimal 0-to-1 review quality scores in scores.*.",
+        },
         "scores": {
             "object_isolation": 0,
             "silhouette_readability": 0,
@@ -377,7 +837,9 @@ def make_spec(
         },
         "preSpecAssessment": pre_spec,
         "surfaceTopologyPlan": surface_topology_plan,
+        "detailDecompositionContract": detail_decomposition_contract,
         "qualityContract": quality_contract,
+        "phaseExecutionContract": make_phase_execution_contract(),
         "terminologyProfile": {
             "domain": "real-time procedural Three.js asset",
             "geometryTerms": ["silhouette", "proportion", "primitive", "bevel", "taper", "attachment"],
@@ -391,7 +853,6 @@ def make_spec(
             "niceToHave": ["micro wear", "secondary lighting match"],
             "reviewViewpoints": review_views,
             "diagnosticTargets": {
-                "silhouetteIou": 0.88 if reference_fidelity else 0.75,
                 "maximumCentroidDelta": 0.02 if reference_fidelity else 0.05,
                 "maximumAspectRatioDelta": 0.03 if reference_fidelity else 0.08,
                 "minimumDetailEnergyRatio": 0.75 if reference_fidelity else 0.65,
@@ -401,7 +862,7 @@ def make_spec(
                 "minimumHighlightCoverageRatio": 0.10 if reference_fidelity else 0.05,
                 "minimumHighlightEnergyRatio": 0.10 if reference_fidelity else 0.05,
                 "acceptanceAuthority": False,
-                "guardrailMode": "veto-only",
+                "guardrailMode": "advisory-only",
             },
         },
         "selfCorrectLoop": {
@@ -420,15 +881,20 @@ def make_spec(
             "stopCriteria": ["quality target reached", "remaining gap needs a better reference or manual art"],
             "visualAcceptance": {
                 "reviewer": "ai-vision",
-                "threshold": visual_threshold,
-                "minimumAiVisionScore": visual_threshold,
+                # Profile fidelity remains useful for prioritisation, but v4
+                # promotion deliberately uses the lighter explicit phase gate.
+                "threshold": 0.70,
+                "minimumAiVisionScore": 0.70,
                 "comparisonArtifactRequired": True,
-                "layerScoresRequired": True,
+                "layerScoresRequired": False,
                 "codePixelDiffIsAcceptanceAuthority": False,
                 "requiredLayerScores": [],
-                "scoringRule": "AI vision reviews the full no-crop contact sheet; pass-specific scores are defined in buildPasses.",
+                "scoringRule": (
+                    "AI vision returns one composite 0-to-1 score and concrete corrections; "
+                    "the blind visual scout supplies the independent binary gate."
+                ),
                 "featureReviewPolicy": {
-                    "enabled": True,
+                    "enabled": False,
                     "reviewUnit": "multi-view-contact-sheet",
                     "maxCriticalFeaturesPerPass": 8,
                     "maxImportantFeaturesPerPass": 3,
@@ -441,6 +907,23 @@ def make_spec(
                         "visible face and hand regions remain independent critical targets."
                     ),
                 },
+            },
+            "visualSanity": {
+                "enabled": True,
+                "obviousErrorVeto": True,
+                "requiredVerdictField": "sanityChecks",
+                "categories": [
+                    "assemblyCorrectness",
+                    "proportionBalance",
+                    "shapeSilhouette",
+                    "materialPlausibility",
+                    "surfaceQuality",
+                    "signatureDetail",
+                ],
+                "rule": (
+                    "A critical or major wrong placement, imbalance, wrong shape, implausible material, "
+                    "or identity-detail defect blocks acceptance regardless of average score."
+                ),
             },
             "screenshotPolicy": {
                 "requiredForPasses": visual_pass_ids,
@@ -458,7 +941,7 @@ def make_spec(
                 "tier": "critical",
                 "passIds": [
                     pass_id
-                    for pass_id in ("blockout", "form", "optimization")
+                    for pass_id in ("blockout", "form")
                     if pass_id in pass_ids
                 ],
                 "minimumScore": critical_threshold,
@@ -472,7 +955,7 @@ def make_spec(
                 "tier": "critical",
                 "passIds": [
                     pass_id
-                    for pass_id in ("structure", "form", "optimization")
+                    for pass_id in ("form",)
                     if pass_id in pass_ids
                 ],
                 "minimumScore": critical_threshold,
@@ -485,7 +968,7 @@ def make_spec(
                 "name": "Reference material and lighting response",
                 "tier": "critical",
                 "passIds": [
-                    pass_id for pass_id in ("lookdev", "optimization") if pass_id in pass_ids
+                    pass_id for pass_id in ("lookdev",) if pass_id in pass_ids
                 ],
                 "minimumScore": lookdev_feature_threshold,
                 "mustPass": True,
@@ -495,7 +978,10 @@ def make_spec(
         ],
         "actionReadiness": {
             "enabled": interactive,
-            "contract": "Use stable named pivot nodes; add sockets, colliders, and destruction data only when the intended use needs them.",
+            "contract": (
+                "Use stable named pivot nodes for assessed motion affordances; add sockets, colliders, "
+                "or destruction data only when explicitly required."
+            ),
             "defaultRigType": "action-ready-rig" if interactive else "stable-static-root",
             "rootMotionNode": "root",
             "requiredComponentFields": ["id", "parent", "transform", "actionProfile"],
@@ -503,7 +989,19 @@ def make_spec(
             "authoringRules": ["Do not merge independently movable parts."],
             "destructionPolicy": {"defaultBreakable": False},
         },
+        "interactionContract": interaction_contract,
+        "uncertaintyContract": {
+            "rule": (
+                "Before implementation, resolve every preSpecAssessment unknown or move it into exactly one "
+                "bounded assumptions[] or known risks[] record. Plain strings are not sufficient."
+            ),
+            "assumptionRequiredFields": [
+                "id", "statement", "scope", "bounds", "impactIfWrong", "falsifyingCheck"
+            ],
+            "riskRequiredFields": ["id", "statement", "scope", "impact", "mitigation"],
+        },
         "assumptions": [],
+        "risks": [],
         "coordinateFrame": {
             "front": "camera-facing side in the reference",
             "up": "image up",
@@ -526,6 +1024,20 @@ def make_spec(
                 "confidence": 0.5,
             }
         ],
+        "componentNamingContract": {
+            "idFormat": "<system>-<structural-part>[-<side|index|function>]",
+            "nameRule": (
+                "Name the observed construction part or assembly, not its primitive, material, implementation class, "
+                "or an arbitrary sequence number."
+            ),
+            "forbiddenExamples": [
+                "part-01", "mesh-a", "component-2", "body", "object", "placeholder-wing"
+            ],
+            "validExamples": [
+                "fuselage-cockpit-shell", "main-rotor-blade-01", "left-landing-gear-strut", "rocket-pod-tube-bank"
+            ],
+            "rootException": "The one parentless global root may use id 'root'.",
+        },
         "componentTree": [make_root_component(target_name, interactive)],
         "materials": [make_base_material(quality_profile)],
         "repetitionSystems": [],
@@ -546,27 +1058,52 @@ def make_spec(
             "screenshotReview": review_views,
         },
         "reviewHistory": [],
+        "userPhaseApprovals": [],
         "lodPlan": [
             {"tier": "near", "distance": 0, "strategy": "full accepted model"},
             {"tier": "far", "distance": 30, "strategy": "merge static parts and reduce non-silhouette detail"},
         ],
-        "performanceBudget": {
-            "qualityPriority": quality_profile,
-            "targetTriangles": 250000,
-            "maxDrawCalls": 120,
-            "textureSize": 2048,
-            "fpsTarget": 60,
-            "optimizationPolicy": "Measure first; optimize without removing reference-critical features.",
+        "performanceAudit": {
+            "enabled": False,
+            "blocking": False,
+            "activation": "explicit-user-budget-only",
+            "maximumVisualRegression": 0.0,
+            "policy": (
+                "Run only after lookdev acceptance. Reject and restore the visual champion if any "
+                "protected visual score decreases."
+            ),
         },
         "lightingFromPhoto": [],
         "proceduralStrategy": [
             "Match silhouette and proportions.",
-            "Add only the structure required by complexity.",
+            "Resolve hierarchy, attachment, balance, and local form together in the form phase.",
             "Validate material, surface, lighting, and contact shadow together.",
-            "Run interaction and performance checks only when relevant.",
+            "Assess motion automatically; run interaction only for approved affordances.",
+            "Run performance as an optional post-quality audit, never as a modeling target.",
         ],
-        "risks": [],
     }
+    spec.update(
+        make_perceptual_fields(
+            image or "",
+            reference_preparation,
+            quality_profile,
+            approval_mode,
+            perceptual_enforcement,
+        )
+    )
+    if approval_mode == "final-only":
+        spec["phaseExecutionContract"]["humanApproval"].update(
+            {
+                "scope": "final-active-phase",
+                "order": "after-final-system-pass",
+            }
+        )
+    if intended_use:
+        spec["legacyIntent"] = {
+            "value": intended_use,
+            "deprecated": True,
+            "rule": "Migration hint only; it does not select quality or performance passes.",
+        }
     sync_pipeline(spec)
     return spec
 
@@ -576,6 +1113,42 @@ def main(argv: list[str]) -> int:
     parser.add_argument("target_name")
     parser.add_argument("--image")
     parser.add_argument(
+        "--reference-separation",
+        "--reference-background",
+        dest="reference_background",
+        choices=("unassessed", "mixed", "clear", "present", "absent"),
+        default="unassessed",
+        help=(
+            "Classify subject/background separation. Use clear for white or contrasting "
+            "backgrounds; mixed requires an ImageGen white-background output. present is a legacy alias for mixed."
+        ),
+    )
+    parser.add_argument(
+        "--original-image",
+        help="Original image retained as the identity guardrail when --image is ImageGen-prepared.",
+    )
+    parser.add_argument(
+        "--imagegen-preparation-mode",
+        "--background-removal-mode",
+        dest="background_removal_mode",
+        choices=("white-background-cleanup", "white-background-simplification"),
+        help=(
+            "Create a solid-white ImageGen reference. Simplification may remove only declared, "
+            "non-identity detail. The older option name remains as a CLI alias."
+        ),
+    )
+    parser.add_argument(
+        "--imagegen-trigger",
+        choices=("background-mixing", "excessive-complexity", "low-source-quality", "combined"),
+        help="Why ImageGen preparation is required; complexity/quality may trigger it even with a clear background.",
+    )
+    parser.add_argument(
+        "--declared-simplification",
+        action="append",
+        default=[],
+        help="Repeat for each bounded detail family intentionally simplified in the generated reference.",
+    )
+    parser.add_argument(
         "--complexity",
         choices=("simple", "moderate", "complex", "ultra"),
         default="moderate",
@@ -583,14 +1156,28 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--intended-use",
         choices=("static-render", "browser-prop", "game-prop", "animated", "playable", "destructible"),
-        required=True,
-        help="Choose explicitly so a game/static quality request cannot silently become browser-prop.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--quality-profile",
         choices=("balanced", "reference-fidelity"),
-        required=True,
-        help="Choose explicitly; use reference-fidelity for close, sharp, game-quality matching.",
+        default="reference-fidelity",
+        help="Defaults to reference-fidelity so new reconstructions do not silently downgrade quality.",
+    )
+    parser.add_argument(
+        "--approval-mode",
+        choices=("final-only", "phase-by-phase"),
+        default="final-only",
+        help=(
+            "Defaults to final-only for the fast perceptual workflow. Use phase-by-phase "
+            "when every intermediate artifact needs explicit approval."
+        ),
+    )
+    parser.add_argument(
+        "--perceptual-enforcement",
+        choices=("strict", "advisory"),
+        default="strict",
+        help="Strict mode binds review and promotion to ViewingContract and capability coverage.",
     )
     parser.add_argument(
         "--assessment",
@@ -600,10 +1187,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--layout",
         choices=("modular", "monolithic"),
-        default="modular",
+        default="monolithic",
         help=(
-            "modular creates the v4 root contract only; add block specs later with "
-            "`sculpt module add`. monolithic keeps the schema 3.1 compatibility layout."
+            "monolithic is the default progressive four-phase fast path. Use modular only "
+            "for independently isolatable subsystems with valid module-local reference evidence."
         ),
     )
     parser.add_argument("--out", type=Path)
@@ -617,6 +1204,13 @@ def main(argv: list[str]) -> int:
             args.complexity,
             args.intended_use,
             args.quality_profile,
+            args.reference_background,
+            args.original_image,
+            args.background_removal_mode,
+            args.imagegen_trigger,
+            args.declared_simplification,
+            args.approval_mode,
+            args.perceptual_enforcement,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         parser.error(str(exc))

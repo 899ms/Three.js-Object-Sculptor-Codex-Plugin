@@ -29,19 +29,25 @@ from new_sculpt_spec import (  # noqa: E402
 from make_visual_comparison_sheet import (  # noqa: E402
     create_sheet_pairs,
     main as compare_main,
+    read_png,
     write_png_rgb,
 )
 from sculpt_contract import (  # noqa: E402
+    REFINEMENT_ACTIONS,
     correction_batch_from_verdict,
     file_sha256,
     pipeline_status,
+    record_user_phase_decision,
     refinement_budget,
     review_spec_hash,
+    sync_pipeline,
     visual_evidence_manifest_sha256,
     write_spec_atomic,
 )
 from sculpt_module_review import (  # noqa: E402
     _refinement_delta_failures,
+    blind_scout_contract_failures,
+    impact_assessment_failures,
     review_contract_failures,
 )
 from sculpt_module_contract import (  # noqa: E402
@@ -50,6 +56,7 @@ from sculpt_module_contract import (  # noqa: E402
     module_build_receipt_path,
 )
 from sculpt_pass_orchestrator import main as orchestrator_main  # noqa: E402
+from sculpt_perception import render_pipeline_contract_sha256  # noqa: E402
 from sculpt_modules import (  # noqa: E402
     MANIFEST_SCHEMA_VERSION,
     accept_module,
@@ -69,6 +76,7 @@ from sculpt_module_state import (  # noqa: E402
     implementation_contract_paths,
     implementation_semantic_hashes,
     module_hash,
+    module_preview_pass,
 )
 from sculpt_view_hypotheses import (  # noqa: E402
     hypothesis_evidence_failures,
@@ -103,6 +111,7 @@ def fill_global_contract(manifest: dict) -> None:
             for module_id in visual_module_ids
         ],
     }
+    spec["detailDecompositionContract"]["status"] = "planned"
     object_class = spec["preSpecAssessment"]["objectClass"]
     object_class.update(
         {
@@ -111,6 +120,12 @@ def fill_global_contract(manifest: dict) -> None:
             "structureKind": ["modular assembly"],
             "motionPotential": ["static"],
             "materialFamilies": ["painted polymer"],
+        }
+    )
+    spec["interactionContract"].update(
+        {
+            "status": "not-required",
+            "assessmentReason": "The rigid test fixture has no observed or inferred moving parts.",
         }
     )
     spec["preSpecAssessment"]["specializedRegions"] = {
@@ -156,9 +171,38 @@ class ModularWorkflowTests(unittest.TestCase):
             component["geometryDescriptor"]["topologyIntent"] = "authored procedural test form"
             component["fidelityTier"] = "form"
             component["surfaceDetail"]["notes"] = "Intentionally smooth authored test surface."
+            component["detailPlan"].update(
+                {
+                    "status": "planned",
+                    "observedComplexity": "simple",
+                    "decompositionMode": "atomic",
+                    "atomicityReason": "The synthetic module fixture is one continuous simple form.",
+                    "coverageNotes": "The full outline and intentionally featureless surface were checked.",
+                }
+            )
         for material in module["payload"]["materials"]:
             material["name"] = "Authored test material"
             material["albedo"]["samplingNotes"] = "Palette is bound to the observed test fixture."
+            material["surfaceDescriptor"] = {
+                "status": "assessed",
+                "rigidity": {
+                    "value": "rigid",
+                    "basis": "inferred",
+                    "confidence": 0.8,
+                },
+                "finish": {
+                    "value": "matte",
+                    "basis": "observed",
+                    "confidence": 0.8,
+                },
+                "microRelief": {
+                    "value": "pebbled",
+                    "channel": "normal",
+                    "basis": "observed",
+                    "confidence": 0.75,
+                },
+                "evidenceRefs": ["full-object"],
+            }
             material["shaderNotes"] = [
                 "Authored values are tied to the test fixture.",
                 "Albedo and scalar fields remain independent.",
@@ -328,7 +372,7 @@ class ModularWorkflowTests(unittest.TestCase):
         resolved_spec = self.root / ".sculpt-preview" / f"{module_id}.json"
         generated_output = self.root / "src" / "generated" / f"{module_id}.generated.ts"
         resolved_payload = resolve_manifest(self.manifest_path, selected=[module_id])
-        selected_pass = str(pipeline_status(resolved_payload)["currentPass"])
+        selected_pass = module_preview_pass(module)
         generated_source = generate(
             resolved_payload,
             selected_pass,
@@ -375,6 +419,23 @@ class ModularWorkflowTests(unittest.TestCase):
             "initialGeometryFingerprint": [f"{item}:BoxGeometry:24:36" for item in mesh_ids],
             "geometryFingerprint": [f"{item}:BoxGeometry:24:36" for item in mesh_ids],
             "geometryChangedComponentIds": [],
+            "renderPipeline": {
+                "artifactType": "threejs-sculpt-render-receipt",
+                "version": 1,
+                "contractSha256": render_pipeline_contract_sha256(resolved_payload),
+                "backend": "webgl",
+                "requestedMode": "auto",
+                "resolvedMode": "smaa",
+                "antialiasVerified": True,
+                "frameCount": 1,
+                "disposed": False,
+                "passChain": ["RenderPass", "SMAAPass", "OutputPass"],
+                "outputTransformOwner": "OutputPass",
+                "logicalWidth": 640,
+                "logicalHeight": 480,
+                "pixelRatio": 1,
+                "threeRevision": "178",
+            },
         }
         runtime_path = self.root / f"{stem}-{module_id}-runtime.json"
         write_spec_atomic(runtime_path, runtime_receipt)
@@ -404,6 +465,27 @@ class ModularWorkflowTests(unittest.TestCase):
             "runtimeReceiptSha256": file_sha256(runtime_path),
             "runtimeReceipt": runtime_receipt,
         }
+        source_value = manifest.get("globalSpec", {}).get("sourceImage")
+        source_path = Path(str(source_value)).expanduser() if source_value else reference
+        if not source_path.is_absolute():
+            source_path = (self.root / source_path).resolve()
+        if not source_path.is_file():
+            source_path = reference
+        evaluation_scope = {
+            "kind": "module-local",
+            "moduleId": module_id,
+            "componentIds": [
+                item["id"]
+                for item in module.get("payload", {}).get("componentTree", [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ],
+            "referenceIsolation": {
+                "method": "pre-isolated",
+                "sourceImage": str(source_path),
+                "sourceImageSha256": file_sha256(source_path),
+                "isolatedReferenceSha256": file_sha256(reference),
+            },
+        }
         evidence = create_sheet_pairs(
             [
                 {
@@ -411,6 +493,7 @@ class ModularWorkflowTests(unittest.TestCase):
                     "referenceImage": reference,
                     "renderScreenshot": render,
                     "referenceProvenance": required_provenance,
+                    "evaluationScope": copy.deepcopy(evaluation_scope),
                 },
                 {
                     "viewId": "side",
@@ -421,6 +504,7 @@ class ModularWorkflowTests(unittest.TestCase):
                         "allowedUse": "planning-veto",
                         "source": "test-image-generation",
                     },
+                    "evaluationScope": copy.deepcopy(evaluation_scope),
                 },
             ],
             comparison,
@@ -449,16 +533,77 @@ class ModularWorkflowTests(unittest.TestCase):
         layer_score: float = 0.95,
         extra: dict | None = None,
     ) -> Path:
+        default_scope = "spec" if action == "refine-spec" else "code"
+        normalized_corrections = []
+        for correction in corrections or []:
+            normalized = dict(correction)
+            scope = normalized.setdefault("scope", default_scope)
+            normalized.setdefault("targetType", "component")
+            parameter_path = str(normalized.get("parameterPath") or "")
+            if scope == "code" and not parameter_path.startswith("implementation."):
+                normalized["parameterPath"] = f"implementation.{parameter_path}"
+            normalized.setdefault("operation", "set")
+            normalized.setdefault("beforeValue", 1.0 if scope == "spec" else "before")
+            normalized.setdefault("value", 0.82 if scope == "spec" else "after")
+            normalized.setdefault("expectedValue", normalized["value"])
+            normalized.setdefault("unit", "relative" if scope == "spec" else "implementation-state")
+            normalized["expectedDelta"] = (
+                normalized["expectedDelta"]
+                if isinstance(normalized.get("expectedDelta"), dict)
+                else {
+                    "metric": f"{normalized.get('issueId', 'correction')}-quality",
+                    "from": layer_score,
+                    "to": min(1.0, layer_score + 0.02),
+                    "tolerance": 0.01,
+                    "unit": "score",
+                    "viewIds": ["reference"],
+                }
+            )
+            normalized_corrections.append(normalized)
+        corrections_by_issue = {
+            correction.get("issueId"): correction
+            for correction in normalized_corrections
+            if isinstance(correction.get("issueId"), str)
+        }
         normalized_issues = []
         for issue in issues or []:
             normalized = dict(issue)
             normalized.setdefault("rootCauseKey", normalized.get("id"))
             normalized.setdefault("failureClass", "geometry")
             normalized.setdefault(
+                "sanityCategory",
+                {
+                    "attachment": "assemblyCorrectness",
+                    "proportion": "proportionBalance",
+                    "material": "materialPlausibility",
+                    "surface": "surfaceQuality",
+                }.get(normalized["failureClass"], "shapeSilhouette"),
+            )
+            normalized.setdefault(
                 "evidenceCheck",
                 f"Compare the reviewed target {normalized.get('target', 'surface')} in all bound views.",
             )
+            linked = corrections_by_issue.get(normalized.get("id"))
+            if action in REFINEMENT_ACTIONS and isinstance(linked, dict):
+                normalized["targetType"] = linked["targetType"]
+                normalized["target"] = linked["target"]
+                normalized.setdefault(
+                    "observedMismatch",
+                    {
+                        "parameterPath": linked["parameterPath"],
+                        "actual": linked["beforeValue"],
+                        "expected": linked["expectedValue"],
+                        "unit": linked["unit"],
+                        "tolerance": 0.01,
+                        "viewIds": ["reference"],
+                    },
+                )
             normalized_issues.append(normalized)
+        provenance = evidence.get("renderProvenance")
+        reviewed_module_id = (
+            provenance.get("moduleId") if isinstance(provenance, dict) else "hero"
+        )
+        sanity_component_id = f"{reviewed_module_id or 'hero'}-body"
         payload = {
             "artifactType": "threejs-sculpt-module-review",
             "version": 1,
@@ -471,6 +616,20 @@ class ModularWorkflowTests(unittest.TestCase):
                 "model": "test-vision",
             },
             "comparisonSha256": evidence["comparisonSha256"],
+            "blindScout": {
+                "artifactType": "threejs-sculpt-blind-scout",
+                "version": 2,
+                "phaseId": "form",
+                "decision": "approve",
+                "comparisonSha256": evidence["comparisonSha256"],
+                "reviewedAt": "2026-07-15T00:00:00+00:00",
+                "reviewer": {
+                    "role": "blind-visual-scout",
+                    "contextId": f"scout-{stem}",
+                    "model": "test-blind-scout",
+                },
+                "observations": [],
+            },
             "overallScore": overall_score,
             "layerScores": {
                 "silhouetteProportion": layer_score,
@@ -478,14 +637,70 @@ class ModularWorkflowTests(unittest.TestCase):
                 "formDetail": layer_score,
                 "identity": layer_score,
                 "materialSurface": layer_score,
+                "assemblyCorrectness": layer_score,
+                "proportionBalance": layer_score,
+                "shapeSilhouette": layer_score,
+                "signatureDetail": layer_score,
+                "materialPlausibility": layer_score,
+                "surfaceQuality": layer_score,
+            },
+            "sanityChecks": {
+                category: {
+                    "status": "pass",
+                    "summary": f"The reviewer found no visible {category} defect.",
+                    "componentIds": [sanity_component_id],
+                    "viewIds": ["reference"],
+                }
+                for category in (
+                    "assemblyCorrectness",
+                    "proportionBalance",
+                    "shapeSilhouette",
+                    "signatureDetail",
+                    "materialPlausibility",
+                    "surfaceQuality",
+                )
             },
             "featureReviews": feature_reviews or [],
             "issues": normalized_issues,
-            "corrections": corrections or [],
+            "corrections": normalized_corrections,
             "resolvedIssueIds": resolved or [],
             "resolvedRootCauseKeys": resolved_root_causes if resolved_root_causes is not None else (resolved or []),
             "summary": "Independent reviewer checked the exact comparison and its critical visual systems.",
         }
+        if action in REFINEMENT_ACTIONS:
+            payload["impactAssessment"] = {
+                "targetIds": list(dict.fromkeys(
+                    correction["target"] for correction in normalized_corrections
+                )),
+                "allowedPaths": list(dict.fromkeys(
+                    correction["parameterPath"] for correction in normalized_corrections
+                )),
+                "protectedComponentIds": [],
+                "expectedEffect": "Apply only the bounded reviewer corrections.",
+                "possibleSideEffects": ["The edited local region may change visually."],
+                "structuralInvariants": [
+                    "Untargeted component geometry, hierarchy, and attachments remain unchanged."
+                ],
+                "risk": "low",
+                "rollbackCheckpoint": "Restore the active phase champion.",
+                "strategyChange": False,
+                "verdict": "safe-to-apply",
+            }
+        elif action == "strategy-reset":
+            payload["impactAssessment"] = {
+                "targetIds": ["root"],
+                "allowedPaths": ["representation.strategy"],
+                "protectedComponentIds": [],
+                "expectedEffect": "Replace only the failed representation strategy.",
+                "possibleSideEffects": ["The target silhouette may change materially."],
+                "structuralInvariants": [
+                    "Accepted identity, component inventory, and attachment semantics remain unchanged."
+                ],
+                "risk": "high",
+                "rollbackCheckpoint": "Restore the active phase champion.",
+                "strategyChange": True,
+                "verdict": "safe-to-apply",
+            }
         if extra:
             payload.update(extra)
         path = self.root / f"{stem}-verdict.json"
@@ -502,6 +717,250 @@ class ModularWorkflowTests(unittest.TestCase):
         status = module_status(self.manifest_path)
         self.assertFalse(status["assemblyReady"])
         self.assertIsNone(status["currentModule"])
+        self.assertTrue(status["userProgress"]["reportRequired"])
+        self.assertEqual(status["userProgress"]["completedGates"], 0)
+        self.assertEqual(status["userProgress"]["totalGates"], 0)
+        self.assertEqual(status["userProgress"]["currentStep"], "module-planning")
+
+    def test_module_preview_gate_is_phase_local_and_role_explicit(self) -> None:
+        form_path = self.add_visual_foundation("hero")
+        form_module = json.loads(form_path.read_text(encoding="utf-8"))
+        self.assertEqual(form_module["qualityGate"]["previewPass"], "form")
+        self.assertNotIn(
+            "materialSurface",
+            form_module["qualityGate"]["requiredLayerScores"],
+        )
+        packet = module_context(self.manifest_path, "hero")
+        self.assertEqual(packet["qualityGate"]["previewPass"], "form")
+        self.assertEqual(packet["phaseWorkPacket"]["passId"], "form")
+        self.assertEqual(packet["phaseWorkPacket"]["editableMaterialIds"], [])
+
+        for index, role in enumerate(
+            (
+                "hero material surface lookdev",
+                "hair groom",
+                "fur coat",
+                "cloth drape",
+                "glass shell",
+                "liquid volume",
+            )
+        ):
+            with self.subTest(role=role):
+                material_manifest = make_manifest(
+                    make_spec(
+                        "Material Module",
+                        None,
+                        complexity="simple",
+                        intended_use="static-render",
+                        quality_profile="balanced",
+                    )
+                )
+                fill_global_contract(material_manifest)
+                material_path = self.root / f"material-object-{index}.json"
+                write_spec_atomic(material_path, material_manifest)
+                module_path = add_module(
+                    material_path,
+                    "hero",
+                    role,
+                    95,
+                    [],
+                    "visual",
+                    "foundation",
+                )
+                material_module = json.loads(module_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    material_module["qualityGate"]["previewPass"],
+                    "lookdev",
+                )
+                self.assertIn(
+                    "materialSurface",
+                    material_module["qualityGate"]["requiredLayerScores"],
+                )
+                material_module["qualityGate"].pop("previewPass")
+                self.assertEqual(module_preview_pass(material_module), "lookdev")
+
+    def test_module_blind_scout_defers_out_of_phase_observations(self) -> None:
+        evidence = {
+            "comparisonSha256": "a" * 64,
+            "views": [{"viewId": "reference"}],
+        }
+        scout = {
+            "artifactType": "threejs-sculpt-blind-scout",
+            "version": 2,
+            "phaseId": "form",
+            "decision": "approve",
+            "comparisonSha256": evidence["comparisonSha256"],
+            "reviewedAt": "2026-07-15T00:00:00+00:00",
+            "reviewer": {
+                "role": "blind-visual-scout",
+                "contextId": "module-phase-scout",
+                "model": "test-blind-scout",
+            },
+            "observations": [
+                {
+                    "visualRegion": "painted shell",
+                    "category": "material",
+                    "phaseScope": "deferred",
+                    "direction": "surface appears too glossy",
+                    "severity": "major",
+                    "viewIds": ["reference"],
+                }
+            ],
+        }
+        self.assertEqual(
+            blind_scout_contract_failures(
+                scout,
+                evidence,
+                require_approve=True,
+                expected_phase="form",
+            ),
+            [],
+        )
+        wrong_scope = copy.deepcopy(scout)
+        wrong_scope["observations"][0]["phaseScope"] = "current"
+        self.assertTrue(
+            any(
+                "phaseScope must be 'deferred'" in failure
+                for failure in blind_scout_contract_failures(
+                    wrong_scope,
+                    evidence,
+                    expected_phase="form",
+                )
+            )
+        )
+        prior_phase_regression = copy.deepcopy(scout)
+        prior_phase_regression["decision"] = "reject"
+        prior_phase_regression["observations"] = [
+            {
+                "visualRegion": "camera crop",
+                "category": "framing",
+                "phaseScope": "protected",
+                "direction": "accepted framing is now clipped",
+                "severity": "major",
+                "viewIds": ["reference"],
+            }
+        ]
+        self.assertEqual(
+            blind_scout_contract_failures(
+                prior_phase_regression,
+                evidence,
+                expected_phase="form",
+            ),
+            [],
+        )
+
+    def test_scored_verdict_requires_non_empty_layer_scores(self) -> None:
+        self.add_visual_foundation()
+        self.make_implementation()
+        _, evidence = self.make_evidence("empty-layer-score-contract")
+        verdict_path = self.make_verdict("empty-layer-score-contract", evidence)
+        verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+        verdict["layerScores"] = {}
+        failures = review_contract_failures(verdict, evidence)
+        self.assertTrue(
+            any("requires non-empty layerScores" in failure for failure in failures),
+            failures,
+        )
+
+    def test_impact_assessment_bounds_refinement_before_editing(self) -> None:
+        correction = {
+            "targetType": "component",
+            "target": "root",
+            "parameterPath": "implementation.body.scale",
+        }
+        verdict = {
+            "action": "refine-code",
+            "corrections": [correction],
+        }
+        self.assertEqual(
+            impact_assessment_failures(verdict),
+            ["impactAssessment is required before refinement or strategy-reset"],
+        )
+
+        verdict["impactAssessment"] = {
+            "targetIds": ["root"],
+            "allowedPaths": ["implementation.body.scale"],
+            "protectedComponentIds": ["tail"],
+            "expectedEffect": "Adjust only the body scale.",
+            "possibleSideEffects": ["Body clearance may tighten."],
+            "structuralInvariants": [
+                "Tail geometry and the component hierarchy remain unchanged."
+            ],
+            "risk": "low",
+            "rollbackCheckpoint": "Restore the active phase champion.",
+            "strategyChange": False,
+            "verdict": "safe-to-apply",
+        }
+        catalog = {
+            "component": {"root": {}, "tail": {}},
+            "material": {},
+        }
+        self.assertEqual(impact_assessment_failures(verdict, catalog), [])
+
+        unsafe = copy.deepcopy(verdict)
+        unsafe["impactAssessment"]["allowedPaths"].append(
+            "implementation.tail.position"
+        )
+        unsafe["impactAssessment"]["protectedComponentIds"] = ["root"]
+        failures = impact_assessment_failures(unsafe, catalog)
+        self.assertTrue(any("exactly match" in item for item in failures), failures)
+        self.assertTrue(any("protect and modify" in item for item in failures), failures)
+
+        strategy_reset = {
+            "action": "strategy-reset",
+            "corrections": [],
+            "impactAssessment": {
+                **copy.deepcopy(verdict["impactAssessment"]),
+                "allowedPaths": ["representation.strategy"],
+                "protectedComponentIds": ["tail"],
+                "strategyChange": False,
+            },
+        }
+        self.assertTrue(
+            any(
+                "strategyChange must be true" in item
+                for item in impact_assessment_failures(strategy_reset, catalog)
+            )
+        )
+        strategy_reset["impactAssessment"]["strategyChange"] = True
+        self.assertEqual(
+            impact_assessment_failures(strategy_reset, catalog),
+            [],
+        )
+
+    def test_visual_sanity_is_explicit_and_vetoes_obvious_failure(self) -> None:
+        self.add_visual_foundation()
+        self.make_implementation()
+        _, evidence = self.make_evidence("visual-sanity-contract")
+        verdict_path = self.make_verdict("visual-sanity-contract", evidence)
+        verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+        required = [
+            "assemblyCorrectness",
+            "proportionBalance",
+            "shapeSilhouette",
+            "signatureDetail",
+        ]
+        missing = copy.deepcopy(verdict)
+        missing.pop("sanityChecks")
+        self.assertTrue(
+            any(
+                "requires sanityChecks" in item
+                for item in review_contract_failures(
+                    missing,
+                    evidence,
+                    required_sanity_categories=required,
+                )
+            )
+        )
+        failed = copy.deepcopy(verdict)
+        failed["sanityChecks"]["assemblyCorrectness"]["status"] = "fail"
+        failures = review_contract_failures(
+            failed,
+            evidence,
+            required_sanity_categories=required,
+        )
+        self.assertTrue(any("fail requires an open issue" in item for item in failures))
+        self.assertTrue(any("continue is vetoed" in item for item in failures))
 
     def test_imagegen_view_hypotheses_are_cached_and_source_bound(self) -> None:
         source = self.root / "source.png"
@@ -511,7 +970,21 @@ class ModularWorkflowTests(unittest.TestCase):
         manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         manifest["sourceImage"] = str(source)
         manifest["globalSpec"]["sourceImage"] = str(source)
+        manifest["globalSpec"]["referencePreparation"].update(
+            {
+                "originalImage": str(source),
+                "subjectBackgroundSeparation": "clear",
+                "preparationTrigger": "not-required",
+                "method": "not-required",
+                "imagegenMode": "not-applicable",
+                "outputImage": str(source),
+                "outputBackground": "original",
+            }
+        )
         manifest["globalSpec"]["viewHypothesisPolicy"]["enabled"] = True
+        manifest["globalSpec"]["viewHypothesisPolicy"][
+            "activationMode"
+        ] = "conditional-form-only"
         write_spec_atomic(self.manifest_path, manifest)
 
         self.add_visual_foundation()
@@ -593,6 +1066,142 @@ class ModularWorkflowTests(unittest.TestCase):
             any("stale" in item for item in hypothesis_manifest_failures(None, resolved))
         )
 
+    def test_imagegen_2x2_turnaround_keeps_root_and_tile_provenance(self) -> None:
+        source = self.root / "source-2x2.png"
+        turnaround = self.root / "turnaround-2x2.png"
+        write_png_rgb(source, 16, 16, [(40, 90, 180)] * (16 * 16))
+        colors = {
+            (0, 0): (210, 70, 60),
+            (1, 0): (60, 190, 90),
+            (0, 1): (65, 100, 220),
+            (1, 1): (220, 185, 65),
+        }
+        turnaround_pixels = [
+            colors[(x // 8, y // 8)]
+            for y in range(16)
+            for x in range(16)
+        ]
+        write_png_rgb(turnaround, 16, 16, turnaround_pixels)
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest["sourceImage"] = str(source)
+        manifest["globalSpec"]["sourceImage"] = str(source)
+        manifest["globalSpec"]["viewHypothesisPolicy"]["enabled"] = True
+        write_spec_atomic(self.manifest_path, manifest)
+
+        first = register_views(self.manifest_path, [], sheet_path=turnaround)
+        second = register_views(self.manifest_path, [], sheet_path=turnaround)
+        self.assertFalse(first["cacheHit"])
+        self.assertTrue(second["cacheHit"])
+        self.assertEqual(first["turnaroundSha256"], file_sha256(turnaround))
+        cached = json.loads(Path(first["manifest"]).read_text(encoding="utf-8"))
+        self.assertEqual(cached["version"], 2)
+        self.assertEqual(cached["layoutId"], "identity-turnaround-2x2-v1")
+        self.assertEqual(len(cached["views"]), 4)
+        self.assertEqual(
+            {view["viewId"] for view in cached["views"]},
+            {"three-quarter", "side", "back", "front"},
+        )
+        self.assertTrue(
+            all(
+                view["dimensions"] == {"width": 8, "height": 8}
+                and view["sourceSheetSha256"] == cached["turnaroundSha256"]
+                and file_sha256(Path(view["image"])) == view["sha256"]
+                for view in cached["views"]
+            )
+        )
+        expected_tile_colors = {
+            "three-quarter": colors[(0, 0)],
+            "side": colors[(1, 0)],
+            "back": colors[(0, 1)],
+            "front": colors[(1, 1)],
+        }
+        for view in cached["views"]:
+            _, _, tile_pixels = read_png(Path(view["image"]))
+            self.assertEqual(tile_pixels[0][:3], expected_tile_colors[view["viewId"]])
+        self.assertTrue(hypothesis_status(self.manifest_path)["ready"])
+
+        side = next(view for view in cached["views"] if view["viewId"] == "side")
+        resolved = load_document(self.manifest_path).resolved
+        evidence = {
+            "views": [
+                {
+                    "viewId": "side",
+                    "referenceSha256": side["sha256"],
+                    "referenceProvenance": {
+                        "origin": "synthetic-hypothesis",
+                        "allowedUse": "planning-veto",
+                    },
+                }
+            ]
+        }
+        self.assertEqual(
+            hypothesis_evidence_failures(
+                self.manifest_path,
+                resolved,
+                evidence,
+                ["side"],
+            ),
+            [],
+        )
+        side_path = Path(side["image"])
+        original_tile = side_path.read_bytes()
+        write_png_rgb(side_path, 8, 8, [(1, 2, 3)] * 64)
+        tile_failures = hypothesis_status(self.manifest_path)["failures"]
+        self.assertTrue(
+            any("side" in item and "changed" in item for item in tile_failures),
+            tile_failures,
+        )
+        side_path.write_bytes(original_tile)
+
+        write_png_rgb(turnaround, 16, 16, [(9, 8, 7)] * (16 * 16))
+        root_failures = hypothesis_status(self.manifest_path)["failures"]
+        self.assertTrue(
+            any("turnaround changed" in item for item in root_failures),
+            root_failures,
+        )
+
+    def test_imagegen_2x2_reregistration_rejects_rehashed_tampered_tile(self) -> None:
+        source = self.root / "source-cache-integrity.png"
+        turnaround = self.root / "turnaround-cache-integrity.png"
+        write_png_rgb(source, 16, 16, [(40, 90, 180)] * (16 * 16))
+        write_png_rgb(
+            turnaround,
+            16,
+            16,
+            [
+                ((x // 8) * 140 + 40, (y // 8) * 140 + 40, 80)
+                for y in range(16)
+                for x in range(16)
+            ],
+        )
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest["sourceImage"] = str(source)
+        manifest["globalSpec"]["sourceImage"] = str(source)
+        manifest["globalSpec"]["viewHypothesisPolicy"]["enabled"] = True
+        write_spec_atomic(self.manifest_path, manifest)
+
+        registered = register_views(self.manifest_path, [], sheet_path=turnaround)
+        cache_path = Path(registered["manifest"])
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        side = next(view for view in cached["views"] if view["viewId"] == "side")
+        side_path = Path(side["image"])
+        write_png_rgb(side_path, 8, 8, [(1, 2, 3)] * 64)
+        side["sha256"] = file_sha256(side_path)
+        write_spec_atomic(cache_path, cached)
+
+        # Even updating both recorded hashes cannot detach a tile from the
+        # immutable root crop that generated it.
+        document = load_document(self.manifest_path)
+        document.resolved["viewHypothesisPolicy"]["manifestSha256"] = file_sha256(
+            cache_path
+        )
+        save_document(document, self.manifest_path)
+        tampered_manifest_bytes = cache_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "pixels do not match its source-sheet crop"):
+            register_views(self.manifest_path, [], sheet_path=turnaround)
+        self.assertEqual(cache_path.read_bytes(), tampered_manifest_bytes)
+        self.assertFalse(hypothesis_status(self.manifest_path)["ready"])
+
     def test_modular_pass_requires_fresh_independent_verdict(self) -> None:
         self.add_foundation("core", 90)
         self.accept_visual("core", "core-before-pass-review")
@@ -648,8 +1257,40 @@ class ModularWorkflowTests(unittest.TestCase):
                 "model": "test-vision",
             },
             "comparisonSha256": evidence["comparisonSha256"],
+            "blindScout": {
+                "artifactType": "threejs-sculpt-blind-scout",
+                "version": 2,
+                "phaseId": "blockout",
+                "decision": "approve",
+                "comparisonSha256": evidence["comparisonSha256"],
+                "reviewedAt": "2026-07-15T00:00:00+00:00",
+                "reviewer": {
+                    "role": "blind-visual-scout",
+                    "contextId": "scout-assembled-blockout-review",
+                    "model": "test-blind-scout",
+                },
+                "observations": [],
+            },
             "overallScore": 0.95,
-            "layerScores": {"silhouette": 0.95},
+            "layerScores": {
+                "silhouette": 0.95,
+                "assemblyCorrectness": 0.95,
+                "proportionBalance": 0.95,
+                "shapeSilhouette": 0.95,
+            },
+            "sanityChecks": {
+                category: {
+                    "status": "pass",
+                    "summary": f"The assembled {category} check passed.",
+                    "componentIds": ["root"],
+                    "viewIds": ["primary"],
+                }
+                for category in (
+                    "assemblyCorrectness",
+                    "proportionBalance",
+                    "shapeSilhouette",
+                )
+            },
             "featureReviews": [
                 {"id": "overall-silhouette", "score": 0.95, "visible": True}
             ],
@@ -720,6 +1361,21 @@ class ModularWorkflowTests(unittest.TestCase):
                 ]
             )
 
+        verdict_payload["reviewer"]["contextId"] = "reviewer-core-before-pass-review"
+        write_spec_atomic(verdict_path, verdict_payload)
+        with self.assertRaisesRegex(
+            ValueError,
+            "fresh independent reviewer contextId across all modules and assembled phases",
+        ):
+            append_review(
+                [
+                    str(self.manifest_path),
+                    "--pass-id", "blockout",
+                    "--evidence-set-json", str(evidence_path),
+                    "--verdict-json", str(verdict_path),
+                ]
+            )
+
         verdict_payload["reviewer"]["contextId"] = "reviewer-task"
         write_spec_atomic(verdict_path, verdict_payload)
         with redirect_stdout(io.StringIO()):
@@ -738,9 +1394,23 @@ class ModularWorkflowTests(unittest.TestCase):
         entry = load_document(self.manifest_path).resolved["reviewHistory"][-1]
         self.assertEqual(entry["reviewerEvidence"]["builderContextId"], "builder-task")
         self.assertEqual(entry["reviewerEvidence"]["reviewerContextId"], "reviewer-task")
-        policy_changed = copy.deepcopy(load_document(self.manifest_path).resolved)
+        approved_document = load_document(self.manifest_path)
+        record_user_phase_decision(
+            approved_document.resolved,
+            "blockout",
+            "approved",
+            user_statement="The user explicitly approved the system-passed blockout.",
+            recorded_at="2026-01-01T00:00:00+00:00",
+        )
+        sync_pipeline(approved_document.resolved)
+        save_document(approved_document, self.manifest_path)
+        policy_changed = copy.deepcopy(approved_document.resolved)
         policy_changed["viewHypothesisPolicy"]["promptVersion"] = "identity-turnaround-v2"
-        self.assertEqual(pipeline_status(policy_changed)["currentPass"], "blockout")
+        self.assertEqual(
+            review_spec_hash(policy_changed, "blockout"),
+            entry["specHash"],
+        )
+        self.assertEqual(pipeline_status(policy_changed)["currentPass"], "form")
         verdict_payload["summary"] = "The verdict file was changed after it had already been accepted."
         write_spec_atomic(verdict_path, verdict_payload)
         self.assertEqual(
@@ -748,9 +1418,799 @@ class ModularWorkflowTests(unittest.TestCase):
             "blockout",
         )
 
-    def test_init_defaults_to_modular_and_keeps_monolithic_compatibility(self) -> None:
+        self.add_visual_foundation("addon", 80)
+        addon_implementation = self.make_implementation("addon")
+        addon_evidence_path, addon_evidence = self.make_evidence(
+            "addon-after-pass-review",
+            module_id="addon",
+        )
+        addon_verdict_path = self.make_verdict(
+            "addon-after-pass-review",
+            addon_evidence,
+        )
+        addon_verdict = json.loads(addon_verdict_path.read_text(encoding="utf-8"))
+        addon_verdict["reviewer"]["contextId"] = "reviewer-task"
+        write_spec_atomic(addon_verdict_path, addon_verdict)
+        addon_preflight = preflight_module_review(
+            self.manifest_path,
+            "addon",
+            addon_evidence_path,
+            [addon_implementation],
+        )
+        self.assertTrue(addon_preflight["ok"], addon_preflight)
+        with self.assertRaisesRegex(
+            ValueError,
+            "fresh independent reviewer contextId across all modules and assembled phases",
+        ):
+            review_module(
+                self.manifest_path,
+                "addon",
+                addon_verdict_path,
+                addon_evidence_path,
+                [addon_implementation],
+            )
+
+    def test_assembled_pass_restores_champion_after_regressed_refinement(self) -> None:
+        self.add_foundation("core", 90)
+        self.accept_visual("core", "pass-checkpoint-module")
+
+        def pass_evidence(stem: str, variant: int) -> tuple[Path, dict]:
+            reference = self.root / f"{stem}-reference.png"
+            render = self.root / f"{stem}-render.png"
+            comparison = self.root / f"{stem}-comparison.png"
+            reference_pixels = [(5, 8, 12)] * (32 * 32)
+            render_pixels = [(5, 8, 12)] * (32 * 32)
+            for y in range(6, 27):
+                for x in range(7, 25):
+                    reference_pixels[y * 32 + x] = (70, 120, 190)
+                    render_pixels[y * 32 + x] = (70 + variant, 120, 190)
+            write_png_rgb(reference, 32, 32, reference_pixels)
+            write_png_rgb(render, 32, 32, render_pixels)
+            resolved = load_document(self.manifest_path).resolved
+            render_provenance = {
+                "artifactType": "threejs-sculpt-render-provenance",
+                "version": 3,
+                "renderReceipt": {
+                    "artifactType": "threejs-sculpt-render-receipt",
+                    "version": 1,
+                    "contractSha256": render_pipeline_contract_sha256(resolved),
+                    "backend": "webgl",
+                    "requestedMode": "auto",
+                    "resolvedMode": "smaa",
+                    "antialiasVerified": True,
+                    "frameCount": 1,
+                    "disposed": False,
+                    "passChain": ["RenderPass", "SMAAPass", "OutputPass"],
+                    "outputTransformOwner": "OutputPass",
+                    "logicalWidth": 640,
+                    "logicalHeight": 480,
+                    "pixelRatio": 1,
+                    "threeRevision": "178",
+                },
+            }
+            evidence = create_sheet_pairs(
+                [
+                    {
+                        "viewId": "primary",
+                        "referenceImage": reference,
+                        "renderScreenshot": render,
+                    },
+                    {
+                        "viewId": "side",
+                        "referenceImage": reference,
+                        "renderScreenshot": render,
+                        "referenceProvenance": {
+                            "origin": "synthetic-hypothesis",
+                            "allowedUse": "planning-veto",
+                            "source": "test-turnaround",
+                        },
+                    },
+                ],
+                comparison,
+                128,
+                128,
+                6,
+                render_provenance=render_provenance,
+            )
+            evidence_path = self.root / f"{stem}-evidence.json"
+            write_spec_atomic(evidence_path, evidence)
+            return evidence_path, evidence
+
+        def pass_verdict(
+            stem: str,
+            evidence: dict,
+            score_value: float,
+            *,
+            resolved: bool,
+            action: str = "refine-code",
+        ) -> Path:
+            current = load_document(self.manifest_path).resolved
+            issue = {
+                "id": "assembled-silhouette",
+                "rootCauseKey": "assembled-silhouette",
+                "failureClass": "geometry",
+                "sanityCategory": "shapeSilhouette",
+                "severity": "major",
+                "status": "open",
+                "targetType": "component",
+                "target": "root",
+                "reason": "The assembled contour still needs one coherent correction.",
+                "observedMismatch": {
+                    "parameterPath": "implementation.createSculptModel.profile",
+                    "actual": "current-profile",
+                    "expected": "corrected-profile",
+                    "unit": "implementation-state",
+                    "tolerance": 0.0,
+                    "viewIds": ["primary"],
+                },
+                "evidenceCheck": "Compare the primary silhouette against the observed reference.",
+            }
+            verdict = {
+                "artifactType": "threejs-sculpt-pass-review",
+                "version": 1,
+                "reviewId": stem,
+                "passId": "blockout",
+                "specHash": review_spec_hash(current, "blockout"),
+                "action": action,
+                "builder": {"contextId": "pass-builder"},
+                "reviewer": {
+                    "contextId": f"reviewer-{stem}",
+                    "role": "independent-reviewer",
+                    "model": "test-vision",
+                },
+                "comparisonSha256": evidence["comparisonSha256"],
+                "blindScout": {
+                    "artifactType": "threejs-sculpt-blind-scout",
+                    "version": 2,
+                    "phaseId": "blockout",
+                    "decision": "approve",
+                    "comparisonSha256": evidence["comparisonSha256"],
+                    "reviewedAt": "2026-07-15T00:00:00+00:00",
+                    "reviewer": {
+                        "role": "blind-visual-scout",
+                        "contextId": f"scout-{stem}",
+                        "model": "test-blind-scout",
+                    },
+                    "observations": [],
+                },
+                "overallScore": score_value,
+                "layerScores": {
+                    "silhouette": score_value,
+                    "assemblyCorrectness": score_value,
+                    "proportionBalance": score_value,
+                    "shapeSilhouette": score_value,
+                },
+                "sanityChecks": {
+                    "assemblyCorrectness": {
+                        "status": "pass",
+                        "summary": "The assembled component placement is coherent.",
+                        "componentIds": ["root"],
+                        "viewIds": ["primary"],
+                    },
+                    "proportionBalance": {
+                        "status": "pass",
+                        "summary": "The assembled mass balance remains coherent.",
+                        "componentIds": ["root"],
+                        "viewIds": ["primary"],
+                    },
+                    "shapeSilhouette": {
+                        "status": "pass" if action == "continue" else "fail",
+                        "summary": (
+                            "The assembled silhouette has no obvious defect."
+                            if action == "continue"
+                            else "The assembled silhouette still needs correction."
+                        ),
+                        "componentIds": ["root"],
+                        "viewIds": ["primary"],
+                    },
+                },
+                "featureReviews": [
+                    {
+                        "id": "overall-silhouette",
+                        "score": score_value,
+                        "visible": True,
+                    }
+                ],
+                "issues": [] if action == "continue" else [issue],
+                "corrections": [] if action == "continue" else [
+                    {
+                        "issueId": "assembled-silhouette",
+                        "scope": "code",
+                        "targetType": "component",
+                        "target": "root",
+                        "parameterPath": "implementation.createSculptModel.profile",
+                        "operation": "replace",
+                        "beforeValue": "current-profile",
+                        "value": "corrected-profile",
+                        "expectedValue": "corrected-profile",
+                        "unit": "implementation-state",
+                        "change": "Correct the executable assembled contour.",
+                        "expectedDelta": {
+                            "metric": "silhouette-score",
+                            "from": score_value,
+                            "to": min(1.0, score_value + 0.02),
+                            "tolerance": 0.01,
+                            "unit": "score",
+                            "viewIds": ["primary"],
+                        },
+                    }
+                ],
+                "resolvedIssueIds": ["assembled-silhouette"] if resolved else [],
+                "resolvedRootCauseKeys": ["assembled-silhouette"] if resolved else [],
+                "summary": "Independent reviewer found one assembled contour correction to apply.",
+            }
+            if action in REFINEMENT_ACTIONS:
+                verdict["impactAssessment"] = {
+                    "targetIds": ["root"],
+                    "allowedPaths": ["implementation.createSculptModel.profile"],
+                    "protectedComponentIds": [],
+                    "expectedEffect": "Correct only the assembled contour profile.",
+                    "possibleSideEffects": ["The primary silhouette may change."],
+                    "structuralInvariants": [
+                        "Component hierarchy and attachment relationships remain unchanged."
+                    ],
+                    "risk": "medium",
+                    "rollbackCheckpoint": "Restore the active assembled champion.",
+                    "strategyChange": False,
+                    "verdict": "safe-to-apply",
+                }
+            elif action == "strategy-reset":
+                verdict["impactAssessment"] = {
+                    "targetIds": ["root"],
+                    "allowedPaths": ["representation.strategy"],
+                    "protectedComponentIds": [],
+                    "expectedEffect": "Replace only the failed contour representation.",
+                    "possibleSideEffects": ["The primary silhouette may change materially."],
+                    "structuralInvariants": [
+                        "Component inventory and attachment semantics remain unchanged."
+                    ],
+                    "risk": "high",
+                    "rollbackCheckpoint": "Restore the active assembled champion.",
+                    "strategyChange": True,
+                    "verdict": "safe-to-apply",
+                }
+            path = self.root / f"{stem}-verdict.json"
+            write_spec_atomic(path, verdict)
+            return path
+
+        first_path, first_evidence = pass_evidence("pass-champion", 2)
+        first_verdict = pass_verdict(
+            "pass-champion",
+            first_evidence,
+            0.80,
+            resolved=False,
+        )
+        for arguments in (
+            [
+                str(self.manifest_path),
+                "--pass-id", "blockout",
+                "--evidence-set-json", str(first_path),
+                "--preflight-only",
+            ],
+            [
+                str(self.manifest_path),
+                "--pass-id", "blockout",
+                "--evidence-set-json", str(first_path),
+                "--verdict-json", str(first_verdict),
+                "--in-place",
+            ],
+        ):
+            captured = io.StringIO()
+            with redirect_stdout(captured):
+                result = append_review(arguments)
+            self.assertEqual(result, 0, captured.getvalue())
+            command_payload = json.loads(captured.getvalue())
+            self.assertTrue(command_payload["userProgress"]["reportRequired"])
+            self.assertTrue(command_payload["userPresentation"]["displayRequired"])
+            if "--preflight-only" not in arguments:
+                self.assertEqual(
+                    command_payload["userPresentation"]["artifactState"],
+                    (
+                        "accepted-champion"
+                        if command_payload["accepted"]
+                        else "candidate-champion"
+                    ),
+                )
+
+        champion_entry = load_document(self.manifest_path).resolved["reviewHistory"][-1]
+        self.assertTrue(champion_entry.get("championCheckpointId"))
+        self.assertTrue(champion_entry.get("championCheckpointManifest"))
+        core_implementation = self.root / "src" / "core.ts"
+        baseline_implementation = core_implementation.read_text(encoding="utf-8")
+        core_build_path = self.root / ".sculpt-preview" / "core.build.json"
+        core_build = json.loads(core_build_path.read_text(encoding="utf-8"))
+        generated_output = Path(core_build["generatedOutput"])
+        baseline_generated = generated_output.read_text(encoding="utf-8")
+        champion_manifest = json.loads(
+            Path(champion_entry["championCheckpointManifest"]).read_text(encoding="utf-8")
+        )
+        captured_paths = {record["path"] for record in champion_manifest["files"]}
+        self.assertIn("src/core.ts", captured_paths)
+        self.assertIn(str(generated_output.relative_to(self.root)), captured_paths)
+
+        for index, score_value in enumerate((0.79, 0.78, 0.77), start=1):
+            core_implementation.write_text(
+                "export const SCULPT_MODULE_ID = 'core';\n"
+                f"export const coreRevision = {index + 1};\n",
+                encoding="utf-8",
+            )
+            module_evidence_path, module_evidence = self.make_evidence(
+                f"pass-module-candidate-{index}",
+                module_id="core",
+                render_variant=index,
+            )
+            module_verdict = self.make_verdict(
+                f"pass-module-candidate-{index}",
+                module_evidence,
+                overall_score=0.96,
+                layer_score=0.96,
+            )
+            module_candidate = self.review_after_preflight(
+                self.manifest_path,
+                "core",
+                module_verdict,
+                module_evidence_path,
+                [core_implementation],
+            )
+            self.assertTrue(module_candidate["reviewAccepted"], module_candidate)
+
+            stem = f"pass-challenger-{index}"
+            challenger_path, challenger_evidence = pass_evidence(stem, 10 + index * 4)
+            challenger_verdict = pass_verdict(
+                stem,
+                challenger_evidence,
+                score_value,
+                resolved=False,
+                action="continue",
+            )
+            for arguments in (
+                [
+                    str(self.manifest_path),
+                    "--pass-id", "blockout",
+                    "--evidence-set-json", str(challenger_path),
+                    "--preflight-only",
+                ],
+                [
+                    str(self.manifest_path),
+                    "--pass-id", "blockout",
+                    "--evidence-set-json", str(challenger_path),
+                    "--verdict-json", str(challenger_verdict),
+                    "--in-place",
+                ],
+            ):
+                captured = io.StringIO()
+                with redirect_stdout(captured):
+                    result = append_review(arguments)
+                self.assertEqual(result, 0, captured.getvalue())
+                command_payload = json.loads(captured.getvalue())
+                self.assertTrue(command_payload["userProgress"]["nextAction"]["required"])
+                if "--preflight-only" not in arguments:
+                    self.assertEqual(
+                        command_payload["userPresentation"]["artifactState"],
+                        "rejected-challenger",
+                        command_payload,
+                    )
+            self.assertEqual(
+                core_implementation.read_text(encoding="utf-8"),
+                baseline_implementation,
+            )
+            self.assertEqual(
+                generated_output.read_text(encoding="utf-8"),
+                baseline_generated,
+            )
+            restored_module_status = module_status(self.manifest_path)
+            self.assertTrue(restored_module_status["assemblyReady"], restored_module_status)
+
+        history = load_document(self.manifest_path).resolved["reviewHistory"]
+        pass_history = [entry for entry in history if entry.get("passId") == "blockout"]
+        self.assertEqual(len(pass_history), 4)
+        self.assertEqual(
+            [entry["reviewId"] for entry in pass_history],
+            [
+                "pass-champion",
+                "pass-challenger-1",
+                "pass-challenger-2",
+                "pass-challenger-3",
+            ],
+        )
+        latest = pass_history[-1]
+        self.assertEqual(latest["candidateDisposition"], "rejected-regression")
+        self.assertEqual(latest["aiVisionScore"], 0.80)
+        self.assertEqual(latest["candidateAiVisionScore"], 0.77)
+        self.assertTrue(latest["restoredCheckpoint"]["restored"])
+        self.assertNotEqual(
+            latest["candidateCheckpointId"],
+            latest["championCheckpointId"],
+        )
+        status = pipeline_status(load_document(self.manifest_path).resolved)
+        self.assertEqual(status["state"], "needs-strategy-change")
+        self.assertTrue(status["refinementBudget"]["exhausted"])
+
+        exhausted_path, _ = pass_evidence("pass-exhausted", 28)
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            result = append_review(
+                [
+                    str(self.manifest_path),
+                    "--pass-id", "blockout",
+                    "--evidence-set-json", str(exhausted_path),
+                    "--preflight-only",
+                ]
+            )
+        self.assertEqual(result, 1, captured.getvalue())
+        self.assertIn("refinement budget is exhausted", captured.getvalue())
+
+        reset_verdict_path = pass_verdict(
+            "pass-strategy-reset",
+            challenger_evidence,
+            0.80,
+            resolved=False,
+        )
+        reset_verdict = json.loads(reset_verdict_path.read_text(encoding="utf-8"))
+        reset_verdict.update(
+            {
+                "action": "strategy-reset",
+                "strategyId": "assembled-profile-v2",
+                "strategyChange": "Replace the failed assembled contour representation with one continuous profile.",
+                "rootCauseKeys": ["assembled-silhouette"],
+                "falsifyingCheck": "Reject the new profile if the observed primary silhouette still regresses.",
+            }
+        )
+        write_spec_atomic(reset_verdict_path, reset_verdict)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                append_review(
+                    [
+                        str(self.manifest_path),
+                        "--pass-id", "blockout",
+                        "--evidence-set-json", str(challenger_path),
+                        "--verdict-json", str(reset_verdict_path),
+                        "--in-place",
+                    ]
+                ),
+                0,
+            )
+        reset_status = pipeline_status(load_document(self.manifest_path).resolved)
+        self.assertEqual(reset_status["latestAction"], "strategy-reset")
+        self.assertEqual(reset_status["refinementBudget"]["usedAttempts"], 0)
+
+    def test_assembled_preflight_regression_restores_champion_before_reviewer(self) -> None:
+        self.add_foundation("core", 90)
+        self.accept_visual("core", "assembled-preflight-module")
+
+        def pass_evidence(stem: str, shift: int = 0) -> tuple[Path, dict]:
+            size = 64
+            background = (5, 8, 12)
+            reference_pixels = [background] * (size * size)
+            render_pixels = [background] * (size * size)
+            for y in range(8, 56):
+                for x in range(12, 52):
+                    reference_pixels[y * size + x] = (70, 120, 190)
+            for y in range(8, 56):
+                for x in range(12 + shift, min(size, 52 + shift)):
+                    render_pixels[y * size + x] = (72, 120, 190)
+            reference = self.root / f"{stem}-reference.png"
+            render = self.root / f"{stem}-render.png"
+            comparison = self.root / f"{stem}-comparison.png"
+            write_png_rgb(reference, size, size, reference_pixels)
+            write_png_rgb(render, size, size, render_pixels)
+            evidence = create_sheet_pairs(
+                [
+                    {
+                        "viewId": "primary",
+                        "referenceImage": reference,
+                        "renderScreenshot": render,
+                    },
+                    {
+                        "viewId": "side",
+                        "referenceImage": reference,
+                        "renderScreenshot": render,
+                        "referenceProvenance": {
+                            "origin": "synthetic-hypothesis",
+                            "allowedUse": "planning-veto",
+                            "source": "test-turnaround",
+                        },
+                    },
+                ],
+                comparison,
+                128,
+                128,
+                6,
+            )
+            evidence_path = self.root / f"{stem}-evidence.json"
+            write_spec_atomic(evidence_path, evidence)
+            return evidence_path, evidence
+
+        evidence_path, evidence = pass_evidence("assembled-preflight-seed")
+        current = load_document(self.manifest_path).resolved
+        issue = {
+            "id": "assembled-profile",
+            "rootCauseKey": "assembled-profile",
+            "failureClass": "geometry",
+            "sanityCategory": "shapeSilhouette",
+            "severity": "major",
+            "status": "open",
+            "targetType": "component",
+            "target": "root",
+            "reason": "The assembled profile needs one coherent correction.",
+            "observedMismatch": {
+                "parameterPath": "implementation.createSculptModel.profile",
+                "actual": "current-profile",
+                "expected": "corrected-profile",
+                "unit": "implementation-state",
+                "tolerance": 0.0,
+                "viewIds": ["primary"],
+            },
+            "evidenceCheck": "Compare the primary silhouette against the observed reference.",
+        }
+        verdict = {
+            "artifactType": "threejs-sculpt-pass-review",
+            "version": 1,
+            "reviewId": "assembled-preflight-seed",
+            "passId": "blockout",
+            "specHash": review_spec_hash(current, "blockout"),
+            "action": "refine-code",
+            "builder": {"contextId": "assembled-preflight-builder"},
+            "reviewer": {
+                "contextId": "assembled-preflight-reviewer",
+                "role": "independent-reviewer",
+                "model": "test-vision",
+            },
+            "comparisonSha256": evidence["comparisonSha256"],
+            "blindScout": {
+                "artifactType": "threejs-sculpt-blind-scout",
+                "version": 2,
+                "phaseId": "blockout",
+                "decision": "approve",
+                "comparisonSha256": evidence["comparisonSha256"],
+                "reviewedAt": "2026-07-15T00:00:00+00:00",
+                "reviewer": {
+                    "role": "blind-visual-scout",
+                    "contextId": "scout-assembled-preflight-seed",
+                    "model": "test-blind-scout",
+                },
+                "observations": [],
+            },
+            "overallScore": 0.80,
+            "layerScores": {
+                "silhouette": 0.80,
+                "assemblyCorrectness": 0.80,
+                "proportionBalance": 0.80,
+                "shapeSilhouette": 0.80,
+            },
+            "sanityChecks": {
+                category: {
+                    "status": "fail" if category == "shapeSilhouette" else "pass",
+                    "summary": "The reviewer evaluated the assembled visual contract.",
+                    "componentIds": ["root"],
+                    "viewIds": ["primary"],
+                }
+                for category in (
+                    "assemblyCorrectness",
+                    "proportionBalance",
+                    "shapeSilhouette",
+                )
+            },
+            "featureReviews": [
+                {
+                    "id": "overall-silhouette",
+                    "score": 0.80,
+                    "visible": True,
+                    "viewIds": ["primary"],
+                }
+            ],
+            "issues": [issue],
+            "corrections": [
+                {
+                    "issueId": "assembled-profile",
+                    "scope": "code",
+                    "targetType": "component",
+                    "target": "root",
+                    "parameterPath": "implementation.createSculptModel.profile",
+                    "operation": "replace",
+                    "beforeValue": "current-profile",
+                    "value": "corrected-profile",
+                    "expectedValue": "corrected-profile",
+                    "unit": "implementation-state",
+                    "change": "Replace the assembled contour implementation.",
+                    "expectedDelta": {
+                        "metric": "silhouette-score",
+                        "from": 0.80,
+                        "to": 0.84,
+                        "tolerance": 0.01,
+                        "unit": "score",
+                        "viewIds": ["primary"],
+                    },
+                }
+            ],
+            "resolvedIssueIds": [],
+            "resolvedRootCauseKeys": [],
+            "impactAssessment": {
+                "targetIds": ["root"],
+                "allowedPaths": ["implementation.createSculptModel.profile"],
+                "protectedComponentIds": [],
+                "expectedEffect": "Replace only the assembled contour profile.",
+                "possibleSideEffects": ["The primary silhouette may change."],
+                "structuralInvariants": [
+                    "Component hierarchy and attachment relationships remain unchanged."
+                ],
+                "risk": "medium",
+                "rollbackCheckpoint": "Restore the assembled preflight champion.",
+                "strategyChange": False,
+                "verdict": "safe-to-apply",
+            },
+            "summary": "Independent reviewer requested one assembled contour correction.",
+        }
+        verdict_path = self.root / "assembled-preflight-seed-verdict.json"
+        write_spec_atomic(verdict_path, verdict)
+        for arguments in (
+            [
+                str(self.manifest_path),
+                "--pass-id", "blockout",
+                "--evidence-set-json", str(evidence_path),
+                "--preflight-only",
+            ],
+            [
+                str(self.manifest_path),
+                "--pass-id", "blockout",
+                "--evidence-set-json", str(evidence_path),
+                "--verdict-json", str(verdict_path),
+                "--in-place",
+            ],
+        ):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(append_review(arguments), 0)
+
+        implementation = self.root / "src" / "core.ts"
+        champion_source = implementation.read_text(encoding="utf-8")
+        unapplied_path, _ = pass_evidence(
+            "assembled-preflight-unapplied-code",
+            shift=24,
+        )
+        unapplied_output = io.StringIO()
+        with redirect_stdout(unapplied_output):
+            unapplied_result = append_review(
+                [
+                    str(self.manifest_path),
+                    "--pass-id", "blockout",
+                    "--evidence-set-json", str(unapplied_path),
+                    "--preflight-only",
+                ]
+            )
+        self.assertEqual(unapplied_result, 1, unapplied_output.getvalue())
+        unapplied = json.loads(unapplied_output.getvalue())
+        self.assertEqual(unapplied["candidateDisposition"], "preflight-failed")
+        self.assertFalse(unapplied["restoredCheckpoint"])
+        self.assertEqual(
+            unapplied["refinementBudget"]["consecutiveNonImprovements"],
+            0,
+        )
+        self.assertTrue(
+            any(
+                "executable code change" in failure
+                for failure in unapplied["failures"]
+            ),
+            unapplied,
+        )
+        self.assertEqual(
+            len(load_document(self.manifest_path).resolved["reviewHistory"]),
+            1,
+        )
+
+        for index, shift in enumerate((24, 20, 16), start=1):
+            implementation.write_text(
+                "export const SCULPT_MODULE_ID = 'core';\n"
+                f"export const coreRevision = {index + 1};\n",
+                encoding="utf-8",
+            )
+            module_evidence_path, module_evidence = self.make_evidence(
+                f"assembled-preflight-module-{index}",
+                module_id="core",
+                render_variant=index,
+            )
+            module_verdict = self.make_verdict(
+                f"assembled-preflight-module-{index}",
+                module_evidence,
+                overall_score=0.96,
+                layer_score=0.96,
+            )
+            reaccepted = self.review_after_preflight(
+                self.manifest_path,
+                "core",
+                module_verdict,
+                module_evidence_path,
+                [implementation],
+            )
+            self.assertTrue(reaccepted["reviewAccepted"], reaccepted)
+
+            challenger_path, challenger_evidence = pass_evidence(
+                f"assembled-preflight-regression-{index}",
+                shift=shift,
+            )
+            captured = io.StringIO()
+            with redirect_stdout(captured):
+                result = append_review(
+                    [
+                        str(self.manifest_path),
+                        "--pass-id", "blockout",
+                        "--evidence-set-json", str(challenger_path),
+                        "--preflight-only",
+                    ]
+                )
+            self.assertEqual(result, 1, captured.getvalue())
+            payload = json.loads(captured.getvalue())
+            self.assertEqual(
+                payload["candidateDisposition"],
+                "rejected-preflight-regression",
+            )
+            self.assertTrue(payload["restoredCheckpoint"]["restored"])
+            self.assertEqual(
+                implementation.read_text(encoding="utf-8"),
+                champion_source,
+            )
+            self.assertEqual(
+                payload["refinementBudget"]["consecutiveNonImprovements"],
+                index,
+            )
+            self.assertEqual(
+                payload["userPresentation"]["artifactState"],
+                "rejected-challenger",
+            )
+            self.assertEqual(
+                payload["userPresentation"]["activeChampion"]["artifactState"],
+                "restored-champion",
+            )
+            champion_comparison = Path(
+                payload["userPresentation"]["activeChampion"][
+                    "sideBySideComparison"
+                ]
+            )
+            self.assertTrue(champion_comparison.is_file())
+            self.assertIn("review-renders", champion_comparison.parts)
+            latest = load_document(self.manifest_path).resolved["reviewHistory"][-1]
+            candidate_snapshot = latest["candidateRenderSnapshot"]
+            self.assertTrue(Path(candidate_snapshot["comparisonImage"]).is_file())
+            self.assertTrue(
+                all(
+                    Path(view["renderScreenshot"]).is_file()
+                    for view in candidate_snapshot["views"]
+                )
+            )
+            # A later fixed-path render may overwrite the raw artifacts, but it
+            # must not mutate the rejected challenger's immutable review snapshot.
+            snapshot_comparison_hash = file_sha256(
+                Path(candidate_snapshot["comparisonImage"])
+            )
+            pass_evidence(f"assembled-preflight-regression-{index}", shift=0)
+            self.assertEqual(
+                file_sha256(Path(candidate_snapshot["comparisonImage"])),
+                snapshot_comparison_hash,
+            )
+            self.assertNotEqual(
+                challenger_evidence["comparisonSha256"],
+                file_sha256(Path(challenger_evidence["comparisonImage"])),
+            )
+            restored_module_status = module_status(self.manifest_path)
+            self.assertTrue(restored_module_status["assemblyReady"], restored_module_status)
+        self.assertTrue(payload["strategyChangeRequired"])
+        history = load_document(self.manifest_path).resolved["reviewHistory"]
+        self.assertEqual(len(history), 4)
+        self.assertTrue(
+            all(
+                entry.get("attemptType") == "deterministic-preflight"
+                and entry.get("candidateDisposition")
+                == "rejected-preflight-regression"
+                for entry in history[1:]
+            )
+        )
+        self.assertEqual(
+            pipeline_status(load_document(self.manifest_path).resolved)["state"],
+            "needs-strategy-change",
+        )
+
+    def test_init_defaults_to_progressive_monolithic_and_keeps_modular_opt_in(self) -> None:
+        default_path = self.root / "init-progressive.json"
         modular_path = self.root / "init-modular.json"
-        legacy_path = self.root / "init-monolithic.json"
         base_args = [
             "Init Test",
             "--complexity",
@@ -761,13 +2221,18 @@ class ModularWorkflowTests(unittest.TestCase):
             "balanced",
         ]
         with redirect_stdout(io.StringIO()):
-            self.assertEqual(init_main([*base_args, "--out", str(modular_path)]), 0)
+            self.assertEqual(init_main([*base_args, "--out", str(default_path)]), 0)
             self.assertEqual(
-                init_main([*base_args, "--layout", "monolithic", "--out", str(legacy_path)]),
+                init_main([*base_args, "--layout", "modular", "--out", str(modular_path)]),
                 0,
             )
         self.assertEqual(json.loads(modular_path.read_text())["schemaVersion"], "4.0")
-        self.assertEqual(json.loads(legacy_path.read_text())["schemaVersion"], "3.1")
+        default_spec = json.loads(default_path.read_text())
+        self.assertEqual(default_spec["schemaVersion"], "3.2")
+        self.assertEqual(
+            default_spec["phaseExecutionContract"]["mode"],
+            "progressive-visual-loop",
+        )
         self.assertEqual(
             json.loads(modular_path.read_text())["globalSpec"]["surfaceTopologyPlan"]["status"],
             "unassessed",
@@ -871,6 +2336,7 @@ class ModularWorkflowTests(unittest.TestCase):
             [group["id"] for group in context["surfaceTopologyGroups"]],
             ["face-soft-tissue"],
         )
+
         self.assertTrue(
             any(reference.endswith("procedural-patterns.md") for reference in context["references"])
         )
@@ -894,6 +2360,33 @@ class ModularWorkflowTests(unittest.TestCase):
             ),
             checked,
         )
+
+    def test_new_visual_module_requires_detail_decomposition_first(self) -> None:
+        contract = self.manifest["globalSpec"].pop("detailDecompositionContract")
+        write_spec_atomic(self.manifest_path, self.manifest)
+        with self.assertRaisesRegex(ValueError, "requires globalSpec.detailDecompositionContract"):
+            add_module(
+                self.manifest_path,
+                "core",
+                "identity-critical core form",
+                90,
+                [],
+                "visual",
+                "foundation",
+            )
+        self.manifest["globalSpec"]["detailDecompositionContract"] = contract
+        self.manifest["globalSpec"]["detailDecompositionContract"]["status"] = "unassessed"
+        write_spec_atomic(self.manifest_path, self.manifest)
+        with self.assertRaisesRegex(ValueError, "detailDecompositionContract must be planned"):
+            add_module(
+                self.manifest_path,
+                "core",
+                "identity-critical core form",
+                90,
+                [],
+                "visual",
+                "foundation",
+            )
 
     def test_module_context_returns_only_hash_changed_files(self) -> None:
         module_path = self.add_visual_foundation()
@@ -1072,13 +2565,14 @@ class ModularWorkflowTests(unittest.TestCase):
             resolve_manifest(self.manifest_path, selected=["hero"]),
         )
         legacy_generated = self.root / "legacy.generated.ts"
-        with redirect_stdout(io.StringIO()):
-            self.assertEqual(
-                generate_main(
-                    [str(legacy_resolved), "--out", str(legacy_generated)]
-                ),
-                0,
-            )
+        legacy_generated.write_text(
+            generate(
+                json.loads(legacy_resolved.read_text(encoding="utf-8")),
+                "form",
+                _geometry_prevalidated=True,
+            ),
+            encoding="utf-8",
+        )
 
         fast_resolved = self.root / "fast-resolved.json"
         fast_generated = self.root / "fast.generated.ts"
@@ -1150,6 +2644,7 @@ class ModularWorkflowTests(unittest.TestCase):
                 "referenceImage": view["referenceImage"],
                 "renderScreenshot": view["renderScreenshot"],
                 "referenceProvenance": view.get("referenceProvenance"),
+                "evaluationScope": view.get("evaluationScope"),
             }
             for view in source_evidence["views"]
         ]
@@ -1478,6 +2973,7 @@ class ModularWorkflowTests(unittest.TestCase):
                 evidence_path,
                 [implementation],
             )
+
         render_path.write_bytes(original_render)
         with self.assertRaisesRegex(ValueError, "contextId must differ"):
             review_module(
@@ -1519,6 +3015,53 @@ class ModularWorkflowTests(unittest.TestCase):
         self.assertFalse(stale["assemblyReady"])
         self.assertEqual(stale["modules"][0]["state"], "stale")
 
+    def test_reviewer_context_is_fresh_across_different_modules(self) -> None:
+        self.add_visual_foundation("hero", 95)
+        hero_implementation = self.make_implementation("hero")
+        hero_evidence_path, hero_evidence = self.make_evidence(
+            "cross-module-hero",
+            module_id="hero",
+        )
+        hero_verdict = self.make_verdict("cross-module-hero", hero_evidence)
+        accepted = self.review_after_preflight(
+            self.manifest_path,
+            "hero",
+            hero_verdict,
+            hero_evidence_path,
+            [hero_implementation],
+        )
+        self.assertTrue(accepted["reviewAccepted"], accepted)
+
+        self.add_visual_foundation("addon", 90)
+        addon_implementation = self.make_implementation("addon")
+        addon_evidence_path, addon_evidence = self.make_evidence(
+            "cross-module-addon",
+            module_id="addon",
+        )
+        addon_verdict_path = self.make_verdict("cross-module-addon", addon_evidence)
+        addon_verdict = json.loads(addon_verdict_path.read_text(encoding="utf-8"))
+        addon_verdict["reviewer"]["contextId"] = "reviewer-cross-module-hero"
+        write_spec_atomic(addon_verdict_path, addon_verdict)
+        preflight = preflight_module_review(
+            self.manifest_path,
+            "addon",
+            addon_evidence_path,
+            [addon_implementation],
+        )
+        self.assertTrue(preflight["ok"], preflight)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "fresh independent reviewer contextId across all modules and assembled phases",
+        ):
+            review_module(
+                self.manifest_path,
+                "addon",
+                addon_verdict_path,
+                addon_evidence_path,
+                [addon_implementation],
+            )
+
     def test_compare_cli_writes_current_module_render_receipt(self) -> None:
         self.add_visual_foundation()
         self.make_implementation()
@@ -1530,6 +3073,7 @@ class ModularWorkflowTests(unittest.TestCase):
                 "referenceImage": view["referenceImage"],
                 "renderScreenshot": view["renderScreenshot"],
                 "referenceProvenance": view["referenceProvenance"],
+                "evaluationScope": view["evaluationScope"],
             }
             for view in seed["views"]
         ]
@@ -1727,8 +3271,9 @@ class ModularWorkflowTests(unittest.TestCase):
         )
         budget = refinement_budget(
             [
-                {"action": "refine-code"},
-                {"action": "refine-spec"},
+                {"action": "refine-code", "candidateDisposition": "rejected-no-improvement"},
+                {"action": "refine-spec", "candidateDisposition": "rejected-regression"},
+                {"action": "refine-code", "candidateDisposition": "rejected-no-improvement"},
                 {"action": "request-input"},
             ]
         )
@@ -1822,7 +3367,7 @@ class ModularWorkflowTests(unittest.TestCase):
         relabeled_correction = {
             **correction,
             "issueId": "silhouette-v2-new-name",
-            "target": "renamed-body-alias",
+            "target": "hero-body",
             "parameterPath": "renamed.profile.path",
         }
         relabeled_verdict = self.make_verdict(
@@ -1836,16 +3381,20 @@ class ModularWorkflowTests(unittest.TestCase):
             overall_score=0.82,
             layer_score=0.82,
         )
-        with self.assertRaisesRegex(ValueError, "new blocking root cause"):
-            review_module(
-                self.manifest_path,
-                "hero",
-                relabeled_verdict,
-                changed_path,
-                [implementation],
-            )
+        rejected = review_module(
+            self.manifest_path,
+            "hero",
+            relabeled_verdict,
+            changed_path,
+            [implementation],
+        )
+        self.assertEqual(rejected["candidateDisposition"], "rejected-invalid-lineage")
+        self.assertTrue(
+            any("new blocking root cause" in item for item in rejected["reviewFailures"]),
+            rejected,
+        )
 
-    def test_visual_module_rejects_blockout_and_diagnostic_mismatch(self) -> None:
+    def test_visual_module_rejects_blockout_but_not_pixel_overlap(self) -> None:
         module_path = self.add_visual_foundation()
         module = json.loads(module_path.read_text(encoding="utf-8"))
         module["payload"]["componentTree"][0]["fidelityTier"] = "blockout"
@@ -1862,46 +3411,88 @@ class ModularWorkflowTests(unittest.TestCase):
         module["payload"]["componentTree"][0]["fidelityTier"] = "form"
         write_spec_atomic(module_path, module)
         implementation = self.make_implementation()
-        evidence_path, evidence = self.make_evidence("low-iou", render_shift=24)
-        verdict = self.make_verdict("low-iou", evidence)
+        evidence_path, _ = self.make_evidence("shifted-render", render_shift=24)
         result = preflight_module_review(
             self.manifest_path,
             "hero",
             evidence_path,
             [implementation],
         )
-        self.assertFalse(result["ok"])
-        self.assertTrue(any("silhouetteIou" in item for item in result["failures"]))
-        with self.assertRaisesRegex(ValueError, "current passing preflight receipt"):
-            review_module(
-                self.manifest_path,
-                "hero",
-                verdict,
-                evidence_path,
-                [implementation],
-            )
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(
+            any("silhouetteIou" in item for item in result["failures"])
+        )
 
-    def test_front_match_cannot_hide_a_failed_side_view(self) -> None:
+    def test_side_view_pixel_overlap_does_not_block_ai_review(self) -> None:
+        source = self.root / "front-side-source.png"
+        registered_side = self.root / "front-side-registered.png"
+        size = 64
+        background = (4, 6, 10)
+        side_pixels = [background] * (size * size)
+        for y in range(8, 56):
+            for x in range(12, 52):
+                side_pixels[y * size + x] = (
+                    55 + (x % 7) * 5,
+                    100 + (y % 9) * 4,
+                    175 + ((x + y) % 5) * 7,
+                )
+        write_png_rgb(registered_side, size, size, side_pixels)
+        source_pixels = [
+            side_pixels[y * size + x]
+            if x < size
+            else (12, 18, 26)
+            for y in range(size)
+            for x in range(size * 2)
+        ]
+        write_png_rgb(source, size * 2, size, source_pixels)
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest["sourceImage"] = str(source)
+        manifest["globalSpec"]["sourceImage"] = str(source)
+        manifest["globalSpec"]["referencePreparation"].update(
+            {
+                "originalImage": str(source),
+                "subjectBackgroundSeparation": "clear",
+                "preparationTrigger": "not-required",
+                "method": "not-required",
+                "imagegenMode": "not-applicable",
+                "outputImage": str(source),
+                "outputBackground": "original",
+            }
+        )
+        manifest["globalSpec"]["viewHypothesisPolicy"]["enabled"] = True
+        manifest["globalSpec"]["viewHypothesisPolicy"][
+            "activationMode"
+        ] = "conditional-form-only"
+        write_spec_atomic(self.manifest_path, manifest)
+        register_views(self.manifest_path, [f"side={registered_side}"])
+
         self.add_visual_foundation()
         implementation = self.make_implementation()
-        evidence_path, _ = self.make_evidence(
+        evidence_path, evidence = self.make_evidence(
             "front-good-side-bad",
             render_shift=0,
             side_render_shift=24,
         )
+        observed = next(view for view in evidence["views"] if view["viewId"] == "reference")
+        observed["evaluationScope"]["referenceIsolation"].update(
+            {
+                "method": "crop",
+                "sourceImage": str(source),
+                "sourceImageSha256": file_sha256(source),
+                "regionNormalized": [0.0, 0.0, 0.5, 1.0],
+            }
+        )
+        evidence["manifestSha256"] = visual_evidence_manifest_sha256(evidence)
+        write_spec_atomic(evidence_path, evidence)
         result = preflight_module_review(
             self.manifest_path,
             "hero",
             evidence_path,
             [implementation],
         )
-        self.assertFalse(result["ok"])
-        self.assertTrue(
-            any("view 'side' silhouetteIou" in item for item in result["failures"]),
-            result,
-        )
+        self.assertTrue(result["ok"], result)
         self.assertFalse(
-            any("view 'reference' silhouetteIou" in item for item in result["failures"]),
+            any("silhouetteIou" in item for item in result["failures"]),
             result,
         )
 
@@ -2018,6 +3609,351 @@ class ModularWorkflowTests(unittest.TestCase):
         self.assertTrue(accepted["reviewAccepted"], accepted)
         cache = json.loads(Path(accepted["cachePath"]).read_text(encoding="utf-8"))
         self.assertEqual(len(cache["reviewAttempts"]["hero"]), 2)
+
+    def test_regressed_challenger_is_recorded_and_restores_best_checkpoint(self) -> None:
+        self.add_visual_foundation()
+        implementation = self.make_implementation()
+        baseline_source = implementation.read_text(encoding="utf-8")
+        evidence_path, evidence = self.make_evidence("checkpoint-seed")
+        issue = {
+            "id": "body-profile",
+            "severity": "major",
+            "status": "open",
+            "target": "hero body profile",
+            "reason": "The body profile still needs a more specific contour.",
+        }
+        correction = {
+            "issueId": "body-profile",
+            "target": "hero-body",
+            "parameterPath": "createHeroBody.profile",
+            "change": "Replace the generic contour with the observed tapered profile.",
+            "expectedDelta": "The next render improves the profile without lowering another scored layer.",
+        }
+        seed_verdict = self.make_verdict(
+            "checkpoint-seed",
+            evidence,
+            action="refine-code",
+            issues=[issue],
+            corrections=[correction],
+            overall_score=0.80,
+            layer_score=0.80,
+        )
+        seed = self.review_after_preflight(
+            self.manifest_path,
+            "hero",
+            seed_verdict,
+            evidence_path,
+            [implementation],
+        )
+        self.assertEqual(seed["candidateDisposition"], "seed")
+        self.assertTrue(seed["userPresentation"]["displayRequired"])
+        self.assertEqual(seed["userPresentation"]["artifactState"], "candidate-champion")
+        self.assertTrue(
+            Path(seed["userPresentation"]["sideBySideComparison"]).is_file()
+        )
+
+        implementation.write_text(
+            "export const SCULPT_MODULE_ID = 'hero';\nexport const heroRevision = 2;\n",
+            encoding="utf-8",
+        )
+        challenger_path, challenger_evidence = self.make_evidence(
+            "checkpoint-challenger",
+            render_variant=18,
+        )
+        challenger_verdict = self.make_verdict(
+            "checkpoint-challenger",
+            challenger_evidence,
+            action="refine-code",
+            issues=[issue],
+            corrections=[correction],
+            overall_score=0.79,
+            layer_score=0.79,
+        )
+        rejected = self.review_after_preflight(
+            self.manifest_path,
+            "hero",
+            challenger_verdict,
+            challenger_path,
+            [implementation],
+        )
+        self.assertEqual(rejected["candidateDisposition"], "rejected-regression")
+        self.assertEqual(rejected["userPresentation"]["artifactState"], "rejected-challenger")
+        self.assertTrue(rejected["restoredCheckpoint"]["restored"])
+        champion_presentation = rejected["userPresentation"]["activeChampion"]
+        self.assertEqual(champion_presentation["artifactState"], "restored-champion")
+        self.assertTrue(Path(champion_presentation["sideBySideComparison"]).is_file())
+        self.assertEqual(implementation.read_text(encoding="utf-8"), baseline_source)
+        cache = json.loads(Path(rejected["cachePath"]).read_text(encoding="utf-8"))
+        attempt = cache["reviewAttempts"]["hero"][-1]
+        self.assertEqual(attempt["overallScore"], 0.80)
+        self.assertEqual(attempt["candidateOverallScore"], 0.79)
+        self.assertNotEqual(
+            attempt["candidateCheckpointId"],
+            attempt["championCheckpointId"],
+        )
+
+        implementation.write_text(
+            "export const SCULPT_MODULE_ID = 'hero';\nexport const heroRevision = 3;\n",
+            encoding="utf-8",
+        )
+        stopped_path, stopped_evidence = self.make_evidence(
+            "checkpoint-stopped-challenger",
+            render_variant=24,
+        )
+        stopped_verdict = self.make_verdict(
+            "checkpoint-stopped-challenger",
+            stopped_evidence,
+            action="stop",
+            overall_score=0.70,
+            layer_score=0.70,
+            extra={
+                "stopReason": "The rendered challenger is visibly worse than the active champion.",
+                "stopEvidence": ["Independent review score and observed-view comparison regressed."],
+            },
+        )
+        stopped = self.review_after_preflight(
+            self.manifest_path,
+            "hero",
+            stopped_verdict,
+            stopped_path,
+            [implementation],
+        )
+        self.assertEqual(stopped["reviewAction"], "stop")
+        self.assertEqual(stopped["candidateDisposition"], "rejected-regression")
+        self.assertTrue(stopped["restoredCheckpoint"]["restored"])
+        self.assertEqual(implementation.read_text(encoding="utf-8"), baseline_source)
+        self.assertTrue(module_status(self.manifest_path)["qualityDirectionStop"])
+
+    def test_deterministic_preflight_regression_rolls_back_and_exhausts_strategy(self) -> None:
+        self.add_visual_foundation()
+        implementation = self.make_implementation()
+        baseline_source = implementation.read_text(encoding="utf-8")
+        evidence_path, evidence = self.make_evidence("preflight-regression-seed")
+        issue = {
+            "id": "body-profile",
+            "severity": "major",
+            "status": "open",
+            "target": "hero body profile",
+            "reason": "The body profile still needs a more specific contour.",
+        }
+        correction = {
+            "issueId": "body-profile",
+            "target": "hero-body",
+            "parameterPath": "profile.sections",
+            "change": "Replace the generic contour with the observed tapered profile.",
+            "expectedDelta": "The next render improves the silhouette without lowering another metric.",
+        }
+        seed_verdict = self.make_verdict(
+            "preflight-regression-seed",
+            evidence,
+            action="refine-code",
+            issues=[issue],
+            corrections=[correction],
+            overall_score=0.80,
+            layer_score=0.80,
+        )
+        seed = self.review_after_preflight(
+            self.manifest_path,
+            "hero",
+            seed_verdict,
+            evidence_path,
+            [implementation],
+        )
+        self.assertEqual(seed["candidateDisposition"], "seed")
+
+        for index in range(1, 4):
+            implementation.write_text(
+                "export const SCULPT_MODULE_ID = 'hero';\n"
+                f"export const heroRevision = {index + 1};\n",
+                encoding="utf-8",
+            )
+            challenger_path, _ = self.make_evidence(
+                f"preflight-regression-{index}",
+                render_shift=24,
+                render_variant=index * 2,
+            )
+            rejected = preflight_module_review(
+                self.manifest_path,
+                "hero",
+                challenger_path,
+                [implementation],
+            )
+            self.assertFalse(rejected["ok"], rejected)
+            self.assertEqual(
+                rejected["candidateDisposition"],
+                "rejected-preflight-regression",
+            )
+            self.assertTrue(rejected["restoredCheckpoint"]["restored"])
+            self.assertEqual(
+                implementation.read_text(encoding="utf-8"),
+                baseline_source,
+            )
+            self.assertEqual(
+                rejected["refinementBudget"]["consecutiveNonImprovements"],
+                index,
+            )
+
+        status = module_status(self.manifest_path)
+        self.assertEqual(status["state"], "needs-strategy-change")
+        self.assertTrue(status["refinementBudget"]["exhausted"])
+        self.assertEqual(
+            status["refinementBudget"]["exhaustedReason"],
+            "three-consecutive-non-improvements",
+        )
+        cache = json.loads(Path(status["cachePath"]).read_text(encoding="utf-8"))
+        attempts = cache["reviewAttempts"]["hero"]
+        self.assertEqual(len(attempts), 4)
+        self.assertTrue(
+            all(
+                attempt.get("attemptType") == "deterministic-preflight"
+                and attempt.get("candidateDisposition")
+                == "rejected-preflight-regression"
+                for attempt in attempts[1:]
+            )
+        )
+
+    def test_module_scope_mismatch_is_evidence_failure_without_retry_or_rollback(self) -> None:
+        source = self.root / "full-object-reference.png"
+        source_pixels = [(4, 6, 10)] * (64 * 64)
+        for y in range(10, 54):
+            for x in range(5, 59):
+                source_pixels[y * 64 + x] = (65, 115, 185)
+        write_png_rgb(source, 64, 64, source_pixels)
+
+        self.add_visual_foundation()
+        implementation = self.make_implementation()
+        seed_path, seed_evidence = self.make_evidence("scope-seed")
+        issue = {
+            "id": "body-profile",
+            "severity": "major",
+            "status": "open",
+            "target": "hero-body",
+            "reason": "The isolated body profile needs one executable correction.",
+        }
+        correction = {
+            "issueId": "body-profile",
+            "target": "hero-body",
+            "parameterPath": "profile.sections",
+            "change": "Refine the isolated body contour.",
+            "expectedDelta": "The module-local silhouette improves.",
+        }
+        seed_verdict = self.make_verdict(
+            "scope-seed",
+            seed_evidence,
+            action="refine-code",
+            issues=[issue],
+            corrections=[correction],
+            overall_score=0.80,
+            layer_score=0.80,
+        )
+        self.review_after_preflight(
+            self.manifest_path,
+            "hero",
+            seed_verdict,
+            seed_path,
+            [implementation],
+        )
+
+        implementation.write_text(
+            "export const SCULPT_MODULE_ID = 'hero';\nexport const heroRevision = 2;\n",
+            encoding="utf-8",
+        )
+        _, candidate = self.make_evidence("scope-candidate", render_variant=8)
+        mismatched_pairs = []
+        for view in candidate["views"]:
+            mismatched_pairs.append(
+                {
+                    "viewId": view["viewId"],
+                    "referenceImage": source,
+                    "renderScreenshot": view["renderScreenshot"],
+                    "referenceProvenance": view["referenceProvenance"],
+                }
+            )
+        mismatch = create_sheet_pairs(
+            mismatched_pairs,
+            self.root / "scope-mismatch-comparison.png",
+            128,
+            128,
+            8,
+            render_provenance=candidate["renderProvenance"],
+        )
+        mismatch_path = self.root / "scope-mismatch-evidence.json"
+        write_spec_atomic(mismatch_path, mismatch)
+        result = preflight_module_review(
+            self.manifest_path,
+            "hero",
+            mismatch_path,
+            [implementation],
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["candidateDisposition"], "preflight-failed")
+        self.assertFalse(result["restoredCheckpoint"])
+        self.assertEqual(
+            result["refinementBudget"]["consecutiveNonImprovements"],
+            0,
+        )
+        self.assertTrue(
+            any("evidence-scope-mismatch" in failure for failure in result["failures"]),
+            result,
+        )
+        self.assertFalse(
+            any("silhouetteIou" in failure for failure in result["failures"]),
+            result,
+        )
+
+        forged_pairs = []
+        for view in candidate["views"]:
+            forged_scope = copy.deepcopy(view["evaluationScope"])
+            forged_scope["referenceIsolation"] = {
+                "method": "crop",
+                "sourceImage": str(source),
+                "sourceImageSha256": file_sha256(source),
+                "isolatedReferenceSha256": view["referenceSha256"],
+                "regionNormalized": [0.0, 0.0, 1.0, 1.0],
+            }
+            forged_pairs.append(
+                {
+                    "viewId": view["viewId"],
+                    "referenceImage": view["referenceImage"],
+                    "renderScreenshot": view["renderScreenshot"],
+                    "referenceProvenance": view["referenceProvenance"],
+                    "evaluationScope": forged_scope,
+                }
+            )
+        forged = create_sheet_pairs(
+            forged_pairs,
+            self.root / "scope-forged-comparison.png",
+            128,
+            128,
+            8,
+            render_provenance=candidate["renderProvenance"],
+        )
+        forged_path = self.root / "scope-forged-evidence.json"
+        write_spec_atomic(forged_path, forged)
+        forged_result = preflight_module_review(
+            self.manifest_path,
+            "hero",
+            forged_path,
+            [implementation],
+        )
+        self.assertFalse(forged_result["ok"], forged_result)
+        self.assertEqual(forged_result["candidateDisposition"], "preflight-failed")
+        self.assertFalse(forged_result["restoredCheckpoint"])
+        self.assertEqual(
+            forged_result["refinementBudget"]["consecutiveNonImprovements"],
+            0,
+        )
+        self.assertTrue(
+            any(
+                "do not equal the declared source crop" in failure
+                for failure in forged_result["failures"]
+            ),
+            forged_result,
+        )
+        self.assertFalse(
+            any("silhouetteIou" in failure for failure in forged_result["failures"]),
+            forged_result,
+        )
 
     def test_mixed_refinement_is_one_atomic_batch_before_one_review(self) -> None:
         module_path = self.add_visual_foundation()
@@ -2167,17 +4103,36 @@ class ModularWorkflowTests(unittest.TestCase):
             overall_score=0.80,
             layer_score=0.80,
         )
-        with self.assertRaisesRegex(ValueError, "independently measured progress"):
-            review_module(
-                self.manifest_path,
-                "hero",
-                stalled_verdict,
-                complete_path,
-                [implementation],
-            )
+        stalled = review_module(
+            self.manifest_path,
+            "hero",
+            stalled_verdict,
+            complete_path,
+            [implementation],
+        )
+        self.assertEqual(stalled["candidateDisposition"], "rejected-no-improvement")
+        self.assertFalse(stalled["refinementBudget"]["exhausted"])
+
+        implementation.write_text(
+            "export const SCULPT_MODULE_ID = 'hero';\nexport const heroRevision = 2;\n",
+            encoding="utf-8",
+        )
+        promoted_module = json.loads(module_path.read_text(encoding="utf-8"))
+        promoted_module["payload"]["componentTree"][0]["dimensions"]["width"] = 0.82
+        write_spec_atomic(module_path, promoted_module)
+        promoted_path, promoted_evidence = self.make_evidence(
+            "mixed-batch-promoted", render_variant=24
+        )
+        promoted_preflight = preflight_module_review(
+            self.manifest_path,
+            "hero",
+            promoted_path,
+            [implementation],
+        )
+        self.assertTrue(promoted_preflight["ok"], promoted_preflight)
         second_verdict = self.make_verdict(
             "mixed-batch-second",
-            json.loads(complete_path.read_text(encoding="utf-8")),
+            promoted_evidence,
             action="refine-code",
             issues=[residual_issue],
             corrections=[residual_correction],
@@ -2189,59 +4144,95 @@ class ModularWorkflowTests(unittest.TestCase):
             self.manifest_path,
             "hero",
             second_verdict,
-            complete_path,
+            promoted_path,
             [implementation],
         )
-        self.assertTrue(second["refinementBudget"]["exhausted"])
+        self.assertEqual(second["candidateDisposition"], "promoted")
+        self.assertFalse(second["refinementBudget"]["exhausted"])
+
+        last_evidence_path = promoted_path
+        last_evidence = promoted_evidence
+        for index, variant in enumerate((36, 48, 60), start=3):
+            implementation.write_text(
+                "export const SCULPT_MODULE_ID = 'hero';\n"
+                f"export const heroRevision = {index};\n",
+                encoding="utf-8",
+            )
+            candidate_path, candidate_evidence = self.make_evidence(
+                f"mixed-batch-miss-{index}", render_variant=variant
+            )
+            candidate_preflight = preflight_module_review(
+                self.manifest_path,
+                "hero",
+                candidate_path,
+                [implementation],
+            )
+            self.assertTrue(candidate_preflight["ok"], candidate_preflight)
+            miss_verdict = self.make_verdict(
+                f"mixed-batch-miss-{index}",
+                candidate_evidence,
+                action="continue",
+                issues=[residual_issue],
+                corrections=[residual_correction],
+                overall_score=0.81,
+                layer_score=0.81,
+            )
+            miss = review_module(
+                self.manifest_path,
+                "hero",
+                miss_verdict,
+                candidate_path,
+                [implementation],
+            )
+            self.assertEqual(miss["candidateDisposition"], "rejected-regression")
+            last_evidence_path = candidate_path
+            last_evidence = candidate_evidence
+        self.assertTrue(miss["refinementBudget"]["exhausted"])
+        self.assertEqual(
+            miss["refinementBudget"]["exhaustedReason"],
+            "three-consecutive-non-improvements",
+        )
 
         implementation.write_text(
-            "export const SCULPT_MODULE_ID = 'hero';\nexport const heroRevision = 3;\n",
+            "export const SCULPT_MODULE_ID = 'hero';\nexport const heroRevision = 6;\n",
             encoding="utf-8",
         )
-        third_evidence_path, third_evidence = self.make_evidence(
-            "mixed-batch-third", render_variant=26
+        exhausted_path, exhausted_evidence = self.make_evidence(
+            "mixed-batch-exhausted", render_variant=72
         )
-        third_preflight = preflight_module_review(
+        exhausted_preflight = preflight_module_review(
             self.manifest_path,
             "hero",
-            third_evidence_path,
+            exhausted_path,
             [implementation],
         )
-        self.assertTrue(third_preflight["ok"], third_preflight)
-        self.assertTrue(third_preflight["refinementBudget"]["exhausted"])
-        third_verdict = self.make_verdict(
-            "mixed-batch-third",
-            third_evidence,
+        self.assertFalse(exhausted_preflight["ok"], exhausted_preflight)
+        self.assertTrue(
+            any("refinement budget is exhausted" in item for item in exhausted_preflight["failures"]),
+            exhausted_preflight,
+        )
+        self.assertEqual(module_status(self.manifest_path)["state"], "needs-strategy-change")
+        exhausted_verdict = self.make_verdict(
+            "mixed-batch-exhausted",
+            exhausted_evidence,
             action="refine-code",
-            issues=[
-                {
-                    **residual_issue,
-                    "id": "third-partial-fix",
-                    "reason": "A third partial fix must be stopped by the bounded workflow.",
-                }
-            ],
-            corrections=[
-                {
-                    **residual_correction,
-                    "issueId": "third-partial-fix",
-                }
-            ],
-            resolved=["residual-contour"],
+            issues=[residual_issue],
+            corrections=[residual_correction],
             overall_score=0.84,
             layer_score=0.84,
         )
-        with self.assertRaisesRegex(ValueError, "refinement budget is exhausted"):
+        with self.assertRaisesRegex(ValueError, "latest module preflight did not pass"):
             review_module(
                 self.manifest_path,
                 "hero",
-                third_verdict,
-                third_evidence_path,
+                exhausted_verdict,
+                exhausted_path,
                 [implementation],
             )
 
         strategy_verdict = self.make_verdict(
             "mixed-batch-strategy-reset",
-            third_evidence,
+            last_evidence,
             action="strategy-reset",
             extra={
                 "strategyId": "continuous-profile-v2",
@@ -2254,7 +4245,7 @@ class ModularWorkflowTests(unittest.TestCase):
             self.manifest_path,
             "hero",
             strategy_verdict,
-            third_evidence_path,
+            last_evidence_path,
             [implementation],
         )
         self.assertEqual(reset["refinementBudget"]["usedBatches"], 0)
@@ -2263,7 +4254,7 @@ class ModularWorkflowTests(unittest.TestCase):
         unchanged_after_reset = preflight_module_review(
             self.manifest_path,
             "hero",
-            third_evidence_path,
+            last_evidence_path,
             [implementation],
         )
         self.assertFalse(unchanged_after_reset["ok"])

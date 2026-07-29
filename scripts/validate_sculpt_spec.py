@@ -13,18 +13,29 @@ from typing import Any
 
 from visual_feature_gate import feature_review_policy
 from sculpt_contract import (
+    BLIND_SCOUT_ARTIFACT_VERSION,
     COMPONENT_TYPES,
     CURRENT_SCHEMA_VERSION,
+    MAX_BLIND_SCOUT_OBSERVATIONS,
+    SIMPLIFIED_AI_OVERALL_FLOOR,
     adaptive_hypothesis_views,
+    blind_scout_phase_rubrics,
     component_type,
+    detail_feature_count,
     load_spec_file,
     parse_schema_version,
     pass_order as canonical_pass_order,
     pipeline_status,
     review_failures,
     schema_version_at_least,
+    phase_execution_version,
 )
-from sculpt_pass_orchestrator import material_gaps, pass_specific_gaps, surface_gaps
+from sculpt_pass_orchestrator import (
+    material_gaps,
+    pass_specific_gaps,
+    surface_gaps,
+    view_hypothesis_skip_gaps,
+)
 from sculpt_geometry import (
     VALID_PRIMITIVES,  # compatibility re-export for existing script consumers
     validate_geometry_component,
@@ -32,6 +43,8 @@ from sculpt_geometry import (
     validate_surface_topology_plan,
 )
 from sculpt_specialized_regions import validate_specialized_regions
+from sculpt_capabilities import validate_capability_plan
+from sculpt_perception import validate_perceptual_contract
 
 
 REQUIRED_TOP_LEVEL = {
@@ -67,6 +80,51 @@ VALID_REVIEW_ROOT_CAUSES = {
     "mixed",
 }
 VALID_CORRECTION_ACTIONS = {"set", "scale", "translate", "rotate", "replace", "inspect"}
+VALID_REPETITION_ATTACHMENT_RELATIONS = {"contact", "overlap", "gap", "free"}
+VALID_DETAIL_CONTRACT_STATUSES = {"unassessed", "planned"}
+VALID_DETAIL_COMPLEXITIES = {"unassessed", "simple", "compound", "complex"}
+VALID_DETAIL_DECOMPOSITION_MODES = {
+    "unassessed",
+    "atomic",
+    "children",
+    "features",
+    "hybrid",
+}
+VALID_DETAIL_SCALE_BANDS = {"macro", "meso", "micro"}
+VALID_DETAIL_FEATURE_CLASSES = {
+    "structural-part",
+    "surface-relief",
+    "recess",
+    "cutout",
+    "seam",
+    "fastener",
+    "repetition",
+    "material-detail",
+    "decal",
+}
+VALID_DETAIL_GEOMETRY_EFFECTS = {"silhouette", "surface", "cutout", "none"}
+VALID_DETAIL_REALIZATION_MODES = {
+    "component",
+    "local-feature",
+    "topology-group",
+    "repetition-system",
+    "material",
+    "geometry-feature",
+    "geometry-parameter",
+}
+DETAIL_PARAMETER_PATH_PATTERN = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*)+$"
+)
+COMPONENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+COMPONENT_PLACEHOLDER_TOKENS = frozenset(
+    {"placeholder", "temp", "temporary", "todo", "unnamed", "unknown", "generic", "default", "sample", "test", "foo", "bar", "baz"}
+)
+COMPONENT_GENERIC_TOKENS = frozenset(
+    {"part", "mesh", "object", "component", "geometry", "shape", "item", "thing", "body", "model", "asset", "node", "group", "assembly", "piece", "element", "primitive"}
+)
+COMPONENT_QUALIFIER_TOKENS = frozenset(
+    {"main", "primary", "secondary", "left", "right", "front", "rear", "upper", "lower", "inner", "outer", "top", "bottom", "center", "central", "a", "b", "c"}
+)
 ATTACHMENT_ROLES = {
     "appendage",
     "branch",
@@ -90,9 +148,15 @@ ATTACHMENT_ROLES = {
 }
 ATTACHMENT_PRIMITIVES = {"cylinder", "cone", "capsule", "tube", "curve-sweep"}
 PASS_WARNING_KEYWORDS = {
-    "blockout": ("preSpecAssessment", "surfaceTopologyPlan", "silhouette", "featureReviewTargets"),
-    "structure": ("component", "attachment", "hierarchy", "qualityContract", "meso"),
-    "form": ("component", "attachment", "hierarchy", "qualityContract", "surfaceDetail", "micro"),
+    "blockout": (
+        "preSpecAssessment",
+        "silhouette",
+        "featureReviewTargets",
+        "assumption",
+        "risk",
+    ),
+    "structure": ("component", "attachment", "hierarchy", "qualityContract", "detail", "meso"),
+    "form": ("component", "attachment", "hierarchy", "qualityContract", "detail", "surfaceDetail", "micro"),
     "lookdev": ("material", "lookDev", "lighting", "surface", "PBR", "texture"),
     "interaction": ("action", "pivot", "socket", "collider"),
     "optimization": ("performance", "FPS", "draw", "triangle"),
@@ -107,7 +171,7 @@ PASS_ALIASES = {
     "optimization-pass": "optimization",
 }
 
-SUPPORTED_SCHEMA_VERSIONS = {(2, 0, 0), (3, 0, 0), (3, 1, 0)}
+SUPPORTED_SCHEMA_VERSIONS = {(2, 0, 0), (3, 0, 0), (3, 1, 0), (3, 2, 0)}
 VALID_MATERIAL_PROFILES = frozenset(
     {"standard", "cloth", "fiber", "glass", "liquid", "volume"}
 )
@@ -134,6 +198,8 @@ EXECUTABLE_LOCAL_MATERIAL_TYPES = frozenset(
         "stain",
         "moss",
         "patina",
+        "rust",
+        "oxide",
         "wetness",
         "soot",
         "scorch",
@@ -146,6 +212,20 @@ LOCAL_MATERIAL_METADATA_TYPES = frozenset({"material-map-evidence"})
 VALID_LOCAL_MATERIAL_MASK_PATTERNS = frozenset(
     {"noise", "cavity", "edge", "vertical", "speckle", "streak"}
 )
+SURFACE_DESCRIPTOR_RIGIDITY = frozenset(
+    {"rigid", "semi-rigid", "flexible", "soft"}
+)
+SURFACE_DESCRIPTOR_FINISH = frozenset(
+    {"mirror", "glossy", "satin", "matte"}
+)
+SURFACE_DESCRIPTOR_RELIEF = frozenset(
+    {"smooth", "grain", "pebbled", "wrinkled", "fibrous", "pitted", "brushed", "custom"}
+)
+SURFACE_DESCRIPTOR_CHANNELS = frozenset(
+    {"none", "normal", "bump", "displacement"}
+)
+SURFACE_DESCRIPTOR_BASIS = frozenset({"observed", "inferred"})
+LOOKDEV_SURFACE_PASSES = frozenset({"lookdev", "material-pass", "surface-pass"})
 
 
 def schema_at_least(spec: dict[str, Any], minimum: str) -> bool:
@@ -160,6 +240,19 @@ def warning_applies_to_pass(warning: str, pass_id: str | None) -> bool:
     if pass_id is None or not warning.startswith("quality:"):
         return True
     selected = PASS_ALIASES.get(pass_id, pass_id)
+    if selected == "blockout" and any(
+        token in warning
+        for token in (
+            "materialFamilies",
+            "motionPotential",
+            "specializedRegions",
+            "surfaceTopologyPlan",
+            "detailDecompositionContract",
+            "detailPlan",
+            "interactionContract",
+        )
+    ):
+        return False
     keywords = PASS_WARNING_KEYWORDS.get(selected)
     return keywords is None or any(keyword.lower() in warning.lower() for keyword in keywords)
 
@@ -199,7 +292,10 @@ def validate_score_block(spec: dict[str, Any], errors: list[str], warnings: list
         return
     for key, value in scores.items():
         if not isinstance(value, int) or value < 0 or value > 3:
-            errors.append(f"score {key!r} must be an integer from 0 to 3")
+            errors.append(
+                f"score {key!r} must be an ordinal integer from 0 to 3; "
+                "decimal 0-to-1 quality values belong only in review overallScore/layerScores"
+            )
 
 
 def validate_nonnegative_int(value: Any, label: str, errors: list[str]) -> None:
@@ -243,7 +339,11 @@ def validate_pre_spec_assessment(spec: dict[str, Any], errors: list[str], warnin
         else:
             for key, value in scores.items():
                 if not isinstance(value, int) or value < 0 or value > 3:
-                    errors.append(f"preSpecAssessment.complexity.scores.{key} must be an integer from 0 to 3")
+                    errors.append(
+                        f"preSpecAssessment.complexity.scores.{key} must be an ordinal "
+                        "integer from 0 to 3 measuring complexity magnitude; decimal "
+                        "0-to-1 review quality scores must not be converted into this field"
+                    )
         estimated = complexity.get("estimatedCounts")
         if not isinstance(estimated, dict):
             errors.append("preSpecAssessment.complexity.estimatedCounts must be an object")
@@ -273,7 +373,10 @@ def validate_pre_spec_assessment(spec: dict[str, Any], errors: list[str], warnin
     unknowns = assessment.get("unknownsToResolveBeforeImplementation")
     validate_string_array(unknowns, "preSpecAssessment.unknownsToResolveBeforeImplementation", errors)
     if isinstance(unknowns, list) and unknowns:
-        warnings.append("quality: preSpecAssessment has unresolved unknowns before implementation")
+        warnings.append(
+            "quality: preSpecAssessment has unresolved unknowns; before implementation, "
+            "resolve each item or convert it into a bounded assumptions[] record or a known risks[] record"
+        )
 
 
 def validate_terminology_profile(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
@@ -331,6 +434,306 @@ def validate_evidence(spec: dict[str, Any], errors: list[str], warnings: list[st
     return refs
 
 
+def validate_reference_preparation_v2(
+    spec: dict[str, Any],
+    preparation: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    source_image = spec.get("sourceImage")
+    has_source = has_non_empty_detail(source_image)
+    required_types = {
+        "version": int,
+        "originalImage": str,
+        "subjectBackgroundSeparation": str,
+        "preparationTrigger": str,
+        "requiredSkill": str,
+        "method": str,
+        "imagegenMode": str,
+        "outputImage": str,
+        "outputBackground": str,
+        "whiteBackgroundValidated": bool,
+        "subjectContrastValidated": bool,
+        "identityGuardrailValidated": bool,
+        "modificationPolicy": dict,
+        "comparisonPolicy": dict,
+        "usageRule": str,
+    }
+    for field, expected_type in required_types.items():
+        value = preparation.get(field)
+        if not isinstance(value, expected_type) or (
+            expected_type is int and isinstance(value, bool)
+        ):
+            errors.append(f"referencePreparation.{field} must be {expected_type.__name__}")
+
+    background = preparation.get("subjectBackgroundSeparation")
+    if background not in {"not-applicable", "unassessed", "mixed", "clear", "absent"}:
+        errors.append(
+            "referencePreparation.subjectBackgroundSeparation must be not-applicable, "
+            "unassessed, mixed, clear, or absent"
+        )
+        return
+    if preparation.get("requiredSkill") != "imagegen":
+        errors.append("referencePreparation.requiredSkill must be 'imagegen'")
+    if preparation.get("outputImage") != (source_image or ""):
+        errors.append("referencePreparation.outputImage must equal spec.sourceImage")
+
+    comparison = preparation.get("comparisonPolicy")
+    if isinstance(comparison, dict) and comparison != {
+        "reconstructionTarget": "sourceImage",
+        "identityGuardrail": "originalImage",
+    }:
+        errors.append(
+            "referencePreparation.comparisonPolicy must use sourceImage as reconstructionTarget "
+            "and originalImage as identityGuardrail"
+        )
+
+    if not has_source:
+        if (
+            background != "not-applicable"
+            or preparation.get("preparationTrigger") != "not-applicable"
+            or preparation.get("method") != "not-required"
+        ):
+            errors.append(
+                "referencePreparation must be not-applicable/not-required without sourceImage"
+            )
+        return
+
+    original = preparation.get("originalImage")
+    if not isinstance(original, str) or not original.strip():
+        errors.append("referencePreparation.originalImage is required when sourceImage is present")
+    if background == "unassessed":
+        warnings.append(
+            "quality: reference preparation is unassessed; classify both subject/background "
+            "separation and whether source complexity/quality blocks practical reconstruction"
+        )
+        return
+    if background == "not-applicable":
+        errors.append(
+            "referencePreparation.subjectBackgroundSeparation cannot be not-applicable when sourceImage is present"
+        )
+        return
+
+    method = preparation.get("method")
+    if method == "not-required":
+        if background not in {"clear", "absent"}:
+            errors.append(
+                "a mixed subject/background reference must use an ImageGen prepared reference"
+            )
+        if preparation.get("preparationTrigger") != "not-required":
+            errors.append(
+                "referencePreparation.preparationTrigger must be 'not-required' when ImageGen is skipped"
+            )
+        if original != source_image:
+            errors.append(
+                "sourceImage must equal referencePreparation.originalImage when ImageGen is skipped"
+            )
+        if preparation.get("imagegenMode") != "not-applicable":
+            errors.append(
+                "referencePreparation.imagegenMode must be 'not-applicable' when ImageGen is skipped"
+            )
+        if preparation.get("outputBackground") != "original":
+            errors.append(
+                "referencePreparation.outputBackground must be 'original' when ImageGen is skipped"
+            )
+        policy = preparation.get("modificationPolicy")
+        if isinstance(policy, dict) and policy.get("mode") != "none":
+            errors.append(
+                "referencePreparation.modificationPolicy.mode must be 'none' when ImageGen is skipped"
+            )
+        return
+
+    if method != "imagegen-prepared-reference":
+        errors.append(
+            "referencePreparation.method must be 'not-required', 'unassessed', or "
+            "'imagegen-prepared-reference'"
+        )
+        return
+    trigger = preparation.get("preparationTrigger")
+    valid_triggers = {
+        "background-mixing",
+        "excessive-complexity",
+        "low-source-quality",
+        "combined",
+    }
+    if trigger not in valid_triggers:
+        errors.append(
+            "referencePreparation.preparationTrigger must identify background-mixing, "
+            "excessive-complexity, low-source-quality, or combined"
+        )
+    mode = preparation.get("imagegenMode")
+    if mode not in {
+        "white-background-cleanup",
+        "white-background-simplification",
+    }:
+        errors.append(
+            "referencePreparation.imagegenMode must use a solid-white ImageGen preparation mode"
+        )
+    if original == source_image:
+        errors.append(
+            "sourceImage must be the generated white-background output, not originalImage"
+        )
+    if preparation.get("outputBackground") != "solid-white":
+        errors.append("referencePreparation.outputBackground must be 'solid-white'")
+    for field in (
+        "whiteBackgroundValidated",
+        "subjectContrastValidated",
+        "identityGuardrailValidated",
+    ):
+        if preparation.get(field) is not True:
+            errors.append(
+                f"referencePreparation.{field} must be true before using the ImageGen output"
+            )
+
+    policy = preparation.get("modificationPolicy")
+    if not isinstance(policy, dict):
+        return
+    for field in ("allowedChanges", "protectedTraits", "declaredChanges"):
+        validate_string_array(
+            policy.get(field),
+            f"referencePreparation.modificationPolicy.{field}",
+            errors,
+        )
+    if not policy.get("protectedTraits"):
+        errors.append(
+            "referencePreparation.modificationPolicy.protectedTraits must preserve identity and macro form"
+        )
+    if mode == "white-background-simplification":
+        if policy.get("mode") != "bounded-simplification":
+            errors.append(
+                "referencePreparation.modificationPolicy.mode must be 'bounded-simplification'"
+            )
+        if not policy.get("declaredChanges"):
+            errors.append(
+                "referencePreparation.modificationPolicy.declaredChanges must name every intentional simplification"
+            )
+    elif policy.get("mode") != "cleanup-only":
+        errors.append("referencePreparation.modificationPolicy.mode must be 'cleanup-only'")
+
+
+def validate_reference_preparation(
+    spec: dict[str, Any], errors: list[str], warnings: list[str]
+) -> None:
+    source_image = spec.get("sourceImage")
+    has_source = has_non_empty_detail(source_image)
+    preparation = spec.get("referencePreparation")
+    if not isinstance(preparation, dict):
+        if has_source:
+            warnings.append(
+                "quality: sourceImage needs referencePreparation before implementation; "
+                "classify whether the subject is clearly separated from its background"
+            )
+        return
+
+    if preparation.get("version") == 2:
+        validate_reference_preparation_v2(spec, preparation, errors, warnings)
+        return
+
+    required_types = {
+        "version": int,
+        "originalImage": str,
+        "subjectBackgroundSeparation": str,
+        "requiredSkill": str,
+        "method": str,
+        "imagegenMode": str,
+        "outputImage": str,
+        "backgroundRemoved": bool,
+        "alphaValidated": bool,
+        "subjectPreservationValidated": bool,
+        "usageRule": str,
+    }
+    legacy_background = preparation.get("originalBackground")
+    for field, expected_type in required_types.items():
+        value = (
+            preparation.get(field)
+            if field != "subjectBackgroundSeparation" or field in preparation
+            else legacy_background
+        )
+        if not isinstance(value, expected_type) or (
+            expected_type is int and isinstance(value, bool)
+        ):
+            errors.append(
+                f"referencePreparation.{field} must be {expected_type.__name__}"
+            )
+
+    background = preparation.get("subjectBackgroundSeparation", legacy_background)
+    if background not in {
+        "not-applicable",
+        "unassessed",
+        "mixed",
+        "clear",
+        "present",
+        "absent",
+    }:
+        errors.append(
+            "referencePreparation.subjectBackgroundSeparation must be not-applicable, "
+            "unassessed, mixed, clear, present, or absent"
+        )
+        return
+    if preparation.get("requiredSkill") != "imagegen":
+        errors.append("referencePreparation.requiredSkill must be 'imagegen'")
+    if preparation.get("outputImage") != (source_image or ""):
+        errors.append("referencePreparation.outputImage must equal spec.sourceImage")
+
+    if not has_source:
+        if background != "not-applicable" or preparation.get("method") != "not-required":
+            errors.append(
+                "referencePreparation must be not-applicable/not-required without sourceImage"
+            )
+        return
+
+    original = preparation.get("originalImage")
+    if not isinstance(original, str) or not original.strip():
+        errors.append("referencePreparation.originalImage is required when sourceImage is present")
+    if background == "unassessed":
+        warnings.append(
+            "quality: reference subject/background separation is unassessed; classify it "
+            "before any geometry, material, view generation, or review work"
+        )
+        return
+    if background == "not-applicable":
+        errors.append(
+            "referencePreparation.subjectBackgroundSeparation cannot be not-applicable when sourceImage is present"
+        )
+        return
+    if background in {"clear", "absent"}:
+        if preparation.get("method") != "not-required":
+            errors.append(
+                "referencePreparation.method must be 'not-required' when the subject boundary is clear"
+            )
+        if original != source_image:
+            errors.append(
+                "sourceImage must equal referencePreparation.originalImage when no extraction is needed"
+            )
+        return
+
+    if preparation.get("method") != "imagegen-background-extraction":
+        errors.append(
+            "a reference whose subject mixes with the background must use method "
+            "'imagegen-background-extraction'"
+        )
+    if preparation.get("imagegenMode") not in {
+        "built-in-chroma-key",
+        "cli-native-transparency",
+    }:
+        errors.append(
+            "referencePreparation.imagegenMode must record an approved ImageGen background-extraction path"
+        )
+    if original == source_image:
+        errors.append(
+            "sourceImage must be the background-free ImageGen output, not the original image"
+        )
+    for field in (
+        "backgroundRemoved",
+        "alphaValidated",
+        "subjectPreservationValidated",
+    ):
+        if preparation.get(field) is not True:
+            errors.append(
+                f"referencePreparation.{field} must be true before using the cutout as sourceImage"
+            )
+
+
 def validate_view_hypothesis_policy(
     spec: dict[str, Any], errors: list[str], warnings: list[str]
 ) -> None:
@@ -346,14 +749,73 @@ def validate_view_hypothesis_policy(
         return
     if not isinstance(policy.get("enabled"), bool):
         errors.append("viewHypothesisPolicy.enabled must be boolean")
-    elif has_non_empty_detail(spec.get("sourceImage")) and policy.get("enabled") is not True:
-        errors.append("viewHypothesisPolicy.enabled must be true when sourceImage is present")
     elif not has_non_empty_detail(spec.get("sourceImage")) and policy.get("enabled") is True:
         errors.append("viewHypothesisPolicy cannot be enabled without sourceImage")
+    activation_mode = policy.get("activationMode")
+    if activation_mode not in {
+        None,
+        "conditional-form-only",
+        "default-form-unless-simple-symmetric",
+        "pre-blockout-unless-simple-symmetric",
+    }:
+        errors.append(
+            "viewHypothesisPolicy.activationMode must be "
+            "'pre-blockout-unless-simple-symmetric' when present"
+        )
+    activation_phase = policy.get("activationPhase")
+    if activation_phase not in {None, "blockout", "form"}:
+        errors.append("viewHypothesisPolicy.activationPhase must be 'blockout' when present")
+    decision = policy.get("decision")
+    if decision not in {None, "pending", "required", "not-needed", "not-applicable"}:
+        errors.append(
+            "viewHypothesisPolicy.decision must be pending, required, not-needed, or not-applicable"
+        )
+    if decision == "required" and policy.get("enabled") is not True:
+        errors.append("viewHypothesisPolicy.decision 'required' needs enabled=true")
+    if decision in {"not-needed", "not-applicable"} and policy.get("enabled") is not False:
+        errors.append(f"viewHypothesisPolicy.decision {decision!r} needs enabled=false")
+    if policy.get("enabled") is True and decision in {"not-needed", "not-applicable"}:
+        errors.append("enabled view hypotheses cannot be marked not-needed or not-applicable")
+    if decision in {"required", "not-needed"}:
+        reason = policy.get("decisionReason")
+        if not isinstance(reason, str) or len(reason.strip()) < 8:
+            errors.append(
+                "viewHypothesisPolicy.decisionReason must explain the resolved turnaround decision"
+            )
+    if activation_mode in {
+        "default-form-unless-simple-symmetric",
+        "pre-blockout-unless-simple-symmetric",
+    }:
+        if policy.get("defaultDecision") != "required":
+            errors.append("viewHypothesisPolicy.defaultDecision must be 'required'")
+        if policy.get("skipEligibility") != "simple-and-symmetric-only":
+            errors.append(
+                "viewHypothesisPolicy.skipEligibility must be 'simple-and-symmetric-only'"
+            )
+        skip = policy.get("skipAssessment")
+        if not isinstance(skip, dict):
+            errors.append("viewHypothesisPolicy.skipAssessment must be an object")
+        elif decision == "not-needed":
+            errors.extend(
+                f"viewHypothesisPolicy: {gap}"
+                for gap in view_hypothesis_skip_gaps(spec)
+            )
+    criteria = policy.get("activationCriteria")
+    if criteria is not None:
+        validate_string_array(
+            criteria,
+            "viewHypothesisPolicy.activationCriteria",
+            errors,
+        )
     if policy.get("generator") != "built-in-imagegen":
         errors.append("viewHypothesisPolicy.generator must be 'built-in-imagegen'")
     if not isinstance(policy.get("promptVersion"), str) or not policy["promptVersion"].strip():
         errors.append("viewHypothesisPolicy.promptVersion is required")
+    layout_id = policy.get("layoutId")
+    if layout_id not in {None, "", "identity-turnaround-2x2-v1"}:
+        errors.append(
+            "viewHypothesisPolicy.layoutId must be 'identity-turnaround-2x2-v1' when present"
+        )
     views = policy.get("requiredViews")
     if not isinstance(views, list) or not views or not all(
         isinstance(item, str) and item in {"three-quarter", "side", "back"}
@@ -618,11 +1080,160 @@ def _layer_value(value: Any, keys: tuple[str, ...] = ("base", "amount")) -> floa
     return None
 
 
+def validate_surface_descriptor(
+    material_id: str,
+    material: dict[str, Any],
+    evidence_ids: set[str] | None,
+    errors: list[str],
+    warnings: list[str],
+    for_pass: str | None,
+) -> None:
+    """Keep physical rigidity, optical finish, and tactile relief explicit and distinct."""
+
+    selected_pass = PASS_ALIASES.get(for_pass, for_pass)
+    if selected_pass in {"blockout", "structure", "form"}:
+        # Surface language is authored and enforced at lookdev. Early geometry
+        # passes must stay cheap and cannot be blocked by unfinished appearance data.
+        return
+    value = material.get("surfaceDescriptor")
+    lookdev_required = for_pass in LOOKDEV_SURFACE_PASSES
+    if value is None:
+        if lookdev_required and material.get("qualityTier") != "utility":
+            warnings.append(
+                f"quality: lookdev material {material_id!r} needs an assessed surfaceDescriptor"
+            )
+        return
+    if not isinstance(value, dict):
+        errors.append(f"material {material_id!r} surfaceDescriptor must be an object")
+        return
+    status = value.get("status")
+    if status not in {"unassessed", "assessed"}:
+        errors.append(
+            f"material {material_id!r} surfaceDescriptor.status must be unassessed or assessed"
+        )
+        return
+    if status == "unassessed":
+        if lookdev_required and material.get("qualityTier") != "utility":
+            warnings.append(
+                f"quality: lookdev material {material_id!r} surfaceDescriptor is unassessed"
+            )
+        return
+
+    evidence_refs = value.get("evidenceRefs")
+    if not (
+        isinstance(evidence_refs, list)
+        and evidence_refs
+        and all(isinstance(item, str) and item.strip() for item in evidence_refs)
+    ):
+        errors.append(
+            f"material {material_id!r} surfaceDescriptor.evidenceRefs must contain evidence ids"
+        )
+    elif evidence_ids is not None:
+        missing = sorted(set(evidence_refs) - evidence_ids)
+        if missing:
+            errors.append(
+                f"material {material_id!r} surfaceDescriptor references missing evidence: "
+                + ", ".join(missing)
+            )
+
+    def descriptor_entry(
+        field: str,
+        allowed: frozenset[str],
+    ) -> dict[str, Any] | None:
+        entry = value.get(field)
+        label = f"material {material_id!r} surfaceDescriptor.{field}"
+        if not isinstance(entry, dict):
+            errors.append(f"{label} must be an object")
+            return None
+        selected = entry.get("value")
+        if selected not in allowed:
+            errors.append(
+                f"{label}.value must be one of: " + ", ".join(sorted(allowed))
+            )
+        basis = entry.get("basis")
+        if basis not in SURFACE_DESCRIPTOR_BASIS:
+            errors.append(
+                f"{label}.basis must be observed or inferred"
+            )
+        confidence = entry.get("confidence")
+        if not is_number(confidence) or not 0 < float(confidence) <= 1:
+            errors.append(f"{label}.confidence must be greater than 0 and at most 1")
+        if field == "microRelief" and selected == "custom" and not (
+            isinstance(entry.get("description"), str)
+            and entry["description"].strip()
+        ):
+            errors.append(f"{label}.description is required when value is custom")
+        return entry
+
+    descriptor_entry("rigidity", SURFACE_DESCRIPTOR_RIGIDITY)
+    finish = descriptor_entry("finish", SURFACE_DESCRIPTOR_FINISH)
+    relief = descriptor_entry("microRelief", SURFACE_DESCRIPTOR_RELIEF)
+
+    roughness = _layer_value(material.get("roughness"), ("base",))
+    finish_value = finish.get("value") if isinstance(finish, dict) else None
+    if roughness is None:
+        errors.append(
+            f"material {material_id!r} assessed surfaceDescriptor needs executable roughness.base"
+        )
+    elif finish_value == "mirror" and roughness > 0.15:
+        errors.append(
+            f"material {material_id!r} mirror finish contradicts roughness.base {roughness:g}"
+        )
+    elif finish_value == "glossy" and roughness > 0.4:
+        errors.append(
+            f"material {material_id!r} glossy finish contradicts roughness.base {roughness:g}"
+        )
+    elif finish_value == "satin" and not 0.25 <= roughness <= 0.7:
+        errors.append(
+            f"material {material_id!r} satin finish contradicts roughness.base {roughness:g}"
+        )
+    elif finish_value == "matte" and roughness < 0.5:
+        errors.append(
+            f"material {material_id!r} matte finish contradicts roughness.base {roughness:g}"
+        )
+
+    if isinstance(relief, dict):
+        relief_value = relief.get("value")
+        channel = relief.get("channel")
+        if channel not in SURFACE_DESCRIPTOR_CHANNELS:
+            errors.append(
+                f"material {material_id!r} surfaceDescriptor.microRelief.channel must be one of: "
+                + ", ".join(sorted(SURFACE_DESCRIPTOR_CHANNELS))
+            )
+            channel = None
+        amplitudes = {
+            "normal": _layer_value(material.get("normal"), ("strength", "amplitude")) or 0.0,
+            "bump": _layer_value(material.get("bump"), ("amplitude", "strength")) or 0.0,
+            "displacement": _layer_value(
+                material.get("displacement"), ("amplitude", "strength")
+            )
+            or 0.0,
+        }
+        if relief_value == "smooth" and any(amount > 0 for amount in amplitudes.values()):
+            errors.append(
+                f"material {material_id!r} smooth microRelief contradicts non-zero normal/bump/displacement"
+            )
+        elif relief_value == "smooth" and channel not in {None, "none"}:
+            errors.append(
+                f"material {material_id!r} smooth microRelief must use channel 'none'"
+            )
+        elif relief_value in SURFACE_DESCRIPTOR_RELIEF - {"smooth"}:
+            if channel == "none":
+                errors.append(
+                    f"material {material_id!r} non-smooth microRelief needs an executable channel"
+                )
+            elif channel in amplitudes and amplitudes[channel] <= 0:
+                errors.append(
+                    f"material {material_id!r} microRelief channel {channel!r} needs positive strength/amplitude"
+                )
+
+
 def validate_local_material_override(
     material_id: str,
     index: int,
     value: Any,
     errors: list[str],
+    evidence_ids: set[str] | None = None,
 ) -> None:
     label = f"material {material_id!r} localOverrides[{index}]"
     if not isinstance(value, dict):
@@ -645,6 +1256,15 @@ def validate_local_material_override(
         and all(isinstance(item, str) and item.strip() for item in evidence_refs)
     ):
         errors.append(f"{label}.evidenceRefs must contain at least one evidence id")
+    elif evidence_ids is not None:
+        missing_evidence = sorted(
+            {str(item) for item in evidence_refs if str(item) not in evidence_ids}
+        )
+        if missing_evidence:
+            errors.append(
+                f"{label}.evidenceRefs contains unknown evidence ids: "
+                + ", ".join(missing_evidence)
+            )
     if layer_type in LOCAL_MATERIAL_METADATA_TYPES:
         return
     amount = _layer_value(value.get("amount"))
@@ -762,7 +1382,13 @@ def validate_material_surface_response(
                 errors.append(f"material {material_id!r} wear.{field} must be an array")
 
 
-def validate_materials(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> set[str]:
+def validate_materials(
+    spec: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+    evidence_ids: set[str] | None = None,
+    for_pass: str | None = None,
+) -> set[str]:
     material_ids: set[str] = set()
     for index, material in enumerate(spec.get("materials", [])):
         if not isinstance(material, dict):
@@ -818,6 +1444,11 @@ def validate_materials(spec: dict[str, Any], errors: list[str], warnings: list[s
                         f"quality: material {material_id!r} textureProjection.mode {mode!r} "
                         "is not emitted directly; provide UV-authored geometry or use a supported mode"
                     )
+                axis = projection.get("axis")
+                if axis is not None and axis not in {"x", "y", "z"}:
+                    errors.append(
+                        f"material {material_id!r} textureProjection.axis must be x, y, or z"
+                    )
                 repeat = projection.get("repeat")
                 if repeat is not None and not (
                     isinstance(repeat, list)
@@ -866,7 +1497,11 @@ def validate_materials(spec: dict[str, Any], errors: list[str], warnings: list[s
                 )
             for override_index, override in enumerate(local_overrides):
                 validate_local_material_override(
-                    material_id, override_index, override, errors
+                    material_id,
+                    override_index,
+                    override,
+                    errors,
+                    evidence_ids,
                 )
         shader_notes = material.get("shaderNotes")
         if shader_notes is not None:
@@ -874,6 +1509,14 @@ def validate_materials(spec: dict[str, Any], errors: list[str], warnings: list[s
         validate_material_profile(material_id, material, errors)
         validate_material_surface_response(material_id, material, errors)
         validate_reference_pbr(material_id, material.get("referencePbr"), errors, warnings)
+        validate_surface_descriptor(
+            material_id,
+            material,
+            evidence_ids,
+            errors,
+            warnings,
+            for_pass,
+        )
     if not material_ids:
         errors.append("at least one material is required")
     return material_ids
@@ -942,7 +1585,7 @@ def validate_action_profile(
     if profile is None:
         if required:
             warnings.append(
-                f"quality: component {component_id!r} is missing actionProfile required by intended use"
+                f"quality: component {component_id!r} is missing actionProfile required by the motion contract"
             )
         return
     if not isinstance(profile, dict):
@@ -1098,6 +1741,148 @@ def validate_string_array(value: Any, label: str, errors: list[str]) -> None:
         errors.append(f"{label} must be an array of strings")
 
 
+def component_semantic_name_failure(value: str) -> str | None:
+    tokens = re.findall(r"[a-z0-9]+", value.lower())
+    if not tokens:
+        return "contains no semantic words"
+    placeholders = sorted(set(tokens) & COMPONENT_PLACEHOLDER_TOKENS)
+    if placeholders:
+        return "contains placeholder token(s): " + ", ".join(placeholders)
+    structural_tokens = [
+        token
+        for token in tokens
+        if not token.isdigit()
+        and token not in COMPONENT_GENERIC_TOKENS
+        and token not in COMPONENT_QUALIFIER_TOKENS
+    ]
+    if not structural_tokens:
+        return "contains only generic nouns, position qualifiers, or indices"
+    return None
+
+
+def validate_component_naming(
+    component: dict[str, Any],
+    index: int,
+    errors: list[str],
+) -> None:
+    component_id = component.get("id")
+    if not isinstance(component_id, str) or not component_id.strip():
+        return
+    is_root = component_id == "root" and component.get("parent") is None
+    if not COMPONENT_ID_PATTERN.fullmatch(component_id):
+        errors.append(
+            f"component {component_id!r} id must use semantic kebab-case: "
+            "<system>-<structural-part>[-<side|index|function>]"
+        )
+    if not is_root:
+        id_failure = component_semantic_name_failure(component_id)
+        if id_failure:
+            errors.append(
+                f"component {component_id!r} id is not construction-specific: {id_failure}; "
+                "use a name such as 'main-rotor-blade-01' instead of 'part-01'"
+            )
+    name = component.get("name")
+    if not isinstance(name, str) or not name.strip():
+        errors.append(f"componentTree[{index}].name must be a non-empty structural name")
+    elif not is_root:
+        name_failure = component_semantic_name_failure(name)
+        if name_failure:
+            errors.append(
+                f"component {component_id!r} name {name!r} is not construction-specific: "
+                f"{name_failure}"
+            )
+
+
+def validate_uncertainty_contract(
+    spec: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    contracts = {
+        "assumptions": ("id", "statement", "scope", "bounds", "impactIfWrong", "falsifyingCheck"),
+        "risks": ("id", "statement", "scope", "impact", "mitigation"),
+    }
+    for field, required_fields in contracts.items():
+        records = spec.get(field)
+        if records is None:
+            warnings.append(f"quality: missing {field}; uncertainty cannot be bounded explicitly")
+            continue
+        if not isinstance(records, list):
+            errors.append(f"{field} must be an array")
+            continue
+        for index, record in enumerate(records):
+            label = f"{field}[{index}]"
+            if isinstance(record, str):
+                warnings.append(
+                    f"quality: {label} is an unbounded legacy string; use an object with "
+                    + ", ".join(required_fields)
+                )
+                continue
+            if not isinstance(record, dict):
+                errors.append(f"{label} must be an object")
+                continue
+            for required_field in required_fields:
+                value = record.get(required_field)
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"{label}.{required_field} must be a non-empty string")
+            evidence_refs = record.get("evidenceRefs")
+            if evidence_refs is not None:
+                validate_string_array(evidence_refs, f"{label}.evidenceRefs", errors)
+
+
+def validate_repetition_attachment_relations(
+    spec: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    systems = spec.get("repetitionSystems")
+    if not isinstance(systems, list):
+        return
+    component_ids = {
+        item.get("id")
+        for item in spec.get("componentTree", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    for index, system in enumerate(systems):
+        if not isinstance(system, dict):
+            continue
+        label = f"repetitionSystems[{index}].attachmentRelation"
+        relation = system.get("attachmentRelation")
+        if relation is None:
+            warnings.append(
+                f"quality: {label} must declare contact, overlap, gap, or free so repeated parts cannot float ambiguously"
+            )
+            continue
+        if not isinstance(relation, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        relation_type = relation.get("type")
+        if relation_type not in VALID_REPETITION_ATTACHMENT_RELATIONS:
+            errors.append(
+                f"{label}.type must be one of: "
+                + ", ".join(sorted(VALID_REPETITION_ATTACHMENT_RELATIONS))
+            )
+            continue
+        if relation_type == "free":
+            continue
+        host_ref = relation.get("hostComponentRef")
+        if not isinstance(host_ref, str) or not host_ref.strip():
+            errors.append(f"{label}.hostComponentRef must be a non-empty component id")
+        elif host_ref not in component_ids:
+            errors.append(f"{label}.hostComponentRef references unknown component {host_ref!r}")
+        gap_tolerance = relation.get("gapTolerance")
+        if not is_number(gap_tolerance) or float(gap_tolerance) < 0:
+            errors.append(f"{label}.gapTolerance must be a non-negative number")
+        if relation_type == "overlap":
+            overlap = relation.get("overlap")
+            if not is_number(overlap) or float(overlap) <= 0:
+                errors.append(f"{label}.overlap must be a positive number")
+        if relation_type == "gap":
+            gap = relation.get("gap")
+            if not is_number(gap) or float(gap) < 0:
+                errors.append(f"{label}.gap must be a non-negative number")
+
+
 EMITTED_LOCAL_PATH_FEATURES = {"seam", "seam-line", "raised-ridge", "fabric-stitch"}
 EMITTED_LOCAL_POINT_FEATURES = {"button", "rivet", "screw"}
 
@@ -1211,6 +1996,7 @@ def validate_components(
         if component_id in ids:
             errors.append(f"duplicate component id {component_id!r}")
         ids.add(component_id)
+        validate_component_naming(component, index, errors)
         kind = component_type(component)
         if schema_at_least(spec, CURRENT_SCHEMA_VERSION):
             if "componentType" not in component:
@@ -1398,6 +2184,386 @@ def validate_components(
                 )
 
 
+def _detail_parameter_exists(component: dict[str, Any], path: str) -> bool:
+    current: Any = component
+    for segment in path.split("."):
+        if not isinstance(current, dict) or segment not in current:
+            return False
+        current = current[segment]
+    return is_number(current) or (
+        isinstance(current, list) and current and all(is_number(item) for item in current)
+    )
+
+
+def _executable_geometry_feature_ids(component: dict[str, Any]) -> set[str]:
+    """Index named records only from registered, generator-consumed collections."""
+
+    feature_ids: set[str] = set()
+    descriptor = component.get("geometryDescriptor")
+    parameters = descriptor.get("parameters") if isinstance(descriptor, dict) else None
+    named_collections = {"openings", "nodes", "sources", "surfaceModifiers"}
+
+    def visit_parameters(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        for collection_name in named_collections:
+            collection = value.get(collection_name)
+            if not isinstance(collection, list):
+                continue
+            for item in collection:
+                if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+                    feature_ids.add(item["id"])
+        # Instanced/scattered primitives may embed another registered primitive.
+        for nested_name in ("baseParameters", "sourceParameters"):
+            visit_parameters(value.get(nested_name))
+
+    visit_parameters(parameters)
+    return feature_ids
+
+
+def validate_detail_decomposition(
+    spec: dict[str, Any],
+    material_ids: set[str],
+    evidence_ids: set[str],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    """Require complex components to expose executable, reviewable sub-detail."""
+
+    contract = spec.get("detailDecompositionContract")
+    if contract is None:
+        warnings.append(
+            "quality: missing detailDecompositionContract; complex components may collapse into one vague block"
+        )
+        contract_planned = False
+    elif not isinstance(contract, dict):
+        errors.append("detailDecompositionContract must be an object")
+        contract_planned = False
+    else:
+        if contract.get("version") != 1:
+            errors.append("detailDecompositionContract.version must be integer 1")
+        status = contract.get("status")
+        if status not in VALID_DETAIL_CONTRACT_STATUSES:
+            errors.append("detailDecompositionContract.status must be unassessed or planned")
+        contract_planned = status == "planned"
+        rules = contract.get("rules")
+        validate_string_array(rules, "detailDecompositionContract.rules", errors)
+        if isinstance(rules, list) and not any(item.strip() for item in rules):
+            warnings.append("quality: detailDecompositionContract.rules is empty")
+        if status == "unassessed":
+            warnings.append(
+                "quality: detailDecompositionContract is unassessed; inventory visible sub-detail before geometry generation"
+            )
+
+    components = [item for item in spec.get("componentTree", []) if isinstance(item, dict)]
+    component_lookup = {
+        str(item["id"]): item
+        for item in components
+        if isinstance(item.get("id"), str) and item["id"].strip()
+    }
+    children_by_parent: dict[str, set[str]] = {}
+    for item in components:
+        item_id = item.get("id")
+        parent = item.get("parent")
+        if isinstance(item_id, str) and isinstance(parent, str):
+            children_by_parent.setdefault(parent, set()).add(item_id)
+    repetition_ids = {
+        str(item["id"])
+        for item in spec.get("repetitionSystems", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    topology = spec.get("surfaceTopologyPlan")
+    raw_topology_groups = (
+        topology.get("groups", [])
+        if isinstance(topology, dict) and isinstance(topology.get("groups"), list)
+        else []
+    )
+    topology_groups = {
+        str(item["id"]): item
+        for item in raw_topology_groups
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+    }
+    feature_ids: set[str] = set()
+
+    for component in components:
+        component_id = component.get("id")
+        if not isinstance(component_id, str) or not component_id:
+            continue
+        if component_type(component) == "assembly":
+            continue
+        label = f"component {component_id!r} detailPlan"
+        plan = component.get("detailPlan")
+        if plan is None:
+            message = f"{label} is required to prevent an undifferentiated component"
+            if contract_planned:
+                errors.append(message)
+            else:
+                warnings.append(f"quality: {message}")
+            continue
+        if not isinstance(plan, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        status = plan.get("status")
+        if status not in VALID_DETAIL_CONTRACT_STATUSES:
+            errors.append(f"{label}.status must be unassessed or planned")
+            continue
+        if status != "planned":
+            message = f"{label} must be planned before this component can be generated"
+            if contract_planned:
+                errors.append(message)
+            else:
+                warnings.append(f"quality: {message}")
+            continue
+
+        complexity = plan.get("observedComplexity")
+        if complexity not in VALID_DETAIL_COMPLEXITIES - {"unassessed"}:
+            errors.append(f"{label}.observedComplexity must be simple, compound, or complex")
+        mode = plan.get("decompositionMode")
+        if mode not in VALID_DETAIL_DECOMPOSITION_MODES - {"unassessed"}:
+            errors.append(
+                f"{label}.decompositionMode must be atomic, children, features, or hybrid"
+            )
+        declared_children = plan.get("childComponentIds")
+        validate_string_array(declared_children, f"{label}.childComponentIds", errors)
+        if not isinstance(declared_children, list):
+            declared_children = []
+        elif len(set(declared_children)) != len(declared_children):
+            errors.append(f"{label}.childComponentIds contains duplicates")
+        declared_child_set = {item for item in declared_children if isinstance(item, str)}
+        owner_module_id = component.get("moduleId")
+        actual_children = {
+            child_id
+            for child_id in children_by_parent.get(component_id, set())
+            if component_lookup.get(child_id, {}).get("moduleId") == owner_module_id
+        }
+        if declared_child_set != actual_children:
+            missing = sorted(actual_children - declared_child_set)
+            extra = sorted(declared_child_set - actual_children)
+            errors.append(
+                f"{label}.childComponentIds must exactly match direct component children; "
+                f"missing={missing}, extra={extra}"
+            )
+        features = plan.get("features")
+        if not isinstance(features, list):
+            errors.append(f"{label}.features must be an array")
+            features = []
+        evidence_refs = plan.get("evidenceRefs")
+        validate_string_array(evidence_refs, f"{label}.evidenceRefs", errors)
+        if not isinstance(evidence_refs, list) or not evidence_refs:
+            errors.append(f"{label}.evidenceRefs must contain at least one evidence id")
+        else:
+            for evidence_ref in evidence_refs:
+                if evidence_ids and evidence_ref not in evidence_ids:
+                    errors.append(f"{label}.evidenceRefs references missing evidence {evidence_ref!r}")
+        coverage_notes = plan.get("coverageNotes")
+        if not isinstance(coverage_notes, str) or not coverage_notes.strip():
+            errors.append(
+                f"{label}.coverageNotes must state which visible boundaries and internal details were inventoried"
+            )
+        atomicity_reason = plan.get("atomicityReason")
+        if mode == "atomic":
+            if complexity in {"compound", "complex"}:
+                errors.append(
+                    f"{label} cannot be atomic when observedComplexity is {complexity!r}"
+                )
+            if actual_children or features:
+                errors.append(f"{label} atomic mode cannot declare children or features")
+            if not isinstance(atomicity_reason, str) or not atomicity_reason.strip():
+                errors.append(
+                    f"{label}.atomicityReason must explain why one undivided form is sufficient"
+                )
+        elif mode == "children":
+            if not actual_children:
+                errors.append(f"{label} children mode requires at least one direct child component")
+            if features:
+                errors.append(f"{label} children mode cannot contain features; use hybrid")
+        elif mode == "features":
+            if not features:
+                errors.append(f"{label} features mode requires at least one inventoried feature")
+            if actual_children:
+                errors.append(f"{label} features mode cannot have child components; use hybrid")
+        elif mode == "hybrid":
+            if not actual_children or not features:
+                errors.append(f"{label} hybrid mode requires both child components and features")
+        local_feature_ids = {
+            str(item["id"])
+            for item in component.get("localFeatures", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        geometry_feature_ids = _executable_geometry_feature_ids(component)
+        for index, feature in enumerate(features):
+            feature_label = f"{label}.features[{index}]"
+            if not isinstance(feature, dict):
+                errors.append(f"{feature_label} must be an object")
+                continue
+            feature_id = feature.get("id")
+            if not isinstance(feature_id, str) or not feature_id.strip():
+                errors.append(f"{feature_label}.id is required")
+            else:
+                if not COMPONENT_ID_PATTERN.fullmatch(feature_id):
+                    errors.append(f"{feature_label}.id must use semantic kebab-case")
+                naming_failure = component_semantic_name_failure(feature_id)
+                if naming_failure:
+                    errors.append(
+                        f"{feature_label}.id is not construction-specific: {naming_failure}"
+                    )
+                if feature_id in feature_ids:
+                    errors.append(f"duplicate detail feature id {feature_id!r}")
+                feature_ids.add(feature_id)
+            name = feature.get("name")
+            if not isinstance(name, str) or not name.strip():
+                errors.append(f"{feature_label}.name must be a non-empty construction name")
+            else:
+                naming_failure = component_semantic_name_failure(name)
+                if naming_failure:
+                    errors.append(
+                        f"{feature_label}.name is not construction-specific: {naming_failure}"
+                    )
+            if feature.get("hostComponentId") != component_id:
+                errors.append(f"{feature_label}.hostComponentId must equal {component_id!r}")
+            if feature.get("scaleBand") not in VALID_DETAIL_SCALE_BANDS:
+                errors.append(f"{feature_label}.scaleBand must be macro, meso, or micro")
+            feature_class = feature.get("featureClass")
+            if feature_class not in VALID_DETAIL_FEATURE_CLASSES:
+                errors.append(
+                    f"{feature_label}.featureClass must be one of: "
+                    + ", ".join(sorted(VALID_DETAIL_FEATURE_CLASSES))
+                )
+            geometry_effect = feature.get("geometryEffect")
+            if geometry_effect not in VALID_DETAIL_GEOMETRY_EFFECTS:
+                errors.append(
+                    f"{feature_label}.geometryEffect must be silhouette, surface, cutout, or none"
+                )
+            placement = feature.get("placement")
+            if not isinstance(placement, dict):
+                errors.append(f"{feature_label}.placement must be an object")
+            else:
+                if placement.get("referenceFrame") != "host-local":
+                    errors.append(f"{feature_label}.placement.referenceFrame must be 'host-local'")
+                for field in ("position", "rotation"):
+                    if not as_number_list(placement.get(field), 3):
+                        errors.append(f"{feature_label}.placement.{field} must be three numbers")
+                size = placement.get("size")
+                if not as_number_list(size, 3) or any(float(item) <= 0 for item in size or []):
+                    errors.append(f"{feature_label}.placement.size must be three positive numbers")
+                if placement.get("units") not in {
+                    "relative", "meters", "centimeters", "millimeters"
+                }:
+                    errors.append(f"{feature_label}.placement.units is invalid")
+            realization = feature.get("realization")
+            if not isinstance(realization, dict):
+                errors.append(f"{feature_label}.realization must be an object")
+                realization = {}
+            realization_mode = realization.get("mode")
+            target_id = realization.get("targetId")
+            if realization_mode not in VALID_DETAIL_REALIZATION_MODES:
+                errors.append(
+                    f"{feature_label}.realization.mode must be one of: "
+                    + ", ".join(sorted(VALID_DETAIL_REALIZATION_MODES))
+                )
+            if not isinstance(target_id, str) or not target_id:
+                errors.append(f"{feature_label}.realization.targetId is required")
+            elif realization_mode == "component" and target_id not in declared_child_set:
+                errors.append(
+                    f"{feature_label}.realization.targetId must name a declared direct child component"
+                )
+            elif realization_mode == "local-feature" and target_id not in local_feature_ids:
+                errors.append(
+                    f"{feature_label}.realization.targetId references unknown local feature {target_id!r}"
+                )
+            elif realization_mode == "topology-group":
+                group = topology_groups.get(target_id)
+                if group is None:
+                    errors.append(
+                        f"{feature_label}.realization.targetId references unknown topology group {target_id!r}"
+                    )
+                elif component_id not in group.get("componentRefs", []):
+                    errors.append(
+                        f"{feature_label} topology group {target_id!r} does not include host {component_id!r}"
+                    )
+                implementation_id = realization.get("implementationId")
+                if not isinstance(implementation_id, str) or implementation_id not in geometry_feature_ids:
+                    errors.append(
+                        f"{feature_label} topology-group realization needs implementationId for an exact named host geometry feature"
+                    )
+            elif realization_mode == "repetition-system" and target_id not in repetition_ids:
+                errors.append(
+                    f"{feature_label}.realization.targetId references unknown repetition system {target_id!r}"
+                )
+            elif realization_mode == "material" and target_id not in material_ids:
+                errors.append(
+                    f"{feature_label}.realization.targetId references unknown material {target_id!r}"
+                )
+            elif realization_mode == "geometry-feature" and target_id not in geometry_feature_ids:
+                errors.append(
+                    f"{feature_label}.realization.targetId references unknown named host geometry feature {target_id!r}"
+                )
+            elif realization_mode == "geometry-parameter":
+                parameter_path = realization.get("parameterPath")
+                if target_id != component_id:
+                    errors.append(
+                        f"{feature_label} geometry-parameter realization must target its host component"
+                    )
+                if (
+                    not isinstance(parameter_path, str)
+                    or not DETAIL_PARAMETER_PATH_PATTERN.fullmatch(parameter_path)
+                    or not parameter_path.startswith(
+                        ("geometryDescriptor.", "dimensions.", "transform.", "surfaceDetail.")
+                    )
+                ):
+                    errors.append(
+                        f"{feature_label}.realization.parameterPath must name an executable host geometry field"
+                    )
+                elif not _detail_parameter_exists(component, parameter_path):
+                    errors.append(
+                        f"{feature_label}.realization.parameterPath {parameter_path!r} does not exist or is not numeric"
+                    )
+            if feature_class == "structural-part" and realization_mode != "component":
+                errors.append(f"{feature_label} structural-part must realize as a child component")
+            if feature_class == "repetition" and realization_mode != "repetition-system":
+                errors.append(f"{feature_label} repetition must realize as a repetition-system")
+            if feature_class == "material-detail" and realization_mode != "material":
+                errors.append(f"{feature_label} material-detail must realize as a material")
+            if realization_mode == "material" and geometry_effect != "none":
+                errors.append(
+                    f"{feature_label} material realization cannot claim silhouette, surface, or cutout geometry"
+                )
+            material_refs = feature.get("materialRefs")
+            validate_string_array(material_refs, f"{feature_label}.materialRefs", errors)
+            if isinstance(material_refs, list):
+                for material_ref in material_refs:
+                    if material_ref not in material_ids:
+                        errors.append(
+                            f"{feature_label}.materialRefs references unknown material {material_ref!r}"
+                        )
+            feature_evidence = feature.get("evidenceRefs")
+            validate_string_array(feature_evidence, f"{feature_label}.evidenceRefs", errors)
+            if not isinstance(feature_evidence, list) or not feature_evidence:
+                errors.append(f"{feature_label}.evidenceRefs must not be empty")
+            elif evidence_ids:
+                for evidence_ref in feature_evidence:
+                    if evidence_ref not in evidence_ids:
+                        errors.append(
+                            f"{feature_label}.evidenceRefs references missing evidence {evidence_ref!r}"
+                        )
+            validate_unit_interval(feature.get("confidence"), f"{feature_label}.confidence", errors)
+            acceptance = feature.get("acceptance")
+            if not isinstance(acceptance, dict):
+                errors.append(f"{feature_label}.acceptance must be an object")
+            else:
+                for field in ("evidenceRefs", "criteria"):
+                    value = acceptance.get(field)
+                    validate_string_array(value, f"{feature_label}.acceptance.{field}", errors)
+                    if not isinstance(value, list) or not value or not any(item.strip() for item in value):
+                        errors.append(f"{feature_label}.acceptance.{field} must not be empty")
+                for evidence_ref in acceptance.get("evidenceRefs", []):
+                    if evidence_ids and evidence_ref not in evidence_ids:
+                        errors.append(
+                            f"{feature_label}.acceptance.evidenceRefs references missing evidence {evidence_ref!r}"
+                        )
+
+
 def validate_quality_targets(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
     targets = spec.get("qualityTargets")
     if targets is None:
@@ -1416,8 +2582,11 @@ def validate_quality_targets(spec: dict[str, Any], errors: list[str], warnings: 
         if not isinstance(diagnostics, dict):
             errors.append("qualityTargets.diagnosticTargets must be an object")
         else:
+            if "silhouetteIou" in diagnostics:
+                errors.append(
+                    "qualityTargets.diagnosticTargets.silhouetteIou has been removed"
+                )
             for field in (
-                "silhouetteIou",
                 "maximumCentroidDelta",
                 "maximumAspectRatioDelta",
                 "minimumDetailEnergyRatio",
@@ -1501,6 +2670,416 @@ def validate_quality_contract(spec: dict[str, Any], errors: list[str], warnings:
             warnings.append(f"quality: qualityContract.{field} is empty")
 
 
+def validate_phase_execution_contract(
+    spec: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    contract = spec.get("phaseExecutionContract")
+    if contract is None:
+        warnings.append(
+            "quality: missing phaseExecutionContract; the LLM may front-load unrelated spec and validation work"
+        )
+        return
+    if not isinstance(contract, dict):
+        errors.append("phaseExecutionContract must be an object")
+        return
+    version = contract.get("version")
+    if version not in {1, 2, 3, 4}:
+        errors.append("phaseExecutionContract.version must be integer 1, 2, 3, or 4")
+    if contract.get("mode") != "progressive-visual-loop":
+        errors.append("phaseExecutionContract.mode must be 'progressive-visual-loop'")
+    if contract.get("phaseOrder") != ["blockout", "form", "lookdev", "interaction"]:
+        errors.append(
+            "phaseExecutionContract.phaseOrder must be blockout, form, lookdev, interaction"
+        )
+    if contract.get("specStrategy") != "stable-core-plus-phase-delta":
+        errors.append(
+            "phaseExecutionContract.specStrategy must be 'stable-core-plus-phase-delta'"
+        )
+    validate_string_array(
+        contract.get("stableCoreFields"),
+        "phaseExecutionContract.stableCoreFields",
+        errors,
+    )
+    owned = contract.get("phaseOwnedFields")
+    if not isinstance(owned, dict):
+        errors.append("phaseExecutionContract.phaseOwnedFields must be an object")
+    else:
+        for phase in ("blockout", "form", "lookdev", "interaction"):
+            validate_string_array(
+                owned.get(phase),
+                f"phaseExecutionContract.phaseOwnedFields.{phase}",
+                errors,
+            )
+    authority = contract.get("correctionAuthority")
+    if version == 4:
+        if not isinstance(authority, dict):
+            warnings.append(
+                "quality: phaseExecutionContract.correctionAuthority is missing; "
+                "sync the pipeline to enable cumulative prior-phase repair"
+            )
+        else:
+            if authority.get("mode") != "cumulative-prior-phase-repair":
+                errors.append(
+                    "phaseExecutionContract.correctionAuthority.mode must be "
+                    "'cumulative-prior-phase-repair'"
+                )
+            for field in (
+                "laterPhaseMayRepairEarlierPhase",
+                "futurePhaseEditsForbidden",
+                "impactAssessmentRequired",
+                "challengerOnly",
+                "previousRenderComparisonRequired",
+                "protectedPhaseRegressionVeto",
+                "priorPhaseReviewRequired",
+                "priorPhaseImprovementAllowed",
+                "priorPhaseIsNotFrozen",
+            ):
+                if authority.get(field) is not True:
+                    errors.append(
+                        f"phaseExecutionContract.correctionAuthority.{field} must be true"
+                    )
+            if not isinstance(authority.get("rule"), str) or len(
+                authority.get("rule", "").strip()
+            ) < 24:
+                errors.append(
+                    "phaseExecutionContract.correctionAuthority.rule must be concrete"
+                )
+    cycle = contract.get("cycle")
+    if not isinstance(cycle, dict):
+        errors.append("phaseExecutionContract.cycle must be an object")
+    else:
+        expected_steps = (
+            [
+                "spec-delta",
+                "build-render",
+                "reference-comparison",
+                "independent-review",
+                "promote-or-rollback",
+            ]
+            if version == 1
+            else [
+                "spec-delta",
+                "build-render",
+                "reference-comparison",
+                "blind-visual-scout",
+                "independent-review",
+                    *(
+                        ["promote-or-rollback"]
+                        if version == 2
+                        else ["system-promote-or-rollback", "user-approval"]
+                    ),
+            ]
+        )
+        if cycle.get("steps") != expected_steps:
+            errors.append(
+                "phaseExecutionContract.cycle.steps must be the canonical visual loop "
+                "for its contract version"
+            )
+        if cycle.get("maximumNonVisualOperationsBeforeRender") != 2:
+            errors.append(
+                "phaseExecutionContract.cycle.maximumNonVisualOperationsBeforeRender must be 2"
+            )
+        if cycle.get("visualProgressRequired") is not True:
+            errors.append("phaseExecutionContract.cycle.visualProgressRequired must be true")
+        if cycle.get("comparisonRequired") is not True:
+            errors.append("phaseExecutionContract.cycle.comparisonRequired must be true")
+        comparison_authority = cycle.get("comparisonAuthority")
+        accepted_authorities = (
+            {
+                "observed-reference",
+                "prepared-target-with-original-identity-guardrail",
+            }
+            if version == 1
+            else {"prepared-target-with-original-identity-guardrail"}
+        )
+        if comparison_authority not in accepted_authorities:
+            errors.append(
+                "phaseExecutionContract.cycle.comparisonAuthority must be "
+                "'prepared-target-with-original-identity-guardrail' "
+                "(legacy version 1 may use 'observed-reference')"
+            )
+        if cycle.get("maximumConsecutiveNonImprovements") != 3:
+            errors.append(
+                "phaseExecutionContract.cycle.maximumConsecutiveNonImprovements must be 3"
+            )
+    visual_scout = contract.get("visualScout")
+    if version == 1:
+        warnings.append(
+            "quality: phaseExecutionContract version 1 has no blind visual scout; "
+            "regenerate or upgrade the phase contract"
+        )
+    elif not isinstance(visual_scout, dict):
+        errors.append("phaseExecutionContract.visualScout must be an object")
+    else:
+        expected_allowlist = [
+            "originalImage",
+            "currentRender",
+            "previousRender",
+            "sideBySideComparison",
+            *([] if version in {2, 3} else ["phaseId", "phaseRubric"]),
+        ]
+        required_denials = {
+            "spec",
+            "phasePacket",
+            "componentIds",
+            "parameters",
+            "scores",
+            "builderDefense",
+            "primaryVerdict",
+        }
+        if visual_scout.get("required") is not True:
+            errors.append("phaseExecutionContract.visualScout.required must be true")
+        if visual_scout.get("role") != "blind-visual-scout":
+            errors.append(
+                "phaseExecutionContract.visualScout.role must be 'blind-visual-scout'"
+            )
+        if visual_scout.get("execution") != "parallel-with-primary-reviewer":
+            errors.append(
+                "phaseExecutionContract.visualScout.execution must be "
+                "'parallel-with-primary-reviewer'"
+            )
+        if visual_scout.get("inputAllowlist") != expected_allowlist:
+            errors.append(
+                "phaseExecutionContract.visualScout.inputAllowlist must contain only "
+                "the canonical image inputs"
+                + (
+                    ""
+                    if version in {2, 3}
+                    else " plus phaseId and phaseRubric"
+                )
+            )
+        denylist = visual_scout.get("inputDenylist")
+        if not isinstance(denylist, list) or not required_denials.issubset(
+            {item for item in denylist if isinstance(item, str)}
+        ):
+            errors.append(
+                "phaseExecutionContract.visualScout.inputDenylist must exclude spec, "
+                "IDs, parameters, scores, builder defense, and primary verdict"
+            )
+        output = visual_scout.get("output")
+        if not isinstance(output, dict):
+            errors.append("phaseExecutionContract.visualScout.output must be an object")
+        else:
+            if version in {2, 3}:
+                for field in (
+                    "advisoryOnly",
+                    "scoresForbidden",
+                    "verdictForbidden",
+                    "numericFixesForbidden",
+                ):
+                    if output.get(field) is not True:
+                        errors.append(
+                            f"phaseExecutionContract.visualScout.output.{field} must be true"
+                        )
+                if output.get("gateAuthority") is not False:
+                    errors.append(
+                        "phaseExecutionContract.visualScout.output.gateAuthority must be false"
+                    )
+                expected_scan_fields = ["visualRegion", "status", "observation"]
+            else:
+                if visual_scout.get("phaseRubrics") != blind_scout_phase_rubrics():
+                    errors.append(
+                        "phaseExecutionContract.visualScout.phaseRubrics must define "
+                        "the canonical phase-scoped review categories"
+                    )
+                if output.get("artifactVersion") != BLIND_SCOUT_ARTIFACT_VERSION:
+                    errors.append(
+                        "phaseExecutionContract.visualScout.output.artifactVersion "
+                        f"must be {BLIND_SCOUT_ARTIFACT_VERSION}"
+                    )
+                if output.get("advisoryOnly") is not False:
+                    errors.append(
+                        "phaseExecutionContract.visualScout.output.advisoryOnly must be false"
+                    )
+                if output.get("gateAuthority") is not True:
+                    errors.append(
+                        "phaseExecutionContract.visualScout.output.gateAuthority must be true"
+                    )
+                for field in ("scoresForbidden", "numericFixesForbidden"):
+                    if output.get(field) is not True:
+                        errors.append(
+                            f"phaseExecutionContract.visualScout.output.{field} must be true"
+                        )
+                if output.get("verdictForbidden") is not False:
+                    errors.append(
+                        "phaseExecutionContract.visualScout.output.verdictForbidden must be false"
+                    )
+                if output.get("decisionValues") != ["approve", "reject"]:
+                    errors.append(
+                        "phaseExecutionContract.visualScout.output.decisionValues must be approve, reject"
+                    )
+                if output.get("maxObservations") != MAX_BLIND_SCOUT_OBSERVATIONS:
+                    errors.append(
+                        "phaseExecutionContract.visualScout.output.maxObservations must be 3"
+                    )
+                expected_scan_fields = [
+                    "visualRegion",
+                    "severity",
+                    "category",
+                    "phaseScope",
+                    "direction",
+                    "viewIds",
+                ]
+            expected_priority_fields = [
+                "visualRegion",
+                "category",
+                *([] if version in {2, 3} else ["phaseScope"]),
+                *([] if version in {2, 3} else ["severity"]),
+                "direction",
+                "viewIds",
+            ]
+            if output.get("componentScanFields") != expected_scan_fields:
+                errors.append(
+                    "phaseExecutionContract.visualScout.output.componentScanFields "
+                    "must contain only the canonical blind-scout observation fields"
+                )
+            if output.get("priorityDirectionFields") != expected_priority_fields:
+                errors.append(
+                    "phaseExecutionContract.visualScout.output.priorityDirectionFields "
+                    "must contain only the canonical blind-scout direction fields"
+                )
+    quality_gate = contract.get("qualityGate")
+    if version == 4:
+        if not isinstance(quality_gate, dict):
+            errors.append("phaseExecutionContract.qualityGate must be an object")
+        else:
+            if "iouFloor" in quality_gate:
+                errors.append(
+                    "phaseExecutionContract.qualityGate.iouFloor has been removed"
+                )
+            if quality_gate.get("mode") != "ai-scout-human":
+                errors.append(
+                    "phaseExecutionContract.qualityGate.mode must be 'ai-scout-human'"
+                )
+            if quality_gate.get("aiOverallFloor") != SIMPLIFIED_AI_OVERALL_FLOOR:
+                errors.append(
+                    "phaseExecutionContract.qualityGate.aiOverallFloor must be 0.7"
+                )
+            if quality_gate.get("blindScoutDecisions") != ["approve", "reject"]:
+                errors.append(
+                    "phaseExecutionContract.qualityGate.blindScoutDecisions must be approve, reject"
+                )
+            if quality_gate.get("maxBlindScoutObservations") != MAX_BLIND_SCOUT_OBSERVATIONS:
+                errors.append(
+                    "phaseExecutionContract.qualityGate.maxBlindScoutObservations must be 3"
+                )
+    human_approval = contract.get("humanApproval")
+    if version in {1, 2}:
+        warnings.append(
+            f"quality: phaseExecutionContract version {version} has no mandatory "
+            "post-system user approval gate"
+        )
+    elif not isinstance(human_approval, dict):
+        errors.append("phaseExecutionContract.humanApproval must be an object")
+    else:
+        if human_approval.get("required") is not True:
+            errors.append("phaseExecutionContract.humanApproval.required must be true")
+        if human_approval.get("scope") != "every-active-phase":
+            errors.append(
+                "phaseExecutionContract.humanApproval.scope must be 'every-active-phase'"
+            )
+        if human_approval.get("order") != "after-system-pass-before-next-phase":
+            errors.append(
+                "phaseExecutionContract.humanApproval.order must be "
+                "'after-system-pass-before-next-phase'"
+            )
+        if human_approval.get("systemPassPrerequisite") is not True:
+            errors.append(
+                "phaseExecutionContract.humanApproval.systemPassPrerequisite must be true"
+            )
+        if human_approval.get("approvalDecisions") != [
+            "approved",
+            "changes-requested",
+        ]:
+            errors.append(
+                "phaseExecutionContract.humanApproval.approvalDecisions must be "
+                "approved, changes-requested"
+            )
+        if human_approval.get("bindingFields") != [
+            "passId",
+            "reviewKey",
+            "specHash",
+            "reviewedArtifactSha256",
+        ]:
+            errors.append(
+                "phaseExecutionContract.humanApproval.bindingFields must bind the "
+                "phase, review, spec, and reviewed artifact"
+            )
+        if human_approval.get("changesRequestedFields") != [
+            "visualRegion",
+            "problem",
+            "expectedDirection",
+        ]:
+            errors.append(
+                "phaseExecutionContract.humanApproval.changesRequestedFields must "
+                "identify visualRegion, problem, and expectedDirection"
+            )
+        validate_string_array(
+            human_approval.get("rules"),
+            "phaseExecutionContract.humanApproval.rules",
+            errors,
+        )
+    approvals = spec.get("userPhaseApprovals")
+    if version in {3, 4} and not isinstance(approvals, list):
+        errors.append("userPhaseApprovals must be an array")
+    elif isinstance(approvals, list):
+        valid_passes = set(canonical_pass_order(spec))
+        for index, approval in enumerate(approvals):
+            label = f"userPhaseApprovals[{index}]"
+            if not isinstance(approval, dict):
+                errors.append(f"{label} must be an object")
+                continue
+            if approval.get("passId") not in valid_passes:
+                errors.append(f"{label}.passId must name an active phase")
+            if approval.get("decision") not in {"approved", "changes-requested"}:
+                errors.append(
+                    f"{label}.decision must be approved or changes-requested"
+                )
+            review_key = approval.get("reviewKey")
+            if not isinstance(review_key, str) or len(review_key) != 64:
+                errors.append(f"{label}.reviewKey must be a SHA-256 digest")
+            if not isinstance(approval.get("specHash"), str) or not approval["specHash"]:
+                errors.append(f"{label}.specHash is required")
+            if not isinstance(approval.get("reviewedArtifactSha256"), str):
+                errors.append(f"{label}.reviewedArtifactSha256 must be a string")
+            if not isinstance(approval.get("userStatement"), str) or not approval[
+                "userStatement"
+            ].strip():
+                errors.append(f"{label}.userStatement is required")
+            if not isinstance(approval.get("recordedAt"), str) or not approval[
+                "recordedAt"
+            ].strip():
+                errors.append(f"{label}.recordedAt is required")
+            feedback = approval.get("feedback")
+            if not isinstance(feedback, list):
+                errors.append(f"{label}.feedback must be an array")
+                continue
+            if approval.get("decision") == "approved" and feedback:
+                errors.append(f"{label}.feedback must be empty for approved")
+            if approval.get("decision") == "changes-requested" and not feedback:
+                errors.append(f"{label}.feedback is required for changes-requested")
+            for feedback_index, item in enumerate(feedback):
+                feedback_label = f"{label}.feedback[{feedback_index}]"
+                if not isinstance(item, dict):
+                    errors.append(f"{feedback_label} must be an object")
+                    continue
+                for field in ("visualRegion", "problem", "expectedDirection"):
+                    if not isinstance(item.get(field), str) or not item[field].strip():
+                        errors.append(f"{feedback_label}.{field} is required")
+    deferred = contract.get("deferredWork")
+    if not isinstance(deferred, dict):
+        errors.append("phaseExecutionContract.deferredWork must be an object")
+    else:
+        for phase in ("form", "lookdev", "interaction", "finalization"):
+            validate_string_array(
+                deferred.get(phase),
+                f"phaseExecutionContract.deferredWork.{phase}",
+                errors,
+            )
+
+
 def validate_quality_depth(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
     contract = spec.get("qualityContract")
     if not isinstance(contract, dict) or not isinstance(contract.get("minimumSpecDepth"), dict):
@@ -1514,11 +3093,7 @@ def validate_quality_depth(spec: dict[str, Any], errors: list[str], warnings: li
     level_counts = {
         "macroComponents": sum(1 for item in components if item.get("level") == "macro"),
         "mesoComponents": sum(1 for item in components if item.get("level") == "meso"),
-        "microFeatureGroups": sum(
-            len(item.get("localFeatures", []))
-            for item in components
-            if isinstance(item.get("localFeatures", []), list)
-        ),
+        "microFeatureGroups": detail_feature_count(spec),
         "materialLayers": len([item for item in spec.get("materials", []) if isinstance(item, dict)]),
         "repetitionSystems": len([item for item in spec.get("repetitionSystems", []) if isinstance(item, dict)]),
         "reviewViewpoints": len(spec.get("qualityTargets", {}).get("reviewViewpoints", []))
@@ -1549,6 +3124,135 @@ def validate_action_readiness(spec: dict[str, Any], errors: list[str], warnings:
     policy = readiness.get("destructionPolicy")
     if policy is not None and not isinstance(policy, dict):
         errors.append("actionReadiness.destructionPolicy must be an object")
+
+
+def validate_interaction_contract(
+    spec: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    contract = spec.get("interactionContract")
+    if not schema_at_least(spec, "3.2") and contract is None:
+        return
+    if not isinstance(contract, dict):
+        errors.append("interactionContract must be an object")
+        return
+    status = contract.get("status")
+    if status not in {"unassessed", "not-required", "required"}:
+        errors.append(
+            "interactionContract.status must be unassessed, not-required, or required"
+        )
+    elif status == "unassessed":
+        warnings.append(
+            "quality: interactionContract is unassessed; resolve it in the interaction phase"
+        )
+    elif not isinstance(contract.get("assessmentReason"), str) or len(
+        contract.get("assessmentReason", "").strip()
+    ) < 8:
+        errors.append(
+            "interactionContract.assessmentReason is required once motion is assessed"
+        )
+    if contract.get("policy") != "auto-infer":
+        errors.append("interactionContract.policy must be 'auto-infer'")
+    threshold = contract.get("activationThreshold")
+    validate_unit_interval(
+        threshold,
+        "interactionContract.activationThreshold",
+        errors,
+    )
+    validate_string_array(contract.get("rules"), "interactionContract.rules", errors)
+    affordances = contract.get("motionAffordances")
+    if not isinstance(affordances, list):
+        errors.append("interactionContract.motionAffordances must be an array")
+        return
+    component_ids = {
+        item.get("id")
+        for item in spec.get("componentTree", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    evidence_ids = {
+        item.get("id")
+        for item in spec.get("viewEvidence", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    known_ids: set[str] = set()
+    active = 0
+    for index, affordance in enumerate(affordances):
+        label = f"interactionContract.motionAffordances[{index}]"
+        if not isinstance(affordance, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        affordance_id = affordance.get("id")
+        if not isinstance(affordance_id, str) or not affordance_id.strip():
+            errors.append(f"{label}.id is required")
+        elif affordance_id in known_ids:
+            errors.append(f"duplicate motion affordance id {affordance_id!r}")
+        else:
+            known_ids.add(affordance_id)
+        component_id = affordance.get("componentId")
+        if not isinstance(component_id, str) or component_id not in component_ids:
+            errors.append(f"{label}.componentId must reference an existing component id")
+        if affordance.get("behavior") not in {
+            "continuous-rotation",
+            "hinge",
+            "translation",
+            "oscillation",
+            "articulation",
+            "deformation",
+            "detach",
+        }:
+            errors.append(f"{label}.behavior is invalid")
+        for field in ("pivot", "axis"):
+            if not as_number_list(affordance.get(field), 3):
+                errors.append(f"{label}.{field} must be [number, number, number]")
+        source = affordance.get("source")
+        if source not in {"observed", "domain-prior", "user"}:
+            errors.append(f"{label}.source must be observed, domain-prior, or user")
+        confidence = affordance.get("confidence")
+        validate_unit_interval(confidence, f"{label}.confidence", errors)
+        refs = affordance.get("evidenceRefs")
+        validate_string_array(refs, f"{label}.evidenceRefs", errors)
+        if isinstance(refs, list):
+            missing = sorted(set(refs) - evidence_ids)
+            if missing:
+                errors.append(
+                    f"{label}.evidenceRefs references missing evidence: "
+                    + ", ".join(missing)
+                )
+        enabled = affordance.get("enabledByDefault")
+        if not isinstance(enabled, bool):
+            errors.append(f"{label}.enabledByDefault must be boolean")
+        elif enabled:
+            active += 1
+            if source != "user" and is_number(confidence) and is_number(threshold) and float(confidence) < float(threshold):
+                errors.append(
+                    f"{label} cannot auto-activate below interactionContract.activationThreshold"
+                )
+        if not any(field in affordance for field in ("rate", "limits")):
+            errors.append(f"{label} needs numeric rate or limits")
+        if "rate" in affordance and not is_number(affordance.get("rate")):
+            errors.append(f"{label}.rate must be a finite number")
+        limits = affordance.get("limits")
+        if limits is not None and not (
+            isinstance(limits, list)
+            and len(limits) == 2
+            and all(is_number(item) for item in limits)
+            and float(limits[0]) <= float(limits[1])
+        ):
+            errors.append(f"{label}.limits must be [minimum, maximum]")
+    if status == "required" and active == 0:
+        warnings.append(
+            "quality: interactionContract.status is required but no motion affordance is enabled"
+        )
+    if status == "not-required" and active:
+        errors.append(
+            "interactionContract.status not-required cannot contain enabled motion affordances"
+        )
+    readiness = spec.get("actionReadiness")
+    if isinstance(readiness, dict) and readiness.get("enabled") is not (status == "required"):
+        errors.append(
+            "actionReadiness.enabled must match interactionContract.status == 'required'"
+        )
 
 
 def validate_self_correct_loop(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
@@ -1590,7 +3294,8 @@ def validate_self_correct_loop(spec: dict[str, Any], errors: list[str], warnings
                 continue
             validate_unit_interval(value, f"selfCorrectLoop.visualAcceptance.{field}", errors)
             if (
-                is_number(value)
+                phase_execution_version(spec) < 4
+                and is_number(value)
                 and is_number(target_fidelity)
                 and float(value) < float(target_fidelity)
             ):
@@ -1652,6 +3357,26 @@ def validate_self_correct_loop(spec: dict[str, Any], errors: list[str], warnings
                     errors.append(
                         f"selfCorrectLoop.visualAcceptance.featureReviewPolicy.{field} must be a string"
                     )
+    sanity = loop.get("visualSanity")
+    if schema_at_least(spec, "3.2"):
+        if not isinstance(sanity, dict):
+            errors.append("selfCorrectLoop.visualSanity must be an object for schema 3.2")
+        else:
+            if sanity.get("enabled") is not True:
+                errors.append("selfCorrectLoop.visualSanity.enabled must be true")
+            if sanity.get("obviousErrorVeto") is not True:
+                errors.append(
+                    "selfCorrectLoop.visualSanity.obviousErrorVeto must be true"
+                )
+            validate_string_array(
+                sanity.get("categories"),
+                "selfCorrectLoop.visualSanity.categories",
+                errors,
+            )
+            if sanity.get("requiredVerdictField") != "sanityChecks":
+                errors.append(
+                    "selfCorrectLoop.visualSanity.requiredVerdictField must be 'sanityChecks'"
+                )
     policy = loop.get("screenshotPolicy")
     if policy is None:
         warnings.append("selfCorrectLoop.screenshotPolicy is missing; visual review may drift without screenshots")
@@ -1717,7 +3442,6 @@ def validate_fit_diagnostics(value: Any, label: str, errors: list[str]) -> None:
     if value.get("acceptanceAuthority") is not False:
         errors.append(f"{label}.acceptanceAuthority must be false")
     for field in (
-        "silhouetteIou",
         "centroidDelta",
         "aspectRatioDelta",
         "normalizedContourDistance",
@@ -1945,14 +3669,31 @@ def validate_review_history(spec: dict[str, Any], errors: list[str], warnings: l
                     if not isinstance(correction, dict):
                         errors.append(f"{correction_label} must be an object")
                         continue
-                    for field in ("target", "parameterPath", "action", "reason"):
-                        if not isinstance(correction.get(field), str) or not correction[field].strip():
-                            errors.append(f"{correction_label}.{field} is required")
-                    if correction.get("action") not in VALID_CORRECTION_ACTIONS:
-                        errors.append(
-                            f"{correction_label}.action must be one of: "
-                            + ", ".join(sorted(VALID_CORRECTION_ACTIONS))
-                        )
+                    if "operation" in correction or "targetType" in correction:
+                        for field in (
+                            "targetType",
+                            "target",
+                            "parameterPath",
+                            "operation",
+                            "unit",
+                            "reason",
+                        ):
+                            if not isinstance(correction.get(field), str) or not correction[field].strip():
+                                errors.append(f"{correction_label}.{field} is required")
+                        for field in ("beforeValue", "value", "expectedValue"):
+                            if field not in correction:
+                                errors.append(f"{correction_label}.{field} is required")
+                        if not isinstance(correction.get("expectedDelta"), dict):
+                            errors.append(f"{correction_label}.expectedDelta must be an object")
+                    else:
+                        for field in ("target", "parameterPath", "action", "reason"):
+                            if not isinstance(correction.get(field), str) or not correction[field].strip():
+                                errors.append(f"{correction_label}.{field} is required")
+                        if correction.get("action") not in VALID_CORRECTION_ACTIONS:
+                            errors.append(
+                                f"{correction_label}.action must be one of: "
+                                + ", ".join(sorted(VALID_CORRECTION_ACTIONS))
+                            )
         correction_batch = entry.get("correctionBatch")
         if correction_batch is not None:
             if not isinstance(correction_batch, dict):
@@ -1960,13 +3701,40 @@ def validate_review_history(spec: dict[str, Any], errors: list[str], warnings: l
             else:
                 if correction_batch.get("artifactType") != "threejs-sculpt-correction-batch":
                     errors.append(f"{label}.correctionBatch artifactType is invalid")
-                if correction_batch.get("version") != 1:
-                    errors.append(f"{label}.correctionBatch version must be 1")
+                batch_version = correction_batch.get("version")
+                if batch_version not in {1, 2}:
+                    errors.append(f"{label}.correctionBatch version must be 1 or 2")
                 if correction_batch.get("atomic") is not True:
                     errors.append(f"{label}.correctionBatch.atomic must be true")
                 batch_corrections = correction_batch.get("corrections")
                 if not isinstance(batch_corrections, list) or not batch_corrections:
                     errors.append(f"{label}.correctionBatch.corrections must be non-empty")
+                elif batch_version == 2:
+                    for batch_index, correction in enumerate(batch_corrections):
+                        correction_label = (
+                            f"{label}.correctionBatch.corrections[{batch_index}]"
+                        )
+                        if not isinstance(correction, dict):
+                            errors.append(f"{correction_label} must be an object")
+                            continue
+                        for field in (
+                            "issueId",
+                            "scope",
+                            "targetType",
+                            "target",
+                            "parameterPath",
+                            "operation",
+                            "unit",
+                            "change",
+                        ):
+                            if not isinstance(correction.get(field), str) or not correction[field].strip():
+                                errors.append(f"{correction_label}.{field} is required")
+                        for field in ("beforeValue", "value", "expectedValue"):
+                            if field not in correction:
+                                errors.append(f"{correction_label}.{field} is required")
+                        expected_delta = correction.get("expectedDelta")
+                        if not isinstance(expected_delta, dict):
+                            errors.append(f"{correction_label}.expectedDelta must be an object")
                 scopes = correction_batch.get("scopes")
                 if (
                     not isinstance(scopes, list)
@@ -2056,7 +3824,11 @@ def validate_review_history(spec: dict[str, Any], errors: list[str], warnings: l
             or not all(isinstance(value, str) and value.strip() for value in artifacts.values())
         ):
             errors.append(f"{label}.artifacts must contain non-empty path or URL strings")
-        if action == "continue" and isinstance(pass_id, str):
+        if (
+            action == "continue"
+            and entry.get("accepted") is not False
+            and isinstance(pass_id, str)
+        ):
             for failure in review_failures(spec, entry, pass_id):
                 warnings.append(f"quality: {label} gate failed: {failure}")
 
@@ -2141,6 +3913,32 @@ def validate_build_passes(spec: dict[str, Any], errors: list[str], warnings: lis
             or not all(is_number(value) and 0 <= float(value) <= 1 for value in layer_targets.values())
         ):
             errors.append(f"buildPasses[{index}].requiredLayerScores must contain scores from 0 to 1")
+        if schema_at_least(spec, "3.2") and evidence_kind == "visual":
+            sanity = item.get("visualSanity")
+            if not isinstance(sanity, dict):
+                errors.append(f"buildPasses[{index}].visualSanity must be an object")
+            else:
+                if sanity.get("obviousErrorVeto") is not True:
+                    errors.append(
+                        f"buildPasses[{index}].visualSanity.obviousErrorVeto must be true"
+                    )
+                categories = sanity.get("requiredCategories")
+                validate_string_array(
+                    categories,
+                    f"buildPasses[{index}].visualSanity.requiredCategories",
+                    errors,
+                )
+                if (
+                    phase_execution_version(spec) < 4
+                    and isinstance(categories, list)
+                    and isinstance(layer_targets, dict)
+                ):
+                    missing_scores = sorted(set(categories) - set(layer_targets))
+                    if missing_scores:
+                        errors.append(
+                            f"buildPasses[{index}] visual sanity categories need layer-score floors: "
+                            + ", ".join(missing_scores)
+                        )
         metric_targets = item.get("metricTargets")
         if metric_targets is not None:
             if not isinstance(metric_targets, dict):
@@ -2153,7 +3951,11 @@ def validate_build_passes(spec: dict[str, Any], errors: list[str], warnings: lis
                         )
         if schema_at_least(spec, "3.0"):
             if evidence_kind == "visual" and (
-                not item.get("requiredViews") or not item.get("requiredLayerScores")
+                not item.get("requiredViews")
+                or (
+                    phase_execution_version(spec) < 4
+                    and not item.get("requiredLayerScores")
+                )
             ):
                 errors.append(
                     f"buildPasses[{index}] visual evidence needs requiredViews and requiredLayerScores"
@@ -2180,14 +3982,28 @@ def validate_build_passes(spec: dict[str, Any], errors: list[str], warnings: lis
                     f"buildPasses[{index}].maximumVisualRegression",
                     errors,
                 )
+            if "maximumSilhouetteIouRegression" in item:
+                errors.append(
+                    f"buildPasses[{index}].maximumSilhouetteIouRegression has been removed"
+                )
     if ids:
+        if schema_at_least(spec, "3.2"):
+            interaction = spec.get("interactionContract")
+            expected = ["blockout", "form", "lookdev"]
+            if isinstance(interaction, dict) and interaction.get("status") != "not-required":
+                expected.append("interaction")
+            if ids != expected:
+                errors.append(
+                    "schema 3.2 buildPasses must be exactly blockout, form, lookdev, "
+                    "plus interaction while motion is unassessed or required"
+                )
         if ids[0] != "blockout":
             warnings.append("quality: first build pass should be blockout")
         if not ({"form", "form-refinement"} & set(ids)):
             warnings.append("quality: missing form pass; shape refinement may be skipped")
         if not ({"lookdev", "material-pass"} & set(ids)):
             warnings.append("quality: missing lookdev/material pass; model may stay as flat geometry")
-        if spec.get("intendedUse") in {"browser-prop", "game-prop", "playable", "destructible"}:
+        if not schema_at_least(spec, "3.2") and spec.get("intendedUse") in {"browser-prop", "game-prop", "playable", "destructible"}:
             optimization = next(
                 (
                     item
@@ -2446,11 +4262,10 @@ def validate_spec(
         parsed_schema_version = None
         errors.append(str(exc))
     if parsed_schema_version not in SUPPORTED_SCHEMA_VERSIONS:
-        errors.append("schemaVersion must be '2.0', '3.0', or '3.1'")
+        errors.append("schemaVersion must be '2.0', '3.0', '3.1', or '3.2'")
     if parsed_schema_version is not None and parsed_schema_version >= (3, 0, 0):
         required_v3 = {
             "specRevision": int,
-            "intendedUse": str,
             "qualityProfile": str,
             "preSpecAssessment": dict,
             "qualityContract": dict,
@@ -2468,10 +4283,17 @@ def validate_spec(
                 expected_type is int and isinstance(spec[key], bool)
             ):
                 errors.append(f"schema 3 field {key!r} must be {expected_type.__name__}")
-        if spec.get("intendedUse") not in {
-            "static-render", "browser-prop", "game-prop", "animated", "playable", "destructible"
-        }:
-            errors.append("intendedUse is invalid")
+        if parsed_schema_version < (3, 2, 0):
+            if not isinstance(spec.get("intendedUse"), str):
+                errors.append("missing schema 3 field 'intendedUse'")
+            elif spec.get("intendedUse") not in {
+                "static-render", "browser-prop", "game-prop", "animated", "playable", "destructible"
+            }:
+                errors.append("intendedUse is invalid")
+        elif "intendedUse" in spec:
+            errors.append(
+                "schema 3.2 removes intendedUse; preserve it under legacyIntent during migration"
+            )
         if spec.get("qualityProfile") not in {"balanced", "reference-fidelity"}:
             errors.append("qualityProfile must be balanced or reference-fidelity")
         if isinstance(spec.get("specRevision"), int) and not isinstance(spec.get("specRevision"), bool) and spec["specRevision"] < 1:
@@ -2485,12 +4307,18 @@ def validate_spec(
     if suitability not in VALID_SUITABILITY:
         errors.append("suitability must be pass, conditional, or reject")
     validate_pre_spec_assessment(spec, errors, warnings)
+    validate_uncertainty_contract(spec, errors, warnings)
     validate_terminology_profile(spec, errors, warnings)
     validate_score_block(spec, errors, warnings)
     validate_quality_targets(spec, errors, warnings)
     validate_quality_contract(spec, errors, warnings)
+    validate_phase_execution_contract(spec, errors, warnings)
     validate_action_readiness(spec, errors, warnings)
+    validate_interaction_contract(spec, errors, warnings)
+    validate_reference_preparation(spec, errors, warnings)
     validate_view_hypothesis_policy(spec, errors, warnings)
+    errors.extend(validate_perceptual_contract(spec))
+    errors.extend(validate_capability_plan(spec))
     validate_self_correct_loop(spec, errors, warnings)
     validate_feature_review_targets(spec, errors, warnings)
     validate_specialized_regions(spec, errors, warnings)
@@ -2500,16 +4328,31 @@ def validate_spec(
     validate_sculpt_pipeline(spec, build_pass_ids, errors, warnings)
     validate_look_dev_targets(spec, errors, warnings)
     evidence_ids = validate_evidence(spec, errors, warnings)
-    material_ids = validate_materials(spec, errors, warnings)
-    errors.extend(validate_repetition_systems(spec.get("repetitionSystems", [])))
-    validate_components(spec, material_ids, evidence_ids, errors, warnings)
-    topology_errors, topology_warnings = validate_surface_topology_plan(
-        spec.get("surfaceTopologyPlan"),
-        spec.get("componentTree", []),
-        spec.get("materials", []),
+    material_ids = validate_materials(
+        spec,
+        errors,
+        warnings,
+        evidence_ids,
+        for_pass,
     )
-    errors.extend(topology_errors)
-    warnings.extend(topology_warnings)
+    errors.extend(validate_repetition_systems(spec.get("repetitionSystems", [])))
+    validate_repetition_attachment_relations(spec, errors, warnings)
+    validate_components(spec, material_ids, evidence_ids, errors, warnings)
+    selected_pass = PASS_ALIASES.get(for_pass, for_pass)
+    if selected_pass != "blockout":
+        topology_errors, topology_warnings = validate_surface_topology_plan(
+            spec.get("surfaceTopologyPlan"),
+            spec.get("componentTree", []),
+            spec.get("materials", []),
+        )
+        errors.extend(topology_errors)
+        warnings.extend(topology_warnings)
+    # Blockout intentionally carries only the stable macro contract. Recursive
+    # component/detail planning is promoted into the spec immediately before
+    # Form, where it has an implementation consumer and can be reviewed without
+    # flooding the first visual cycle with speculative detail.
+    if selected_pass != "blockout":
+        validate_detail_decomposition(spec, material_ids, evidence_ids, errors, warnings)
     validate_special_material_compatibility(spec, warnings)
     lod_plan = spec.get("lodPlan")
     if lod_plan is not None and not isinstance(lod_plan, list):
@@ -2532,6 +4375,27 @@ def validate_spec(
                 not is_number(performance[field]) or float(performance[field]) <= 0
             ):
                 errors.append(f"performanceBudget.{field} must be a positive finite number")
+    audit = spec.get("performanceAudit")
+    if schema_at_least(spec, "3.2"):
+        if not isinstance(audit, dict):
+            errors.append("performanceAudit must be an object for schema 3.2")
+        else:
+            for field in ("enabled", "blocking"):
+                if not isinstance(audit.get(field), bool):
+                    errors.append(f"performanceAudit.{field} must be boolean")
+            if audit.get("blocking") is True and audit.get("enabled") is not True:
+                errors.append("performanceAudit.blocking requires performanceAudit.enabled")
+            if audit.get("activation") != "explicit-user-budget-only":
+                errors.append(
+                    "performanceAudit.activation must be 'explicit-user-budget-only'"
+                )
+            validate_unit_interval(
+                audit.get("maximumVisualRegression"),
+                "performanceAudit.maximumVisualRegression",
+                errors,
+            )
+            if audit.get("maximumVisualRegression") != 0:
+                errors.append("performanceAudit.maximumVisualRegression must be 0")
     validate_quality_depth(spec, errors, warnings)
     if for_pass is not None:
         ids = canonical_pass_order(spec)

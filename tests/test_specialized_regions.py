@@ -13,7 +13,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from generate_threejs_factory import generate  # noqa: E402
 from new_sculpt_spec import make_spec  # noqa: E402
-from sculpt_contract import review_spec_hash  # noqa: E402
+from sculpt_contract import review_spec_hash, sync_pipeline  # noqa: E402
 from validate_sculpt_spec import validate_spec  # noqa: E402
 from visual_feature_gate import feature_gate_failures  # noqa: E402
 
@@ -276,7 +276,7 @@ def character_spec() -> dict[str, Any]:
                 "id": "instrument-grip-contact",
                 "name": "Instrument grip paw and contact",
                 "tier": "critical",
-                "passIds": ["structure", "form", "lookdev"],
+                "passIds": ["form", "lookdev"],
                 "minimumScore": 0.85,
                 "mustPass": True,
                 "requiresDedicatedEvidence": True,
@@ -374,7 +374,28 @@ class SpecializedRegionContractTests(unittest.TestCase):
 
     def test_explicit_digit_chain_requires_real_segment_components(self) -> None:
         spec = character_spec()
-        spec["intendedUse"] = "animated"
+        spec["interactionContract"].update(
+            {
+                "status": "required",
+                "assessmentReason": "The visible grip requires articulated finger motion.",
+                "motionAffordances": [
+                    {
+                        "id": "grip-articulation",
+                        "componentId": "grip-palm",
+                        "behavior": "articulation",
+                        "pivot": [0, 0, 0],
+                        "axis": [0, 0, 1],
+                        "limits": [-0.5, 0.5],
+                        "source": "user",
+                        "confidence": 1.0,
+                        "evidenceRefs": ["grip-hand-closeup"],
+                        "enabledByDefault": True,
+                    }
+                ],
+            }
+        )
+        spec["actionReadiness"]["enabled"] = True
+        sync_pipeline(spec)
         hand = spec["preSpecAssessment"]["specializedRegions"]["regions"][1]
         thumb = _part(spec, "grip-thumb", "grip-hand", "grip-hand-closeup")
         spec["componentTree"].append(thumb)
@@ -498,6 +519,12 @@ class SpecializedRegionContractTests(unittest.TestCase):
 
     def test_specialized_feature_needs_bound_closeup_and_passes_independently(self) -> None:
         spec = character_spec()
+        # The numeric feature ladder remains supported for legacy v3 specs.
+        # New v4 specs route this visual inspection through the blind scout.
+        spec["phaseExecutionContract"]["version"] = 3
+        spec["selfCorrectLoop"]["visualAcceptance"]["featureReviewPolicy"][
+            "enabled"
+        ] = True
         entry = _form_review(spec)
         entry["evidence"]["views"] = [
             view for view in entry["evidence"]["views"] if view["viewId"] != "face-closeup"

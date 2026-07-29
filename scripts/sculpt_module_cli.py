@@ -10,7 +10,12 @@ from pathlib import Path
 
 import make_visual_comparison_sheet
 from generate_threejs_factory import write_generated_spec
-from sculpt_contract import file_sha256, write_spec_atomic
+from sculpt_contract import (
+    file_sha256,
+    user_eta_policy,
+    visual_checkpoint_presentation,
+    write_spec_atomic,
+)
 from sculpt_manifest import add_module, read_object, resolve_manifest
 from sculpt_module_contract import (
     GATE_TYPES,
@@ -28,6 +33,7 @@ def _print_json(payload: dict) -> None:
 
 def _module_build(args: argparse.Namespace) -> int:
     manifest = args.manifest.expanduser().resolve()
+    progress = module_status(manifest).get("userProgress", {})
     build_receipt = module_build_receipt_path(manifest, args.module_id)
     build_receipt.unlink(missing_ok=True)
     resolved_out = (
@@ -50,9 +56,22 @@ def _module_build(args: argparse.Namespace) -> int:
             "check_module(strict_quality=True, prepare_generation=True)",
             "resolve_manifest + validate_spec(pass) once",
             "hash-bound validation reuse",
-            "assert_pass_unlocked",
+            "private module preview pass (form by default; lookdev for material owners)",
             "generate",
         ],
+        "userPresentation": {
+            "displayRequired": True,
+            "displayBeforeNextStep": True,
+            "checkpoint": "module-build",
+            "moduleId": args.module_id,
+            "visualArtifactsAvailable": False,
+            "visualArtifactReason": (
+                "This is a pre-render checkpoint. Report the build result and progress now; "
+                "show render output and comparison after module evaluate."
+            ),
+            "progress": progress,
+            "eta": user_eta_policy(),
+        },
     }
     checked = check_module(
         manifest,
@@ -84,10 +103,11 @@ def _module_build(args: argparse.Namespace) -> int:
         generated = write_generated_spec(
             resolved_spec,
             generated_out,
-            pass_id=args.pass_id,
+            pass_id=str(checked.get("previewPass") or args.pass_id or "form"),
             wrapper_out=args.wrapper_out,
             force=True,
             _validation_proof=validation_proof,
+            _module_preview=True,
         )
     except (OSError, ValueError) as exc:
         payload["stages"]["generate"] = {"ok": False, "error": str(exc)}
@@ -191,6 +211,20 @@ def _module_evaluate(args: argparse.Namespace) -> int:
             "diagnostic_veto_failures",
             "refinement_preflight_failures",
         ],
+        "userPresentation": {
+            "displayRequired": True,
+            "displayBeforeNextStep": True,
+            "checkpoint": "module-evaluate",
+            "moduleId": args.module_id,
+            "visualArtifactsAvailable": compare_code == 0,
+            "visualArtifactReason": (
+                "Comparison creation failed; report the error without reusing stale visual evidence."
+                if compare_code != 0
+                else "Comparison was created and will be listed after evidence validation."
+            ),
+            "progress": module_status(manifest).get("userProgress", {}),
+            "eta": user_eta_policy(),
+        },
     }
     if compare_code != 0:
         payload["stages"]["compare"]["error"] = (
@@ -208,6 +242,30 @@ def _module_evaluate(args: argparse.Namespace) -> int:
     preflight = preflight_module_review(manifest, args.module_id, evidence_out)
     payload["stages"]["preflight"] = preflight
     payload["ok"] = preflight.get("ok") is True
+    payload["userPresentation"] = visual_checkpoint_presentation(
+        evidence,
+        checkpoint="module-evaluate",
+        progress=module_status(manifest).get("userProgress", {}),
+    )
+    payload["userPresentation"]["moduleId"] = args.module_id
+    payload["userPresentation"]["preflight"] = {
+        "ok": payload["ok"],
+        "failures": preflight.get("failures", []),
+    }
+    if preflight.get("candidateDisposition") == "rejected-preflight-regression":
+        payload["userPresentation"]["artifactState"] = "rejected-challenger"
+        payload["userPresentation"]["reviewResult"] = {
+            "accepted": False,
+            "candidateDisposition": "rejected-preflight-regression",
+            "failures": preflight.get("failures", []),
+        }
+        active_champion = preflight.get("activeChampion")
+        if isinstance(active_champion, dict) and active_champion:
+            active_champion["progress"] = payload["userPresentation"]["progress"]
+            payload["userPresentation"]["activeChampion"] = active_champion
+    payload["userPresentation"]["strategyChangeRequired"] = preflight.get(
+        "strategyChangeRequired", False
+    )
     _print_json(payload)
     return 0 if payload["ok"] else 1
 
@@ -272,7 +330,7 @@ def main(argv: list[str]) -> int:
 
     resolve = subparsers.add_parser(
         "resolve",
-        help="Resolve accepted modules or the current highest-risk module preview to schema 3.1",
+        help="Resolve accepted modules or the current highest-risk module preview to schema 3.2",
     )
     resolve.add_argument("manifest", type=Path)
     resolve.add_argument("--module-id")

@@ -1,208 +1,282 @@
 ---
 name: object-to-threejs-procedural
-description: Use when the user provides or references an object image and wants Codex to validate whether it can be reconstructed in Three.js, then author a composable procedural sculpt spec, generate geometry/material/lighting code, and validate the real render against the reference.
+description: Use when the user provides or references an object image and wants Codex to validate, reconstruct, review, or refine it as an editable procedural Three.js asset.
 ---
 
 # Object to Three.js Procedural
 
-Create an editable procedural Three.js approximation from reference images. Treat it as code-native reconstruction, not photogrammetry, exact mesh recovery, or physically exact PBR inversion.
+Reconstruct the reference as an editable procedural Three.js asset. Optimize first for visible reference fidelity, then for implementation correctness. Polygon count, draw calls, FPS, schemas, receipts, and build success are not visual-quality evidence.
 
 ## Required outcome
 
-1. Inspect the real reference and decide `pass`, `conditional`, or `reject`.
-2. Write one global contract, then one spec per semantic module as that module is built.
-3. Build and validate the highest-risk ready module first.
-4. Assemble only modules whose current content hash has passed its gate.
-5. Run the existing blockout/form/lookdev/runtime/optimization gates on the assembled model.
+1. Inspect the real reference and classify it `pass`, `conditional`, or `reject`.
+2. Create one concise progressive spec with a stable global core.
+3. Run `blockout -> form -> lookdev -> interaction` as four phase types. Interaction remains active while motion is unassessed or required; a justified `not-required` decision removes its runtime gate.
+4. In every active phase use one short loop: `spec delta -> build/render -> active-reference comparison -> blind visual scout + independent review -> system promote/rollback -> user approval`.
+5. The default fast perceptual workflow uses `approvalMode=final-only`: system
+   champions may advance between internal phases, and the final active phase
+   requires explicit user approval bound to the exact reviewed artifact.
+   `phase-by-phase` remains available when intermediate approval is required.
 
-Never claim hidden geometry as observed fact. Label approximations and ask for better evidence only when it can change the result.
+Do not claim hidden geometry as observed fact. Record it as a bounded assumption or known risk.
 
-## Inputs and quality choice
+## Default architecture
 
-Require at least one inspectable image. If intended use is missing, use `browser-prop`; if complexity is unclear, start at `moderate` and revise after inspection.
-
-Choose the quality profile explicitly. “Game quality”, realistic, sharp, hero asset, or close-reference requests require `reference-fidelity`. Use `game-prop` for rigid real-time assets and `static-render` for still-only work. Do not silently downgrade either choice.
-
-## Command surface
-
-From this skill directory run:
-
-```bash
-python3 ../../scripts/sculpt.py <command>
-```
-
-Primary commands are `init`, `views`, `module`, `validate`, `status`, `check`, `generate`, `compare`, `review`, `probe`, `pbr`, and `migrate`. Individual scripts and `--layout monolithic` remain compatibility paths only.
-
-## Workflow
-
-### 1. Inspect and write the global contract
-
-Inspect silhouette, macro hierarchy, negative spaces, attachments, repeated systems, material families, occlusion, and intended behavior. Identify perceptually fragile or technically uncertain subsystems such as a face, interacting hand, thin structure, transparent surface, dense fibers, deformable fabric, or unusual joint.
-
-Create the v4 root manifest:
+Use the progressive single-spec layout by default:
 
 ```bash
 python3 ../../scripts/sculpt.py init "Object Name" \
-  --image <reference> \
+  --image <usable-original-or-white-background-prepared-reference> \
+  --reference-separation <clear|mixed|absent> \
+  [--original-image <original-before-imagegen>] \
+  [--imagegen-preparation-mode <white-background-cleanup|white-background-simplification>] \
+  [--imagegen-trigger <background-mixing|excessive-complexity|low-source-quality|combined>] \
+  [--declared-simplification <exact-detail-family>] \
   --complexity <simple|moderate|complex|ultra> \
-  --intended-use <static-render|browser-prop|game-prop|animated|playable|destructible> \
-  --quality-profile <balanced|reference-fidelity> \
+  [--quality-profile <balanced|reference-fidelity>] \
   --out object-sculpt.json
 ```
 
-Fill `globalSpec.preSpecAssessment`, silhouette, coordinate frame, quality contract, source observations, known risks, and `surfaceTopologyPlan` before creating geometry modules. Classify each visible system as `continuous-sculpt`, `assembled-solid`, `conforming-shell`, `surface-relief`, `fiber-strand`, or `material-only`. Semantic landmarks may share one mesh. A new visual module is refused until the plan is `planned` and contains a group whose `ownerModuleId` matches that module. The manifest initially contains only the global assembly root; this is intentional.
+`init` defaults to the progressive monolithic layout. This means one evolving spec, not one undifferentiated mesh: complex assemblies still use recursive component/feature trees with stable semantic IDs.
 
-If `viewHypothesisPolicy.enabled` is true, use built-in ImageGen once per required named view at this point—not once per pass. Preserve identity and generate only the requested `three-quarter`, `side`, or `back` hypothesis without redesigning the object. Register the resulting files once; `views status` reuses them while the source hash and prompt version remain unchanged:
+Use `--layout modular` only when a subsystem is independently buildable and the observed source can provide a matching module-local crop or mask. Never compare an isolated module render with the full-object reference. Such a pair is `evidence-scope-mismatch` and must not score, consume a retry, or trigger rollback.
 
-```bash
-python3 ../../scripts/sculpt.py views register object-sculpt.json \
-  --view three-quarter=review/three-quarter.png \
-  --view side=review/side.png \
-  [--view back=review/back.png]
-python3 ../../scripts/sculpt.py views status object-sculpt.json
-```
+## Reference preparation
 
-These images are cached planning/veto evidence. They can expose bad depth, silhouette, or stacked-blob geometry, but inferred color/roughness/detail is not material truth and cannot veto lookdev. They can never approve a module or pass. If ImageGen changes an existing cached view, increment the prompt version explicitly instead of silently replacing evidence.
+Require at least one inspectable image. Assess both subject/background separation and whether the source is practical to reconstruct:
 
-### 2. Add semantic modules
+- Use the original directly when its complete boundary is readable and its detail/quality is practical for procedural reconstruction. White, neutral, transparent, or strongly contrasting backgrounds are acceptable.
+- Invoke the `imagegen` skill once when the subject blends into the background, the source quality obscures construction, or the object is impractically complex. These triggers apply independently; a clear background does not exempt an over-complex source.
+- ImageGen must output a clean solid-white background with strong subject contrast. Do not request or validate alpha transparency.
+- Use `white-background-cleanup` for separation/edge cleanup. Use `white-background-simplification` only for reconstruction-blocking complexity or quality, and declare every intentionally simplified detail family.
+- Bounded edits may clarify ambiguous edges, remove noise, regularize minor ambiguous geometry, and merge or omit non-signature microdetail. They must preserve object class, recognizable identity, primary silhouette, macro proportions, major component count/placement/attachments, signature features, dominant color/material zones, pose, and primary viewpoint.
+- The generated image becomes `sourceImage` and the active reconstruction target. Retain the original as `originalImage`; every acceptance review compares against the prepared target and separately vetoes identity or macro-form drift against the original.
+- `unassessed` preparation is a strict-quality blocker.
 
-Decompose by independently reviewable systems, not by arbitrary mesh count. Examples include `face-identity`, `gripping-hand`, `instrument`, `body-clothing`, `tail`, or `hard-surface-core`.
+Default new work to `reference-fidelity`. Use `balanced` only when the user explicitly accepts a lower visual bar.
 
-Do not turn every named region into a mesh. Preserve a single surface when the reference shows an uninterrupted material/form transition: head, cheeks, muzzle, jaw, muscle masses, rock bulges, and branch junctions normally belong to one continuous host. Separate only observed seams, sockets, articulation boundaries, accessories, shells, or real strands. Put silhouette-changing relief into the host surface; use material response for sub-silhouette microdetail.
+## Progressive spec contract
 
-```bash
-python3 ../../scripts/sculpt.py module add object-sculpt.json <module-id> \
-  --role "<semantic responsibility>" \
-  --risk-score <0..100> \
-  --gate-type <visual|structural> \
-  [--covers <global-feature-group-id>] \
-  [--depends-on <module-id>] \
-  [--template foundation]
-```
+Do not author the complete final spec before the first render. Keep the stable core small and extend it with one phase-local delta.
 
-Keep dependencies minimal. A module may parent into `root`, or into a dependency only through that dependency’s exported connector. Component, material, repetition, feature-target, and specialized-region IDs must be globally unique. Use `structural` only for assembly/interface nodes and connectors; any module that owns visible geometry, materials, repetitions, evidence, or specialized regions must use `visual`.
+Always-loaded stable core:
 
-`--template foundation` is only an editable visual scaffold. Replace its explicit placeholder geometry/material text with observed decisions; `--strict-quality` refuses an untouched scaffold. In every visual module, list the exact project-relative runtime sources/assets that create its render under `contract.implementationFiles`. At least one declared runtime source must contain the executable ownership marker `export const SCULPT_MODULE_ID = "<module-id>";`; a comment or another module's source is rejected. That marker is ownership metadata, not proof of what was rendered: the app must instantiate the generated module's stable `createSculptModel` export.
+- target and observed reference;
+- coordinate frame and relative scale;
+- primary silhouette, proportions, landmarks, and negative spaces;
+- stable semantic IDs and macro hierarchy;
+- bounded assumptions and known risks;
+- prepared reconstruction-target authority plus original-image identity guardrail.
+- `viewingContract.renderPipeline`, including explicit and runtime-verifiable
+  anti-aliasing for every rendered phase.
 
-Use face/hand modules when visible, but keep the architecture general: any difficult subsystem can be isolated and reviewed first. Do not create one builder sub-agent per module by default. After a visual comparison exists, use one fresh reviewer sub-agent that did not build the module; give it only the raw reference, render/contact sheet, and contracts—not the builder’s proposed score or defense.
+Phase-owned fields:
 
-### 3. Build the hardest ready module first
+- `blockout`: object class, complexity tier, macro components, primary framing, silhouette, proportions.
+- `form`: recursive children/features, topology strategy, attachments, repetition systems, signature detail, conditional view hypotheses.
+- `lookdev`: materials, colors, rigidity, roughness/gloss, microrelief, PBR maps, lighting, contact shadow.
+- `interaction`: motion assessment, exact moving component IDs, pivots, axes, limits/rates, motion clearance, runtime evidence.
 
-```bash
-python3 ../../scripts/sculpt.py module context object-sculpt.json
-```
+IDs remain stable. Edit authority and review scope are cumulative: the active phase must inspect its own and every earlier phase's visible quality, and may improve earlier work when the richer current render exposes a real defect or clear opportunity. Thus Lookdev may repair geometry/Form and Interaction may repair geometry or materials. A passed phase is a baseline, not a frozen result; only future-phase work remains forbidden. Every earlier-phase repair must use the same exact-ID/path impact assessment, challenger checkpoint, original/current/previous visual comparison, whole-result regression veto, rollback, and human approval as current-phase work. A phase delta may not silently reuse IDs or overwrite a stable-core fact; if observed evidence falsifies a core fact, record the reason.
 
-`module context` selects the highest-risk ready module and returns one hash-aware work packet: module/dependency/runtime paths, only files changed since the previous context call, directly readable relevant reference paths, required views/layers, and any pending correction batch. References are part of the hash-tracked `files`/`readFiles` set, so read only the listed `readFiles` paths in one parallel tool call. Do not reopen an unchanged file when `cacheHit=true`; use `module status` or individual reads only for diagnosis after a concrete failure. A structural module returns one `accept` action instead of the visual build/evaluate/review route; `module accept` runs the same strict module check internally.
-
-Author the complete module or pending correction batch before running validation. Then strict-check, resolve, validate, and generate with one fail-fast command:
+Use the concise current-phase packet instead of reopening the whole spec:
 
 ```bash
-python3 ../../scripts/sculpt.py module build object-sculpt.json <module-id>
+python3 ../../scripts/sculpt.py context object-sculpt.json
 ```
 
-The default outputs are `.sculpt-preview/<module-id>.json`, `.sculpt-preview/<module-id>.build.json`, and `src/generated/<module-id>.generated.ts`. `module build` invokes the same strict module check, resolver, spec/pass validation, unlock check, and generator as the individual commands; it stops at the first failed stage and reports that stage without weakening any gate. The build receipt binds the current module/spec to the exact generated factory hash and factory ID.
+Read `workPacket.contextProjection`, edit only `specDeltaContract.editablePaths`, and leave `futurePhaseWorkForbidden` alone. Read additional files only after a named validation failure proves they are relevant.
 
-Fix structural/schema failures before rendering. A visual module cannot pass with executable `fidelityTier: blockout` parts. Capture every required and diagnostic view and create one no-crop comparison manifest. Run deterministic preflight before creating a reviewer sub-agent; a failed preflight goes directly back to the builder and spends no reviewer call. Only after it passes, spawn one fresh reviewer sub-agent with no builder rationale or proposed scores. Give it the raw reference, render/contact sheet, evidence hash, and module contract. The reviewer returns the structured verdict described in `references/self-correction-loop.md`.
+## The four phases
 
-Use the smallest real geometry system that matches the form. Prefer `sculpted-surface` for one irregular connected mass with embedded bulges/ridges/creases, `section-loft` for continuous forms governed by ordered cross-sections, `conforming-shell` for fitted static layers, `branch-network` for tapered branching layouts whose overlapping junctions are acceptable, and `surface-scatter` for masked repeated details. A hero tree, horn junction, or organic branch that must be topologically fused uses `sculpted-surface`, not `branch-network`. A `sculpted-surface` combines sphere/ellipsoid/capsule sources plus local `inflate`, `pinch`, `ridge`, and `crease` operations into one welded indexed mesh; its single-surface connectivity and closed bounds are validated before generation. Linked shells/scatter must be identity-transform children of their `section-loft` host; put the host's final fitted form in its sections instead of adding a later deformation stack. Generic bend/taper/bulge/twist/noise modifiers remain available for standalone parts.
+### Blockout
 
-After the real app has instantiated `createSculptModel`, attach its root to the rendered `THREE.Scene`. At the same scene state used for screenshots, save the JSON returned by `window.__THREEJS_SCULPT_CAPTURE_RUNTIME__()` to `review/<module-id>-runtime.json`. Review-only ground/contact-shadow meshes may use `userData.reviewOnly = true`; any other intentional environment mesh must use `userData.sculptValidationRole = "environment"`. Do not hide the generated root or place an untracked substitute model in front of it.
+Goal: converge the complete object's observed primary-view silhouette and macro proportions as quickly as possible.
 
-After the real app has captured all required views and the runtime receipt, create the comparison and run deterministic preflight together:
+- Build the whole silhouette-coupled object or one foundation assembly, not a body-only crop judged against the full object.
+- Before the first build, resolve `viewHypothesisPolicy`. For every source-backed `moderate`, `complex`, or `ultra` object—and any asymmetric, articulated, occluded, or uncertain object—invoke `$imagegen` once to create one edge-to-edge 2x2 turnaround ordered `three-quarter | side` over `back | front`, display/register that sheet, and use it only as planning-veto evidence.
+- Skip the 2x2 only when the object is classified `simple`, strong bilateral/radial/axial symmetry is visible, confidence is at least `0.8`, and the evidence and reason are recorded.
+- Use the observed primary view as the acceptance authority.
+- Do not create recursive detail plans, PBR maps, motion pivots, or runtime receipts here.
+- Geometry may be coarse, but all identity-defining major parts visible in the source must exist and be positioned plausibly.
+
+### Form
+
+Goal: make structure, attachments, local shape, balance, and signature details correct without damaging accepted Blockout layers.
+
+Recursively decompose complex components. `compound` and `complex` components are never atomic. Each component or feature needs a construction-specific ID/name, host/parent, numeric transform/size, evidence/confidence, review criteria, and an executable realization. Use children for independently shaped/material/attached/moving parts; use named features for details embedded in one continuous host.
+
+Every repeated or attached system must declare parent/socket plus `contact`, `overlap`, or `gap` intent. Review both the local crop and the full assembly so a locally good part cannot be accepted in the wrong position or scale.
+
+Consume the registered Blockout-preparation 2x2; do not regenerate it unless provenance is invalid or the user explicitly changes the reconstruction target.
+
+- The registered sheet is one cached edge-to-edge 2x2 ImageGen turnaround ordered `three-quarter | side` over `back | front`.
+- Skip it only when the assessed complexity tier is `simple` **and** observed evidence supports strong bilateral, radial, or axial symmetry with confidence at least `0.8`. Record the symmetry type, evidence refs, and reason in `skipAssessment`.
+- Moderate, complex, ultra, asymmetric, articulated, occluded, or uncertain objects always require the 2x2 turnaround. Separate sequential ImageGen views do not satisfy the default policy.
+- Synthetic views are `planning-veto` only. They can expose implausible depth but can never approve fidelity or replace the original.
+
+### Lookdev
+
+Goal: match color zones, material class, optical finish, surface response, lighting, and grounding while continuing to inspect and improve visible Blockout/Form quality without regressing the whole result.
+
+Only now extract or author independent albedo, roughness, height/normal, and AO. Describe materials concretely: hard/soft, rigid/flexible, matte/glossy, smooth/wrinkled/pitted/granular. Never reuse albedo as another PBR channel. Use geometry for silhouette-changing relief and material response for sub-silhouette microdetail.
+
+Anti-aliasing is not a Lookdev effect: it belongs to the stable review render
+contract and applies from Blockout onward. Bloom, SSAO, depth of field, grading,
+and other appearance effects remain optional Lookdev work and must not be used
+to hide form or material defects.
+
+### Interaction
+
+Goal: apply object-class knowledge even when the user did not ask for animation.
+
+- If observed joints or a high-confidence domain prior imply motion, set `interactionContract.status=required` and implement exact component ID, pivot, axis, limits/rate, and tested key states.
+- If no meaningful object-specific motion exists, set `not-required` with a concrete reason; do not invent physics, destruction, or hidden mechanisms.
+- Runtime receipts, motion clearance, and final full-project typecheck belong here or in finalization, not in earlier visual cycles.
+
+## One fast cycle per attempt
+
+For the current phase:
+
+1. Obtain `sculpt context` once.
+2. Before editing, write one bounded impact assessment for the complete correction batch: exact target IDs and allowed parameter paths, protected component IDs, structural invariants, expected effect, possible side effects, risk, rollback checkpoint, and `safe-to-apply`. Reject or narrow the batch if it can alter untargeted structure. A `strategy-reset` must explicitly set `strategyChange: true`; an ordinary refinement must set it to `false`.
+3. Apply the assessed correction batch—owned by the active phase or repairing an earlier phase—only to a challenger; never mutate the champion checkpoint.
+4. Run one fail-fast phase validation/build and one application build sufficient to render. Do not full-typecheck between individual edits.
+5. Capture the required render(s).
+6. Create one exact active-reference/render comparison. For ImageGen-prepared input, include the original identity guardrail in reviewer evidence. For two to four views, present one 2x2 sheet rather than sequential images.
+7. Run deterministic preflight; if valid, run the blind visual scout and primary independent reviewer concurrently from the same immutable image evidence.
+8. Let the system promote, refine, rollback, or change strategy atomically.
+9. After a system gate passes, advance automatically under `final-only`; on the
+   final active phase show the exact comparison/runtime evidence and ask for
+   explicit approval. Under `phase-by-phase`, request the same approval after
+   every phase. Structured change feedback always reruns the full AI gate.
+
+After at most two non-visual operations, the next material action must produce a new render, unless a named blocker prevents it. Schema repair, receipts, cache writes, screenshot bookkeeping, or reviewer setup do not count as modeling progress.
+
+Batch validation and generation. Repeat a command only after its inputs changed or its failure produced a new falsifiable correction. Run a full project typecheck only at Interaction/finalization unless it is the only available render build.
+
+## Review contract
+
+Every visual checkpoint requires the current render and exact side-by-side comparison with `sourceImage`. When `sourceImage` is ImageGen-prepared, the reviewer must also inspect `originalImage` as an identity/macro-form guardrail and veto unauthorized drift. This prepared primary reference is distinct from synthetic turnaround views: turnarounds may appear only in a separately labeled planning sheet and never approve acceptance.
+
+Use two distinct review roles:
+
+- The blind visual scout receives only `originalImage`, `currentRender`, `previousRender` when a prior checkpoint exists, their exact side-by-side comparison, the active `phaseId`, and that phase's compact visual rubric. It must not receive the spec, phase packet, IDs, parameters, scores, builder defense, or primary verdict. It performs a mandatory earlier-quality sweep first, then the active-phase review, and must inspect every rubric check before deciding. Those checks explicitly cover excessive reference deviation, visible assembly/contact/attachment alignment, reference-relative balance or intentional asymmetry, missing/invented/malformed signature detail, and material/surface response that is visibly simpler or less plausible than the reference. It may `reject` a major/critical issue owned by the active phase (`phaseScope: current`) or any earlier phase (`phaseScope: protected`, a backward-compatible token meaning prior quality scope, not a frozen layer). Earlier phases may also produce non-blocking improvement directions. A small numeric score drop alone is not a rejection reason; score regression must be corroborated by the visual comparison. Blockout judges silhouette/framing/macro proportion/major parts; Form adds structure/shape/attachments/balance/signature detail and can improve Blockout; Lookdev adds color/material/surface/lighting/grounding and can improve Blockout/Form; Interaction adds motion/clearance/runtime states and can improve all earlier phases. Only future-phase issues are `deferred` and cannot reject. The scout scans the full rubric but returns at most three highest-impact directions, and assigns no scores, IDs, parameter paths, or numeric fixes.
+- The primary independent reviewer receives the raw reference, current render/comparison, phase packet, and all IDs editable in the cumulative current-or-earlier scope—never the builder's proposed score or defense. It must review in the same order: first map remaining or improvable earlier-phase geometry/structure/lookdev defects to exact IDs and corrections, then review the active phase. It supplies one composite shape-similarity score and exact component corrections. It may not approve merely because the active-phase work is good while an obvious earlier-phase defect remains. The system gate requires composite score `>=0.70` and blind-scout `approve`; explicit user approval remains the final phase gate.
+
+The scout supplements rather than replaces the primary reviewer. Use a fresh context distinct from both builder and primary reviewer so spec assumptions cannot contaminate its purely visual diagnosis.
+
+After both AI layers and deterministic gates pass, human approval is the final phase gate:
+
+- show the current render/output plus exact side-by-side or Interaction runtime evidence;
+- state that the system gate passed, but do not claim the phase is complete yet;
+- ask the user to approve or identify `visualRegion`, `problem`, and `expectedDirection`;
+- never infer approval from silence, a previous phase, or a generally positive comment;
+- when changes are requested, map the human-described region to exact component IDs/parameters, refine, rerun both AI reviewers, and ask again only after the new artifact passes.
+
+Record the response with:
 
 ```bash
-python3 ../../scripts/sculpt.py module evaluate object-sculpt.json <module-id> \
-  --pairs-json review/<module-id>-pairs.json \
-  --runtime-receipt review/<module-id>-runtime.json
-
-# Only when evaluate reports ok=true: spawn a fresh reviewer sub-agent.
-python3 ../../scripts/sculpt.py module review object-sculpt.json <module-id> \
-  --verdict-json review/<module-id>-verdict.json \
-  --evidence-manifest review/<module-id>-evidence.json
+python3 ../../scripts/sculpt.py approve object-sculpt.json \
+  --pass-id <blockout|form|lookdev|interaction> \
+  --decision approved \
+  --user-statement "<exact user approval>"
 ```
 
-Keep one command budget per module work cycle: one `context`, one complete edit/patch batch, one `build`, one application typecheck if the project build does not already include it, one render capture, one `evaluate`, then one independent `review`. Do not typecheck, build, render, or reread files between individual edits. Repeat a stage only after its inputs changed or its previous failure produced a new falsifiable fix. The individual `status`, `check`, `resolve`, `generate`, `compare`, and `preflight` commands remain debugging/compatibility paths, not the default workflow.
+For a rejection, use `--decision changes-requested` plus `--feedback-json` containing an array of `{visualRegion, problem, expectedDirection}`.
 
-One `module review` call records either a rejected/refine attempt or a passing acceptance; do not add a second bookkeeping command. A refine verdict must enumerate every currently visible actionable issue and produces one atomic `pendingCorrectionBatch`. Apply the entire batch before rendering again—never render/review between individual corrections. Use `refine-batch` with per-correction `scope: spec|code` when both change. `module status.correctionBatchProgress` must report `readyToRender: true` before capture; otherwise keep editing the same batch. A passing preflight writes a hash-bound receipt, while an incomplete/no-op batch is rejected before spending a reviewer call. The workflow preserves the reviewed render baseline inside `.sculpt-cache`, so normal fixed output filenames may be overwritten safely. At most two atomic batches are allowed per strategy. If both fail, record one `strategy-reset` tied to the stable blocker `rootCauseKeys`, explain the different representation and its falsifying check, then make a material spec or executable change before one new render. Do not ask the user merely because the batch budget ended: `request-input` requires concrete missing evidence and the exact criterion it blocks; `stop` requires verified capability evidence. `continue` is refused when diagnostics are invalid, a required feature fails, a blocking issue remains open, or refinement lacks a perceptible improvement. Risk/profile score floors, required visual layers, and diagnostic veto floors cannot be lowered inside a module. For an assembly-only structural gate use `module accept`. Acceptance is fail-closed and stored in `.sculpt-cache`; visual records bind the exact generated factory/live scene, declared implementation snapshot, module, verdict, evidence, render receipt, and dependency interfaces by hash.
+Reviewer scores use normalized `0..1` values. Suitability and complexity `scores.*` use ordinal integers `0..3`; never mix the scales.
 
-Do not use ImageGen output as reference truth or passing evidence. Registered synthetic views must remain `synthetic-hypothesis` + `planning-veto`; observed source/render evidence remains authoritative.
+Every actionable issue must identify:
 
-### 4. Assemble and run the normal quality passes
+- exact `component`, `detail-feature`, `material`, `repetition`, `topology-group`, `motion-affordance`, or `global` ID;
+- observed mismatch and expected result;
+- numeric `set`, `scale`, `translate`, `rotate`, or `replace` operation;
+- parameter path, value/unit, and final expected value;
+- view/evidence that will falsify the correction.
 
-Final validation and generation remain locked until every required module has a current acceptance, every required feature group has exactly one explicit owner mode (`--covers` on one visual module or `coverageContract.assemblyFeatureGroups` with a matching critical assembled-pass target), and the fully resolved spec passes strict validation. Module acceptance means only “ready to assemble”, not “asset complete”.
+Apply all corrections in one atomic batch before rendering again.
 
-```bash
-python3 ../../scripts/sculpt.py validate object-sculpt.json \
-  --for-pass <current-pass> --strict-quality
+Before that batch is executable, its `impactAssessment` must prove that it is local and recoverable:
 
-python3 ../../scripts/sculpt.py generate object-sculpt.json \
-  --out src/generated/Object.generated.ts \
-  --wrapper-out src/Object.ts
-```
+- `targetIds` exactly equal the correction targets and `allowedPaths` exactly equal their parameter paths;
+- `protectedComponentIds` identify neighboring/accepted components that must not change;
+- `structuralInvariants` state the hierarchy, attachments, proportions, or motion relationships that must survive;
+- `expectedEffect`, `possibleSideEffects`, `risk`, and `rollbackCheckpoint` make the blast radius explicit;
+- only `verdict: safe-to-apply` proceeds. The builder must narrow/reject an unsafe proposal before touching code or spec.
 
-Once modules are accepted, `status` includes the assembled pass workflow. Run the real application and `compare`, then run deterministic preflight:
+## Champion and rollback policy
 
-```bash
-python3 ../../scripts/sculpt.py review object-sculpt.json \
-  --pass-id <current-pass> \
-  --evidence-set-json review/<pass>-evidence.json \
-  --preflight-only
-```
+Checkpoint `spec + code + generated output + render + comparison + scores` together.
 
-Only when it reports `ok: true`, spawn one fresh reviewer sub-agent and record its verdict unchanged:
+- Seed the first valid scored candidate as the system phase champion. It remains `awaiting-user-approval` until the user approves it.
+- Promote when the AI similarity gate and blind scout pass; keep the highest-scoring compatible champion. Decide visual regression from the original/current/previous image comparison, never from a pixel-overlap score.
+- A challenger that fails the three-signal gate remains in audit history; restore the highest-scoring compatible champion transactionally.
+- A reviewer `stop` does not bypass comparison: score the rendered challenger and restore the champion on regression.
+- Three consecutive non-improvements exhaust the strategy. Keep the champion, record one `strategy-reset`, and materially change representation before another render.
+- An improving candidate resets the consecutive-failure count; useful refinement may continue up to the safety cap.
+- Evidence/schema/hash/scope failures do not consume quality attempts because they do not prove the render is worse.
+- A human `changes-requested` decision does not unlock the next phase. Preserve its structured feedback, refine the same phase, rerun deterministic and both AI gates, then request approval for the new hash-bound artifact.
 
-```bash
-python3 ../../scripts/sculpt.py review object-sculpt.json \
-  --pass-id <current-pass> \
-  --evidence-set-json review/<pass>-evidence.json \
-  --verdict-json review/<pass>-verdict.json \
-  --in-place
-```
+No deterministic pixel-overlap score is computed, stored, displayed, or used for promotion and rollback. Image integrity checks prove provenance only and cannot compensate for poor visual quality.
 
-For modular visual passes, manual `--ai-vision-score` or `--reviewer-model` input is not acceptance authority. The pass verdict must bind the current pass/spec/comparison hashes, a current preflight receipt, and different builder/reviewer context IDs. The receipt is consumed after the verdict is recorded, so a new attempt needs a new preflight. Keep `*.generated.ts` generator-owned and hand-written integration in the wrapper.
+## User-visible progress
 
-The adaptive pass plan remains:
+At the start, state the active phases and an ETA range. After every complete cycle or named blocker, report:
 
-- `blockout`: silhouette, framing, masses, proportions;
-- `structure`: only for complex/ultra hierarchy and contacts;
-- `form`: recognizable geometry and local form;
-- `lookdev`: material, special surface, lighting, and contact shadow;
-- `interaction`: only for animated/playable/destructible use;
-- `optimization`: only for real-time use, with measured metrics and a fresh visual no-regression review.
+- current phase and champion/challenger state;
+- accepted gates versus active gates;
+- component IDs changed;
+- visible render plus exact side-by-side comparison;
+- before/after reviewer layers and deterministic geometry diagnostics;
+- promote, reject, rollback, or strategy-change result;
+- system-pass versus user-approved status;
+- next correction and recalculated ETA range.
 
-Do not add empty passes to simulate rigor. The useful gates are module, assembly, and final visual/runtime quality.
-
-## Non-negotiable rules
-
-- Use named assemblies and geometry-bearing parts; keep one acyclic global root.
-- Use geometry for silhouette-changing forms. Unsupported primitives or modes must fail, never silently become boxes.
-- Bind appendages with parent/socket/endpoints/contact/overlap/gap data and inspect hidden joints from useful angles.
-- Keep albedo, roughness, normal/height, and AO independent. A material crop can provide inferred PBR evidence, not physical truth.
-- Model visible face and hand landmarks as real named geometry regions with independent close-up gates; do not accept a generic face sphere or hand blob.
-- Treat landmark/region names as semantic review handles, not automatic mesh boundaries. Enforce every planned `continuous-sculpt` group as one connected host and every `surface-relief` group as embedded in that host.
-- Treat static cloth, fibers, glass, liquid, and volume as explicit bounded approximations; do not imply simulation, strand grooming, caustics, or raymarched scattering.
-- Keep fitted shells and surface scatter tied to an undeformed final `section-loft`; never accept a visually detached layer or stacked-blob substitute.
-- Diagnostics may veto obvious framing/silhouette/detail failures but cannot approve a visual gate.
-- Run deterministic preflight before spawning a reviewer; do not spend independent review on evidence that already fails hashes, provenance, required views, or pixel vetoes.
-- A builder must not author, rewrite, rescore, or override the independent verdict used by `module review` or modular assembled `review`.
-- `continue` requires current, hash-bound evidence and every applicable critical feature threshold.
+Do not narrate every internal schema/build/cache action as a separate progress step. A pre-render blocker may say `visual comparison: not available yet` with the exact reason; never reuse a stale image.
 
 ## Completion gate
 
-Do not claim completion until all modules are accepted, the assembled spec validates, generated TypeScript compiles with `three`, the real app loads without relevant errors, every selected pass is complete, all visual evidence is bound to the reviewed artifact, and runtime/metric passes contain real proof.
+Do not claim completion until the active phase plan is complete, the configured
+approval mode is satisfied for the latest system-passed artifact, the final
+champion spec validates, generated TypeScript compiles with `three`, the real
+app loads without relevant errors, every comparison is bound to the reviewed
+artifact and its render-pipeline receipt, cumulative visual quality did not
+regress, and required interaction has real runtime proof.
 
-If any check cannot run, state that limitation instead of implying success.
+Performance is an optional post-lookdev audit activated only by an explicit user/device budget. Restore the visual champion after any performance refinement that lowers visual quality.
 
 ## Reference routing
 
-For module work, follow the `module context.references` list and load those files together; do not preload all references. Outside a module, read only what the current work requires:
+Load only the reference named by the current phase packet:
 
-- suitability, complexity, and global quality contract: `references/pre-spec-assessment.md`;
-- geometry and representation patterns: `references/procedural-patterns.md`;
-- face and hand contracts: `references/anatomical-regions.md`;
-- attachment correctness: `references/attachment-joint-correctness.md`;
-- material, PBR, and lighting: `references/material-lighting-realism.md`;
-- interaction/physics/destruction: `references/action-ready-models.md`;
-- screenshot evidence and score layers: `references/browser-screenshot-feedback.md`;
-- root-cause and next-action choice: `references/self-correction-loop.md`;
+- suitability/global contract: `references/pre-spec-assessment.md`;
+- geometry/recursive representation: `references/procedural-patterns.md`;
+- attachments: `references/attachment-joint-correctness.md`;
+- materials/lighting: `references/material-lighting-realism.md`;
+- interaction: `references/action-ready-models.md`;
+- screenshots/scores: `references/browser-screenshot-feedback.md`;
+- corrections/rollback: `references/self-correction-loop.md`;
 - terminology: `references/3d-graphics-terminology.md`.
+
+Optional component-pattern references are capability modules, not schema
+extensions. Load one only after an observed component or named phase problem
+matches its trigger; never classify the whole object into one exclusive
+category or preload the library:
+
+- trunks/branches/stems/leaves/grass: `references/patterns/vegetation.md`;
+- rigid manufactured panels/frames/fasteners/machinery: `references/patterns/hard-surface-machinery.md`;
+- exposed organic skin/eyes/flesh: `references/patterns/organic-skin-eyes.md`;
+- visible hair/fur/bristles/fibers: `references/patterns/hair-fur-fiber.md`;
+- cloth/garments/straps/upholstery: `references/patterns/fabric-cloth.md`;
+- glass/liquid/lenses/clear covers: `references/patterns/transmissive-surfaces.md`;
+- rotor/hinge/slide/sway/deformation: `references/patterns/procedural-motion.md`.
+- glow/energy/smoke/fog/aura: `references/patterns/effects-emissive-volume.md`;
+- logos/labels/symbols/stripes/text: `references/patterns/markings-decals-text.md`.
+
+The executable registry may compose every matched pack on different components.
+The two-reference limit is only a context-loading budget: expand full pattern
+instructions for at most two active-blocker owners at once unless a third
+blocker proves necessary. Pattern examples must map into registered JSON paths,
+emitters, and typed correction operators; unsupported requests return
+`capability-gap` rather than prose-only advice or guessed code.

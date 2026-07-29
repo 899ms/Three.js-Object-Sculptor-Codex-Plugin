@@ -22,9 +22,9 @@ from sculpt_contract import (
     VISUAL_EVIDENCE_MANIFEST_VERSION,
     file_sha256,
     parse_json,
+    visual_checkpoint_presentation,
     visual_evidence_manifest_sha256,
 )
-from extract_reference_pbr import color_distance, rgb_to_hex, sample_corner_background
 from sculpt_image_io import (
     load_image_rgba as load_image,
     read_png,  # compatibility re-export for existing script consumers
@@ -103,6 +103,14 @@ def build_silhouette_mask(
     pixels: list[tuple[int, int, int, int]],
 ) -> tuple[list[bool], dict, list[str]]:
     """Segment an isolated object without the material extractor's color-preservation fallback."""
+    # Lazy loading keeps the documented standalone CLI from entering the
+    # sculpt_modules -> sculpt_module_cli -> comparison-sheet import cycle.
+    from extract_reference_pbr import (
+        color_distance,
+        rgb_to_hex,
+        sample_corner_background,
+    )
+
     warnings: list[str] = []
     transparent_fraction = sum(alpha < 245 for _, _, _, alpha in pixels) / max(1, len(pixels))
     background, background_noise = sample_corner_background(width, height, pixels)
@@ -217,11 +225,6 @@ def silhouette_diagnostics(
     ren_mask, ren_mask_info, ren_warnings = build_silhouette_mask(ren_w, ren_h, ren_pixels)
     normalized_ref = resize_mask_contain(ref_w, ref_h, ref_mask, size, size)
     normalized_render = resize_mask_contain(ren_w, ren_h, ren_mask, size, size)
-    intersection = sum(
-        first and second for first, second in zip(normalized_ref, normalized_render)
-    )
-    union = sum(first or second for first, second in zip(normalized_ref, normalized_render))
-    iou = intersection / union if union else 1.0
     ref_stats = _mask_stats(normalized_ref, size, size)
     render_stats = _mask_stats(normalized_render, size, size)
     centroid_delta = math.dist(ref_stats["centroid"], render_stats["centroid"]) / math.sqrt(2)
@@ -252,7 +255,6 @@ def silhouette_diagnostics(
             "diagnosticOnly": True,
             "acceptanceAuthority": False,
             "maskResolution": size,
-            "silhouetteIou": round(iou, 5),
             "centroidDelta": round(centroid_delta, 5),
             "aspectRatioDelta": round(aspect_delta, 5),
             "normalizedContourDistance": round(contour_distance, 5),
@@ -479,15 +481,29 @@ def create_sheet_pairs(
     gutter: int,
     diagnostics_dir: Path | None = None,
     render_provenance: dict[str, Any] | None = None,
+    layout: str = "auto",
 ) -> dict:
     if not pairs:
         raise ValueError("at least one reference/render pair is required")
+    if layout not in {"auto", "grid-2x2", "rows"}:
+        raise ValueError("layout must be auto, grid-2x2, or rows")
+    selected_layout = layout
+    if selected_layout == "auto":
+        selected_layout = "grid-2x2" if 2 <= len(pairs) <= 4 else "rows"
+    if selected_layout == "grid-2x2" and len(pairs) > 4:
+        raise ValueError("grid-2x2 supports at most four reference/render pairs")
     panel_w = width
     panel_h = height
-    canvas_w = panel_w * 2 + gutter * 3
     header_h = 28
+    pair_w = panel_w * 2 + gutter * 3
     row_h = panel_h + header_h + gutter
-    canvas_h = len(pairs) * row_h + gutter
+    cell_h = panel_h + header_h + gutter * 2
+    if selected_layout == "grid-2x2":
+        canvas_w = pair_w * 2
+        canvas_h = cell_h * 2
+    else:
+        canvas_w = pair_w
+        canvas_h = len(pairs) * row_h + gutter
     canvas = [(246, 242, 236)] * (canvas_w * canvas_h)
     evidence_views: list[dict] = []
     for index, pair in enumerate(pairs):
@@ -499,19 +515,40 @@ def create_sheet_pairs(
             (ref_w, ref_h, ref_pixels),
             (ren_w, ren_h, ren_pixels),
         )
-        y0 = gutter + index * row_h
-        fill_rect(canvas, canvas_w, gutter, y0, panel_w, header_h, (40, 45, 48))
-        fill_rect(canvas, canvas_w, gutter * 2 + panel_w, y0, panel_w, header_h, (40, 45, 48))
-        fill_rect(canvas, canvas_w, gutter, y0 + header_h, panel_w, panel_h, (230, 230, 230))
-        fill_rect(canvas, canvas_w, gutter * 2 + panel_w, y0 + header_h, panel_w, panel_h, (230, 230, 230))
+        if selected_layout == "grid-2x2":
+            cell_x = (index % 2) * pair_w
+            cell_y = (index // 2) * cell_h
+            y0 = cell_y + gutter
+            comparison_region = {
+                "x": cell_x,
+                "y": cell_y,
+                "width": pair_w,
+                "height": cell_h,
+            }
+        else:
+            cell_x = 0
+            cell_y = index * row_h
+            y0 = gutter + cell_y
+            comparison_region = {
+                "x": 0,
+                "y": cell_y,
+                "width": pair_w,
+                "height": row_h + (gutter if index == len(pairs) - 1 else 0),
+            }
+        reference_x = cell_x + gutter
+        render_x = cell_x + gutter * 2 + panel_w
+        fill_rect(canvas, canvas_w, reference_x, y0, panel_w, header_h, (40, 45, 48))
+        fill_rect(canvas, canvas_w, render_x, y0, panel_w, header_h, (40, 45, 48))
+        fill_rect(canvas, canvas_w, reference_x, y0 + header_h, panel_w, panel_h, (230, 230, 230))
+        fill_rect(canvas, canvas_w, render_x, y0 + header_h, panel_w, panel_h, (230, 230, 230))
         ref_panel = resize_contain(ref_w, ref_h, ref_pixels, panel_w, panel_h)
         ren_panel = resize_contain(ren_w, ren_h, ren_pixels, panel_w, panel_h)
-        blit(canvas, canvas_w, ref_panel, panel_w, gutter, y0 + header_h)
-        blit(canvas, canvas_w, ren_panel, panel_w, gutter * 2 + panel_w, y0 + header_h)
+        blit(canvas, canvas_w, ref_panel, panel_w, reference_x, y0 + header_h)
+        blit(canvas, canvas_w, ren_panel, panel_w, render_x, y0 + header_h)
         fill_rect(
             canvas,
             canvas_w,
-            panel_w + gutter + gutter // 2,
+            cell_x + panel_w + gutter + gutter // 2,
             y0,
             max(2, gutter // 5),
             panel_h + header_h,
@@ -528,8 +565,10 @@ def create_sheet_pairs(
             raise ValueError("referenceProvenance must be an object")
         origin = provenance.get("origin")
         allowed_use = provenance.get("allowedUse")
-        if origin not in {"observed", "synthetic-hypothesis"}:
-            raise ValueError("referenceProvenance.origin must be observed or synthetic-hypothesis")
+        if origin not in {"observed", "prepared-reference", "synthetic-hypothesis"}:
+            raise ValueError(
+                "referenceProvenance.origin must be observed, prepared-reference, or synthetic-hypothesis"
+            )
         if allowed_use not in {"acceptance", "planning-veto"}:
             raise ValueError("referenceProvenance.allowedUse must be acceptance or planning-veto")
         if origin == "synthetic-hypothesis" and allowed_use != "planning-veto":
@@ -544,8 +583,14 @@ def create_sheet_pairs(
             "renderSha256": file_sha256(render),
             "renderDimensions": {"width": ren_w, "height": ren_h},
             "comparisonImage": str(out.resolve()),
+            "comparisonRegion": comparison_region,
             "fitDiagnostics": diagnostics,
         }
+        evaluation_scope = pair.get("evaluationScope")
+        if evaluation_scope is not None:
+            if not isinstance(evaluation_scope, dict):
+                raise ValueError("evaluationScope must be an object")
+            evidence_view["evaluationScope"] = evaluation_scope
         if diagnostics_dir is not None:
             diagnostics_dir.mkdir(parents=True, exist_ok=True)
             safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", evidence_view["viewId"]).strip("-") or f"view-{index + 1}"
@@ -566,7 +611,12 @@ def create_sheet_pairs(
         "comparisonSha256": comparison_hash,
         "comparisonDimensions": {"width": canvas_w, "height": canvas_h},
         "views": evidence_views,
-        "layout": "each row: left=full reference,right=full render",
+        "layout": (
+            "2x2 view cells; each cell: left=full reference,right=full render"
+            if selected_layout == "grid-2x2"
+            else "each row: left=full reference,right=full render"
+        ),
+        "layoutMode": selected_layout,
         "panelWidth": panel_w,
         "panelHeight": panel_h,
         "fitMode": "contain-no-crop",
@@ -580,6 +630,10 @@ def create_sheet_pairs(
             if isinstance(view.get("renderSha256"), str)
         })
         manifest["renderProvenance"] = provenance
+    manifest["userPresentation"] = visual_checkpoint_presentation(
+        manifest,
+        checkpoint="comparison-created",
+    )
     manifest["manifestSha256"] = visual_evidence_manifest_sha256(manifest)
     # Keep the old key in returned JSON for callers that only display the views.
     return {**manifest, "evidenceSet": evidence_views}
@@ -592,10 +646,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--pairs-json",
         help=(
-            "JSON array/file of {viewId,referenceImage,renderScreenshot,referenceProvenance?}; "
-            "referenceProvenance={origin: observed|synthetic-hypothesis, "
+            "JSON array/file of {viewId,referenceImage,renderScreenshot,referenceProvenance?,evaluationScope?}; "
+            "referenceProvenance={origin: observed|prepared-reference|synthetic-hypothesis, "
             "allowedUse: acceptance|planning-veto, source: string}; synthetic hypotheses "
-            "must use planning-veto"
+            "must use planning-veto. Module evidence requires evaluationScope.kind=module-local "
+            "with the exact module/component ids and an isolated reference derivation."
         ),
     )
     parser.add_argument("--out", type=Path, required=True)
@@ -618,6 +673,14 @@ def main(argv: list[str]) -> int:
         ),
     )
     parser.add_argument(
+        "--render-receipt",
+        type=Path,
+        help=(
+            "Standalone threejs-sculpt-render-receipt captured from "
+            "createSculptReviewPipeline().receipt(); binds AA/output state to this render"
+        ),
+    )
+    parser.add_argument(
         "--diagnostics-dir",
         type=Path,
         help="Optionally write red/reference, cyan/render silhouette overlay PNGs.",
@@ -625,6 +688,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--panel-width", type=int, default=720)
     parser.add_argument("--panel-height", type=int, default=720)
     parser.add_argument("--gutter", type=int, default=24)
+    parser.add_argument(
+        "--layout",
+        choices=("auto", "grid-2x2", "rows"),
+        default="auto",
+        help="Auto packs two to four views into one 2x2 sheet; rows is the legacy layout.",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -636,6 +705,28 @@ def main(argv: list[str]) -> int:
                 "and cannot be used without them"
             )
         render_provenance = None
+        if args.render_receipt:
+            render_receipt_path = args.render_receipt.expanduser().resolve()
+            if not render_receipt_path.is_file():
+                raise ValueError(f"render receipt is missing: {render_receipt_path}")
+            render_receipt = json.loads(
+                render_receipt_path.read_text(encoding="utf-8")
+            )
+            if (
+                not isinstance(render_receipt, dict)
+                or render_receipt.get("artifactType")
+                != "threejs-sculpt-render-receipt"
+            ):
+                raise ValueError(
+                    "--render-receipt must contain a threejs-sculpt-render-receipt object"
+                )
+            render_provenance = {
+                "artifactType": "threejs-sculpt-render-provenance",
+                "version": 3,
+                "renderReceiptPath": str(render_receipt_path),
+                "renderReceiptSha256": file_sha256(render_receipt_path),
+                "renderReceipt": render_receipt,
+            }
         if args.sculpt_manifest and args.module_id:
             from sculpt_manifest import entry_by_id, load_modules, read_object
             from sculpt_module_state import (
@@ -696,7 +787,7 @@ def main(argv: list[str]) -> int:
                 raise ValueError("runtime receipt must be a JSON object or array")
             render_provenance = {
                 "artifactType": "threejs-sculpt-render-provenance",
-                "version": 2,
+                "version": 3,
                 "moduleId": args.module_id,
                 "moduleHash": module_hash(
                     sculpt_manifest_path, sculpt_manifest, args.module_id
@@ -715,6 +806,14 @@ def main(argv: list[str]) -> int:
                 "runtimeReceiptSha256": file_sha256(runtime_path),
                 "runtimeReceipt": runtime_receipt,
             }
+            if args.render_receipt:
+                render_provenance.update(
+                    {
+                        "renderReceiptPath": str(render_receipt_path),
+                        "renderReceiptSha256": file_sha256(render_receipt_path),
+                        "renderReceipt": render_receipt,
+                    }
+                )
         if args.pairs_json:
             candidate = Path(args.pairs_json).expanduser()
             raw = candidate.read_text(encoding="utf-8") if candidate.is_file() else args.pairs_json
@@ -739,6 +838,7 @@ def main(argv: list[str]) -> int:
             max(6, args.gutter),
             args.diagnostics_dir.expanduser().resolve() if args.diagnostics_dir else None,
             render_provenance,
+            args.layout,
         )
         if args.manifest_out:
             manifest = args.manifest_out.expanduser().resolve()

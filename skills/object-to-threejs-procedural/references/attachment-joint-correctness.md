@@ -23,6 +23,10 @@ Every child appendage, connector, limb, branch, tube, handle, leg, horn, wing, c
 
 If the attachment point cannot be inferred from the image, record that as `request-input` or lower the fidelity target. Do not silently place the part in mid-air.
 
+## Repeated-Part Contact Contract
+
+Every `repetitionSystems[]` item must declare `attachmentRelation.type` as `contact`, `overlap`, `gap`, or `free`. Use `free` explicitly for intentionally unattached particles or floating elements. All other relations require `hostComponentRef` and non-negative `gapTolerance`; `overlap` also requires positive `overlap`, while `gap` requires non-negative `gap`. This describes the repeated system once rather than duplicating attachment metadata on every instance.
+
 ## Generator Rule
 
 For endpoint-based parts, place the pivot group at `localStart`, generate the visible mesh from `localStart` to `localEnd`, and orient the mesh along that direction. Do not center the mesh at an arbitrary transform position.
