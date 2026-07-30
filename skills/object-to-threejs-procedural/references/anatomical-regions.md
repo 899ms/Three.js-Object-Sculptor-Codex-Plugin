@@ -1,32 +1,28 @@
-# Face And Hand Region Contracts
+# Face And Hand Region Contract
 
-Use this reference only when the target contains a visible face or hand. These are perceptually sensitive regions: a small proportion, gaze, expression, digit, or contact error can make an otherwise acceptable model look wrong.
+Use this strict extension of `pre-spec-assessment.md` only for a visible anatomical face or hand. Masks, screens, carvings, and other identity-critical features use the general contract. This adds no build pass and claims neither medical anatomy nor automatic rigging.
 
-This contract does not add a build pass and does not claim medical anatomy or automatic rigging. It strengthens the existing pre-spec, component hierarchy, form/lookdev review, and optional post-quality performance no-regression audit.
-
-Face and hand handling is a strict extension of the general identity-critical screening in `pre-spec-assessment.md`, not the only kind of critical-region handling. During assessment, establish visibility, confidence, occlusion, evidence needs, constraints, and bounded unknowns. Complete component-bound assemblies, landmark mappings, feature targets, and the relevant `surfaceTopologyPlan` at the start of Form, before generating detailed region geometry. Blockout still includes the visible identity-defining macro masses, but it must not speculate about detailed topology.
+During assessment, establish visibility, confidence, occlusion, evidence needs, constraints, and bounded unknowns. At the start of Form, complete the geometry-bound assembly, landmark mappings, feature target, and applicable `surfaceTopologyPlan` before detailed region geometry. Blockout includes visible identity-defining macro masses without speculating about detailed topology.
 
 ## Declare The Region
 
 Set `preSpecAssessment.specializedRegions.status` to:
 
-- `declared` when at least one face or hand is visible and its full region contract has been completed at the start of Form;
-- `none` only after inspection, with a concrete reason;
-- `unassessed` only during assessment and Blockout while Form-owned component mappings are unavailable; record the pending contract in notes or a bounded risk.
+- `declared` when at least one face or hand is visible and its full contract is complete at the start of Form;
+- `none` only after inspection, with a concrete reason in `notes`;
+- `unassessed` only through Blockout while Form-owned mappings are unavailable; record the pending contract in notes or a bounded risk.
 
 Each declared region needs:
 
-- one unique `id`, `kind`, descriptive `representation`, visibility, confidence, and occlusion handling;
-- one named `assemblyRef` containing all region geometry;
-- component and source-evidence refs;
-- one or more dedicated close-up `reviewViewIds`;
-- visible landmarks mapped to real geometry components;
-- explicit proportion plus expression/pose constraints;
-- one independent critical `featureTargetId` for every visible region.
+- a unique `id`, `kind`, `name`, `representation`, `visibility`, `confidence`, and `occlusionHandling`;
+- one `assemblyRef` containing its `componentRefs`;
+- source `evidenceRefs` and dedicated close-up `reviewViewIds`;
+- visible landmarks mapped to geometry parts inside the assembly, with explicit proportion plus expression, pose, or contact constraints;
+- one independent critical, `mustPass` `featureTargetId`.
 
 If a region is partial or occluded, record the unknowns. Use `request-input` or `omit-hidden-detail` when the hidden structure cannot be bounded honestly. Do not invent hidden fingers or facial forms.
 
-## Face Standard
+## Face Contract
 
 A clear face must cover at least these landmark roles:
 
@@ -35,51 +31,35 @@ A clear face must cover at least these landmark roles:
 - `nose-muzzle`: nose bridge or muzzle mass and its relation to the eyes and mouth;
 - `mouth-expression`: mouth corners, lip/opening shape, teeth/tongue when visible, and expression.
 
-Add `brow-expression`, `jaw-cheeks`, and `ears` when they carry identity. Map a clear face to at least four named landmark regions backed by executable geometry; multiple regions may reference one continuous sculpted host. Accessories such as glasses, masks, eyeballs, teeth, and true strands remain separate. Surface-continuous cheek fur or fleshy muzzle relief stays embedded in the host and cannot be replaced by floating clumps.
+Add `brow-expression`, `jaw-cheeks`, and `ears` when they carry identity. Give each landmark concrete criteria and executable geometry; several may share one continuous host. Preserve observed proportion, expression, and asymmetry. Material or decals cannot repair wrong silhouette, gaze, or mouth opening.
 
-Face constraints must preserve proportion and expression. Do not mirror away observed asymmetry, and do not use material or decals to hide a wrong silhouette, gaze, or mouth opening.
-
-## Hand Standard
+## Hand Contract
 
 Choose the articulation mode from the reference:
 
-- `explicit-digits`: visible bare/gloved digits need named thumb and finger chains, segment counts, joint arcs, taper, curl, and pose criteria;
+- `explicit-digits`: exactly one thumb chain and at least one finger chain, each with `segmentCount` from 1 to 4, component refs, and pose criteria;
 - `grouped-digits`: stylized paws, mittens, or grouped glove forms still need named wrist, palm, digit mass, and outer-contour landmarks;
 - `silhouette-only`: allowed only for a partial or strongly obscured hand;
 - `hidden`: allowed only for an occluded hand with an explicit hidden-detail policy.
 
 Do not force five human fingers onto a stylized paw, and do not collapse a clearly articulated hand into a mitten. Follow the visible representation.
 
-For a static or rigid asset, several hand landmarks and digit chains may map to one continuous sculpted host; semantic completeness does not imply separate meshes. Require separate articulatable geometry parts only for `animated`, `playable`, or `destructible` output, or where the reference shows a real seam. An action-ready digit part also needs a non-static `animationRole`, `transformChannels.rotate: true`, and a finite non-zero joint pivot; a detached but transform-locked mesh is not articulation.
+Static landmarks and digit chains may share one continuous host. When Interaction requires articulation, every chain segment maps to a unique geometry part and needs a non-static `actionProfile.animationRole`, `actionProfile.transformChannels.rotate: true`, a supported `actionProfile.pivot.mode`, a finite three-number `actionProfile.pivot.localPosition`, and a non-zero finite `actionProfile.pivot.axis`.
 
-When a hand touches an object, add `interaction` with:
+When a hand touches an object, add `interaction.type`, a geometry-part `targetComponentRef`, geometry-part `contactComponentRefs` inside the hand region, and observable criteria. Bind both sides of the contact to the region's critical feature target.
 
-- the contact type and target component;
-- the hand components forming the contact;
-- observable criteria for overlap, negative space, grip direction, penetration, and floating gaps.
+## Critical Review
 
-An interacting hand is structured during form, then remains independently reviewed in lookdev and interaction. An optional performance audit may not regress it.
+Every visible region remains an independent critical, `mustPass` feature target with dedicated source/render evidence bound through its exact `reviewViewIds`. Its minimum score cannot be lower than the configured critical threshold.
 
-## Close-Up Review
+A missing crop, unbound review, hidden critical region, or sub-threshold score blocks `continue`; the full-object score cannot average the failure away.
 
-Add matching source and render crops to `sculpt compare --pairs-json` using the region's exact `reviewViewIds`. The corresponding feature review records those IDs:
+## Execution Routing
 
-```json
-{
-  "id": "primary-face-identity",
-  "score": 0.88,
-  "visible": true,
-  "viewIds": ["face-closeup"],
-  "notes": "Eye spacing and smile match; lower muzzle still needs width correction."
-}
-```
+- Use `procedural-patterns.md` for registered geometry and topology realization.
+- Use `patterns/organic-skin-eyes.md` for continuous organic form, separate anatomical boundaries, skin/eye lookdev, and face review.
+- Use `patterns/procedural-motion.md` only when an anatomical joint or digit chain requires runtime articulation.
+- Use `attachment-joint-correctness.md` for grip and surface-contact mechanics.
+- Use `browser-screenshot-feedback.md` for close-up capture, comparison, and critical feature scoring.
 
-The region score cannot be averaged away by the full-object score. A missing crop, an unbound review, a hidden critical region, or a score below its critical threshold blocks `continue`.
-
-## Modeling Guidance
-
-- At the start of Form, complete the relevant topology plan before detailed region geometry. Prefer one `sculpted-surface` host when face contour, cheeks, muzzle, and jaw transition continuously; use separate ellipsoids, extrudes, curve sweeps, or parts only at real anatomical/accessory boundaries. There is intentionally no one-click `face` or `hand` primitive.
-- Separate eyeballs, teeth, a true mouth cavity, and accessories when their boundary is visible. Keep fleshy muzzle/nose, eyelids, brows, lips, folds, and fur relief embedded when the topology plan identifies an uninterrupted host surface.
-- Preserve wrist, palm, thumb/digit chains or grouped digit mass as semantic regions. Keep them on one sculpted host for continuous static anatomy; separate them only for real seams/accessories or action-ready articulation.
-- Validate neutral form before relying on fur, skin, cloth, nail, eye, or accessory materials.
-- Review the close-up and full object together so a locally accurate face or hand still fits the body proportions and pose.
+Load only the matched execution references; this file remains the schema and quality authority for every visible face or hand.

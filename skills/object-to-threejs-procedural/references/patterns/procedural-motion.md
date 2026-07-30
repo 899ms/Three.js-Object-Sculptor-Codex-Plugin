@@ -19,6 +19,15 @@ component ID, behavior, pivot, normalized axis, rate or limits, source,
 confidence, evidence refs, and tested neutral/extreme states. Keep the moving
 component semantic and independently addressable.
 
+### Articulated digits
+
+Do not split a static hand merely to satisfy landmark semantics. When
+Interaction requires articulated digits, map each `digitChains[].componentRefs`
+entry to one unique geometry part and keep its count equal to `segmentCount`.
+Give every segment a non-static `actionProfile.animationRole`, enabled rotation,
+and a finite joint-local pivot and non-zero axis. Preserve the observed joint
+arc, taper, curl, and grip clearance across rest, mid, and extreme states.
+
 ## Implementation choice
 
 Prefer:

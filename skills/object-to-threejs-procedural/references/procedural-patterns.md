@@ -186,7 +186,10 @@ Every geometry-bearing component owns a `detailPlan`. This is a visual inventory
 
 Each feature records exact host-local position, rotation, and 3D size, plus evidence, confidence, material references, and acceptance criteria. Its realization target must already exist and be supported. Host geometry records such as sculpt sources, ridges, creases, and deformations use `geometry-feature`; a `topology-group` realization also needs an exact geometry `implementationId`, because topology metadata alone does not build detail. A prose-only detail, unknown id, material pretending to change geometry, or missing complex decomposition is a validation error. Reviewer correction plans may target these records as `detail-feature` IDs.
 
-Faces and hands use named assemblies and landmark-bearing child parts, not a generic one-click primitive. Select `explicit-digits` versus `grouped-digits` from the visible reference, and model hand-to-object contact as part of the hand feature system. See `anatomical-regions.md`.
+Faces and hands use named assemblies and registered geometry rather than a
+generic one-click primitive. Route their landmark, articulation, contact, and
+evidence requirements through `anatomical-regions.md`; this file owns only the
+chosen geometry realization.
 
 Material contracts, surface-frequency bands, PBR extraction, and lookdev acceptance live only in `material-lighting-realism.md`.
 

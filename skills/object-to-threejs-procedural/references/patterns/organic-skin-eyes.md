@@ -10,6 +10,8 @@ also load `../anatomical-regions.md`.
   reference shows no real seam;
 - separate eyeballs, corneal/wet layers, teeth, tongue, mouth cavity, claws,
   horns, and accessories when their boundary is visible;
+- keep fleshy muzzle/nose, eyelids, brows, lips, folds, and
+  surface-continuous cheek fur as host-bound relief rather than floating clumps;
 - concentrate geometry where silhouette, eyelids, lips, nostrils, joints, or
   expression require it rather than applying uniform density;
 - use `SkinnedMesh`/bone-ready topology only when Interaction actually requires
@@ -20,6 +22,9 @@ Use stable component and feature IDs, bounded landmark evidence, and the current
 `componentTree`, `detailPlan`, `localFeatures`, `surfaceTopologyPlan`, and
 specialized-region contracts. Do not claim quad topology, skin weights, or
 hidden anatomy unless they are implemented and verified.
+
+Validate neutral form before relying on skin, fur, cloth, nail, eye, or
+accessory materials.
 
 ## Lookdev routing
 

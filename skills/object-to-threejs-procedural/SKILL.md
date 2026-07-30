@@ -254,6 +254,8 @@ Load only the reference named by the current phase packet:
 
 - suitability/global contract: `references/pre-spec-assessment.md`;
 - visual-style axes, values, and derivation: `references/visual-style-classification.md`;
+- visible anatomical face/hand schema and critical review:
+  `references/anatomical-regions.md`;
 - geometry/recursive representation: `references/procedural-patterns.md`;
 - attachments: `references/attachment-joint-correctness.md`;
 - materials/lighting: `references/material-lighting-realism.md`;
@@ -273,13 +275,16 @@ category or preload the library:
 - visible hair/fur/bristles/fibers: `references/patterns/hair-fur-fiber.md`;
 - cloth/garments/straps/upholstery: `references/patterns/fabric-cloth.md`;
 - glass/liquid/lenses/clear covers: `references/patterns/transmissive-surfaces.md`;
-- rotor/hinge/slide/sway/deformation: `references/patterns/procedural-motion.md`.
+- rotor/hinge/slide/sway/deformation or action-ready articulated digits:
+  `references/patterns/procedural-motion.md`;
 - glow/energy/smoke/fog/aura: `references/patterns/effects-emissive-volume.md`;
 - logos/labels/symbols/stripes/text: `references/patterns/markings-decals-text.md`.
 
 The executable registry may compose every matched pack on different components.
 The two-reference limit is only a context-loading budget: expand full pattern
 instructions for at most two active-blocker owners at once unless a third
-blocker proves necessary. Pattern examples must map into registered JSON paths,
-emitters, and typed correction operators; unsupported requests return
-`capability-gap` rather than prose-only advice or guessed code.
+blocker proves necessary. Mandatory phase/schema contracts such as
+`anatomical-regions.md` do not consume this optional-pattern budget. Pattern
+examples must map into registered JSON paths, emitters, and typed correction
+operators; unsupported requests return `capability-gap` rather than prose-only
+advice or guessed code.

@@ -23,6 +23,15 @@ Every child appendage, connector, limb, branch, tube, handle, leg, horn, wing, c
 
 If the attachment point cannot be inferred from the image, record that as `request-input` or lower the fidelity target. Do not silently place the part in mid-air.
 
+## Grip And Surface Contact
+
+For a hand that touches or holds an object, let `anatomical-regions.md` own the
+required interaction fields and use this reference to realize the contact.
+Bind the target part and every contacting hand part, then define observable
+criteria for overlap, negative space, grip direction, penetration, and floating
+gaps. Review the local contact and full pose together so a plausible grip does
+not detach the hand, distort its silhouette, or misplace the held object.
+
 ## Repeated-Part Contact Contract
 
 Every `repetitionSystems[]` item must declare `attachmentRelation.type` as `contact`, `overlap`, `gap`, or `free`. Use `free` explicitly for intentionally unattached particles or floating elements. All other relations require `hostComponentRef` and non-negative `gapTolerance`; `overlap` also requires positive `overlap`, while `gap` requires non-negative `gap`. This describes the repeated system once rather than duplicating attachment metadata on every instance.
