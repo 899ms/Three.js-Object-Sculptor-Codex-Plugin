@@ -34,6 +34,11 @@ def _fill_pre_spec(spec: dict[str, Any]) -> None:
     spec["preSpecAssessment"]["objectClass"].update(
         {
             "primaryType": "generic special-surface study",
+            "representationKind": [
+                "surface shell",
+                "curve or strand network",
+                "volume field",
+            ],
             "formLanguage": ["soft surface", "fibrous detail", "soft volume"],
             "structureKind": ["independent procedural parts"],
             "motionPotential": ["static procedural approximation"],

@@ -320,10 +320,28 @@ def validate_pre_spec_assessment(spec: dict[str, Any], errors: list[str], warnin
             errors.append("preSpecAssessment.objectClass.primaryType must be a string")
         if primary_type in {None, "", "unassessed"}:
             warnings.append("quality: preSpecAssessment.objectClass.primaryType is unassessed")
-        for field in ("formLanguage", "structureKind", "motionPotential", "materialFamilies"):
-            validate_string_array(object_class.get(field), f"preSpecAssessment.objectClass.{field}", errors)
-            if isinstance(object_class.get(field), list) and not object_class[field]:
+        for field in (
+            "representationKind",
+            "formLanguage",
+            "structureKind",
+            "motionPotential",
+            "materialFamilies",
+        ):
+            value = object_class.get(field)
+            validate_string_array(value, f"preSpecAssessment.objectClass.{field}", errors)
+            if (
+                isinstance(value, list)
+                and all(isinstance(item, str) for item in value)
+                and any(not item.strip() for item in value)
+            ):
+                errors.append(
+                    f"preSpecAssessment.objectClass.{field} must contain non-empty descriptors"
+                )
+            if isinstance(value, list) and not value:
                 warnings.append(f"quality: preSpecAssessment.objectClass.{field} is empty")
+        notes = object_class.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            errors.append("preSpecAssessment.objectClass.notes must be a string")
     complexity = assessment.get("complexity")
     if not isinstance(complexity, dict):
         errors.append("preSpecAssessment.complexity must be an object")

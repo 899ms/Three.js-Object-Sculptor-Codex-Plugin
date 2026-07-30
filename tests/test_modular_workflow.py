@@ -127,6 +127,7 @@ def fill_global_contract(manifest: dict) -> None:
     object_class.update(
         {
             "primaryType": "stylized test prop",
+            "representationKind": ["solid mesh"],
             "formLanguage": ["rounded hard-surface"],
             "structureKind": ["modular assembly"],
             "motionPotential": ["static"],

@@ -37,11 +37,12 @@ def make_pre_spec_assessment(
     return {
         "objectClass": {
             "primaryType": "unassessed",
+            "representationKind": [],
             "formLanguage": [],
             "structureKind": [],
             "motionPotential": [],
             "materialFamilies": [],
-            "notes": "Fill these fields from the reference before blockout generation.",
+            "notes": "",
         },
         "complexity": {
             "tier": complexity,

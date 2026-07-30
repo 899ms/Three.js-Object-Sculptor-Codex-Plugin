@@ -2197,7 +2197,13 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
             payload["preSpecAssessment"] = {
                 "objectClass": {
                     key: object_class.get(key)
-                    for key in ("primaryType", "formLanguage", "structureKind")
+                    for key in (
+                        "primaryType",
+                        "representationKind",
+                        "formLanguage",
+                        "structureKind",
+                    )
+                    if key in object_class
                 },
                 "complexity": {"tier": complexity.get("tier")},
             }
@@ -2205,7 +2211,13 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
             payload["preSpecAssessment"] = {
                 "objectClass": {
                     key: object_class.get(key)
-                    for key in ("primaryType", "formLanguage", "structureKind")
+                    for key in (
+                        "primaryType",
+                        "representationKind",
+                        "formLanguage",
+                        "structureKind",
+                    )
+                    if key in object_class
                 },
                 "complexity": copy.deepcopy(complexity),
                 "specDepthDecision": copy.deepcopy(
@@ -3007,7 +3019,12 @@ def phase_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, An
             projection["preSpecAssessment"] = {
                 "objectClass": {
                     key: copy.deepcopy(object_class.get(key))
-                    for key in ("primaryType", "formLanguage", "structureKind")
+                    for key in (
+                        "primaryType",
+                        "representationKind",
+                        "formLanguage",
+                        "structureKind",
+                    )
                     if key in object_class
                 },
                 "complexityTier": (

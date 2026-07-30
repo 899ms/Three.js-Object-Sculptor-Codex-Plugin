@@ -32,6 +32,7 @@ def _fill_pre_spec(spec: dict[str, Any]) -> None:
     spec["preSpecAssessment"]["objectClass"].update(
         {
             "primaryType": "compound musician mascot",
+            "representationKind": ["solid mesh"],
             "formLanguage": ["character-like", "hard-surface accessory"],
             "structureKind": ["nested assemblies", "mixed procedural parts"],
             "motionPotential": ["stable static hierarchy"],

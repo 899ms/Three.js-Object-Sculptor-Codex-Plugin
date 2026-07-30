@@ -10,16 +10,17 @@ Name every intentional simplification in `modificationPolicy.declaredChanges`; k
 
 ## Soft Object Classification
 
-Describe the object using multiple axes:
+Fill every `preSpecAssessment.objectClass` axis. The values below are broad, composable anchors rather than closed enums; use only observed or bounded-inferred descriptors, and use a precise custom value when none fits.
 
-- form language: organic, hard-surface, mechanical, architectural, botanical-like, character-like, amorphous, sculptural, fabric-like, transparent-like
-- structure kind: single body, compound object, branching hierarchy, repeated modules, layered shell, articulated assembly, deformable surface
-- motion potential: static prop, whole-object transform, articulated, bendable, detachable, destructible, effect-emitter
-- material families: wood, bark, leaf, metal, stone, ceramic, plastic, rubber, cloth, glass-like, liquid-like, skin-like, mixed
+- `primaryType`: a concise noun phrase for what the object is, separate from style, structure, or material
+- `representationKind`: solid mesh, surface shell or height field, curve or strand network, point cloud or particle field, sprite or billboard, voxel grid, implicit surface, or volume field; list every applicable kind for a hybrid
+- `formLanguage`: organic, geometric, hard-surface, manufactured, mechanical, architectural, botanical, anatomical or creature-like, character-like, sculptural, amorphous, crystalline or faceted, draped or folded, terrain or landform, ornamental, typographic, or symbolic
+- `structureKind`: single body, compound or nested assembly, modular assembly, repeated array, branching network, lattice or graph, segmented chain, layered shell, enclosure with internals, articulated hierarchy, deformable continuum, or distributed system
+- `motionPotential`: static, whole-object transform, rigid-body, constrained or articulated, skeletal, bend or twist, cloth or soft-body, morphing, detachable or reconfigurable, destructible, particle or fluid flow, volumetric evolution, effect-emitter, or procedural growth or assembly
+- `materialFamilies`: metal, mineral/stone/concrete, ceramic/glass, polymer/plastic/rubber, wood/paper, textile/leather, biological tissue, plant matter, hair/fur/fiber, soil/sand, liquid/gel, ice/wax, coating/paint, emissive/energy, volumetric medium, or composite/mixed
+- `notes`: optional cross-axis ambiguity or evidence limitation; move actionable uncertainty into structured `assumptions[]` or `risks[]`
 
-These are descriptors, not domain templates. Use only what the image supports.
-
-For every important material, fill `surfaceDescriptor` with separate physical `rigidity`, optical `finish`, and tactile `microRelief` claims. Each needs `basis: observed|inferred` and confidence; the descriptor needs source `evidenceRefs`, and its numeric `roughness` plus `normal|bump|displacement` channel must agree.
+`motionPotential` is a pre-spec hypothesis, not authorization to require Interaction or invent hidden mechanisms. Representation kinds classify visible construction without promising unsupported simulation. Material families identify only a broad substance or rendering-medium class; record rigidity, finish, microrelief, and PBR behavior under `material-lighting-realism.md`.
 
 ## Sensitive Face And Hand Regions
 

@@ -96,6 +96,7 @@ def character_spec() -> dict[str, Any]:
     spec["preSpecAssessment"]["objectClass"].update(
         {
             "primaryType": "stylized animal mascot",
+            "representationKind": ["solid mesh", "curve or strand network"],
             "formLanguage": ["character-like", "rounded organic"],
             "structureKind": ["nested assemblies"],
             "motionPotential": ["static pose"],

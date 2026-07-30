@@ -433,7 +433,10 @@ def pre_spec_gaps(spec: dict[str, Any]) -> list[str]:
     else:
         if not has_non_empty(object_class.get("primaryType")):
             gaps.append("identify the primary object type from the reference")
-        for field in ("formLanguage", "structureKind"):
+        required_fields = ["formLanguage", "structureKind"]
+        if "representationKind" in object_class:
+            required_fields.insert(0, "representationKind")
+        for field in required_fields:
             if not has_non_empty(object_class.get(field)):
                 gaps.append(f"fill preSpecAssessment.objectClass.{field} from visual inspection")
     silhouette = spec.get("silhouette")

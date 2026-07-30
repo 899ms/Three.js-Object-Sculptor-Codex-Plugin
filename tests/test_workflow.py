@@ -74,6 +74,7 @@ def fill_pre_spec(spec: dict) -> None:
     object_class.update(
         {
             "primaryType": "test prop",
+            "representationKind": ["solid mesh"],
             "formLanguage": ["hard-surface"],
             "structureKind": ["single body"],
             "motionPotential": ["static prop"],
@@ -334,6 +335,10 @@ class PassPlanTests(unittest.TestCase):
         spec = make_spec("Test", None, complexity="simple", intended_use="browser-prop")
         self.assertEqual(spec["schemaVersion"], "3.2")
         self.assertIn("preSpecAssessment", spec)
+        self.assertEqual(
+            spec["preSpecAssessment"]["objectClass"]["representationKind"],
+            [],
+        )
         self.assertNotIn("visualEvidence", spec)
         self.assertNotIn("intendedUse", spec)
         self.assertNotIn("fpsTarget", spec["qualityTargets"])
@@ -345,6 +350,76 @@ class PassPlanTests(unittest.TestCase):
         self.assertEqual(progress["totalGates"], 4)
         self.assertEqual(progress["currentStep"], "blockout")
         self.assertTrue(progress["eta"]["recalculateAfterEveryStep"])
+
+    def test_representation_kind_is_open_and_legacy_optional(self) -> None:
+        spec = make_spec("Hybrid Study", None, complexity="moderate")
+        self.assertIn(
+            "objectClass.representationKind",
+            "\n".join(pass_specific_gaps(spec, "blockout")),
+        )
+
+        object_class = spec["preSpecAssessment"]["objectClass"]
+        object_class["representationKind"] = ["solid mesh", "custom surfel field"]
+        errors, warnings = validate_spec(spec)
+        self.assertFalse(
+            [item for item in [*errors, *warnings] if "representationKind" in item],
+            [*errors, *warnings],
+        )
+        self.assertNotIn(
+            "objectClass.representationKind",
+            "\n".join(pass_specific_gaps(spec, "blockout")),
+        )
+
+        invalid = copy.deepcopy(spec)
+        invalid["preSpecAssessment"]["objectClass"]["representationKind"] = "solid mesh"
+        errors, _ = validate_spec(invalid)
+        self.assertTrue(
+            any(
+                "objectClass.representationKind must be an array of strings" in item
+                for item in errors
+            ),
+            errors,
+        )
+
+        for field in (
+            "representationKind",
+            "formLanguage",
+            "structureKind",
+            "motionPotential",
+            "materialFamilies",
+        ):
+            with self.subTest(field=field):
+                invalid = copy.deepcopy(spec)
+                invalid["preSpecAssessment"]["objectClass"][field] = [" "]
+                errors, _ = validate_spec(invalid)
+                self.assertTrue(
+                    any(
+                        f"objectClass.{field} must contain non-empty descriptors"
+                        in item
+                        for item in errors
+                    ),
+                    errors,
+                )
+
+        invalid_notes = copy.deepcopy(spec)
+        invalid_notes["preSpecAssessment"]["objectClass"]["notes"] = []
+        errors, _ = validate_spec(invalid_notes)
+        self.assertTrue(
+            any("objectClass.notes must be a string" in item for item in errors),
+            errors,
+        )
+
+        legacy = copy.deepcopy(spec)
+        legacy["preSpecAssessment"]["objectClass"].pop("representationKind")
+        errors, warnings = validate_spec(legacy)
+        self.assertFalse(
+            [item for item in [*errors, *warnings] if "representationKind" in item],
+            [*errors, *warnings],
+        )
+        self.assertNotIn(
+            "objectClass.representationKind",
+            "\n".join(pass_specific_gaps(legacy, "blockout")),
+        )
 
     def test_interaction_is_added_from_motion_contract_not_intended_use(self) -> None:
         spec = make_spec("Fan", None, complexity="simple", quality_profile="balanced")
@@ -561,6 +636,10 @@ class PassPlanTests(unittest.TestCase):
             "motionPotential",
             projection["preSpecAssessment"]["objectClass"],
         )
+        self.assertEqual(
+            projection["preSpecAssessment"]["objectClass"]["representationKind"],
+            [],
+        )
         self.assertEqual(spec["viewHypothesisPolicy"]["decision"], "pending")
         self.assertFalse(spec["viewHypothesisPolicy"]["enabled"])
         self.assertEqual(
@@ -668,6 +747,19 @@ class PassPlanTests(unittest.TestCase):
         relevant = copy.deepcopy(spec)
         relevant["qualityTargets"]["mustMatch"][0] = "silhouette with exact negative space"
         self.assertNotEqual(review_spec_hash(relevant, "blockout"), review_hash)
+
+        represented_differently = copy.deepcopy(spec)
+        represented_differently["preSpecAssessment"]["objectClass"][
+            "representationKind"
+        ] = ["curve or strand network"]
+        self.assertEqual(
+            generation_validation_hash(represented_differently, "blockout"),
+            generation_hash,
+        )
+        self.assertNotEqual(
+            review_spec_hash(represented_differently, "blockout"),
+            review_hash,
+        )
 
         future["componentTree"][0]["transform"]["scale"] = [1.2, 1.0, 1.0]
         self.assertNotEqual(
