@@ -134,6 +134,28 @@ def fill_global_contract(manifest: dict) -> None:
             "materialFamilies": ["painted polymer"],
         }
     )
+    spec["preSpecAssessment"]["complexity"].update(
+        {
+            "status": "assessed",
+            "tier": spec["preSpecAssessment"]["complexity"].get("initialTierHint") or "simple",
+            "scores": {
+                "silhouetteComplexity": 0,
+                "formTopologyComplexity": 0,
+                "componentCount": 0,
+                "hierarchyDepth": 0,
+                "repetitionDensity": 0,
+                "materialLayerCount": 0,
+                "localDetailDensity": 0,
+                "representationComplexity": 0,
+            },
+            "modifiers": {
+                "occlusionRisk": 0,
+                "actionReadinessNeed": 0,
+            },
+            "evidenceRefs": ["test://ref.png"],
+            "reasoning": ["Pre-spec test assessment completed."],
+        }
+    )
     spec["interactionContract"].update(
         {
             "status": "not-required",

@@ -45,7 +45,9 @@ def make_pre_spec_assessment(
             "notes": "",
         },
         "complexity": {
-            "tier": complexity,
+            "status": "unassessed",
+            "initialTierHint": complexity,
+            "tier": "unassessed",
             "scoreScale": {
                 "type": "integer-ordinal",
                 "minimum": 0,
@@ -54,14 +56,27 @@ def make_pre_spec_assessment(
                 "conversionRule": "Never convert normalized 0-to-1 review quality scores into this scale.",
             },
             "scores": {
-                "silhouetteComplexity": 0,
-                "componentCount": 0,
-                "hierarchyDepth": 0,
-                "repetitionDensity": 0,
-                "materialLayerCount": 0,
-                "localDetailDensity": 0,
-                "occlusionRisk": 0,
-                "actionReadinessNeed": 0,
+                "silhouetteComplexity": None,
+                "formTopologyComplexity": None,
+                "componentCount": None,
+                "hierarchyDepth": None,
+                "repetitionDensity": None,
+                "materialLayerCount": None,
+                "localDetailDensity": None,
+                "representationComplexity": None,
+            },
+            "modifiers": {
+                "occlusionRisk": None,
+                "actionReadinessNeed": None,
+            },
+            "evidenceRefs": [],
+            "reasoning": [
+                f"{complexity!r} is only the initial estimate for {target_name!r}; revise it after visual inspection."
+            ],
+            "derivation": {
+                "baseTier": "unassessed",
+                "requiredDepth": complexity,
+                "activeOverrides": [],
             },
             "estimatedCounts": {
                 "macroComponents": minimums["macroLayers"],
@@ -70,9 +85,6 @@ def make_pre_spec_assessment(
                 "materialLayers": minimums["materials"],
                 "repetitionSystems": 0,
             },
-            "reasoning": [
-                f"{complexity!r} is only the initial estimate for {target_name!r}; revise it after visual inspection."
-            ],
         },
         "specDepthDecision": {
             "requiredDepth": complexity,
@@ -194,7 +206,7 @@ def make_phase_execution_contract() -> dict[str, Any]:
         "phaseOwnedFields": {
             "blockout": [
                 "preSpecAssessment.objectClass",
-                "preSpecAssessment.complexity.tier",
+                "preSpecAssessment.complexity",
                 "componentTree[macro]",
                 "qualityTargets",
                 "viewingContract",

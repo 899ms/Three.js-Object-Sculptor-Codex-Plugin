@@ -15,6 +15,7 @@ from sculpt_contract import (
     check_pass as contract_check_pass,
     component_type,
     detail_feature_count,
+    is_stateful_complexity_contract,
     load_spec_file,
     pass_order,  # compatibility re-export for existing script consumers
     phase_work_packet,
@@ -396,8 +397,12 @@ def view_hypothesis_skip_gaps(spec: dict[str, Any]) -> list[str]:
     assessment = spec.get("preSpecAssessment")
     complexity = assessment.get("complexity") if isinstance(assessment, dict) else None
     tier = complexity.get("tier") if isinstance(complexity, dict) else None
+    modifiers = complexity.get("modifiers") if isinstance(complexity, dict) else None
+    occlusion_risk = modifiers.get("occlusionRisk") if isinstance(modifiers, dict) else 0
     skip = policy.get("skipAssessment") if isinstance(policy, dict) else None
     gaps: list[str] = []
+    if occlusion_risk and isinstance(occlusion_risk, int) and occlusion_risk > 0:
+        gaps.append(f"2x2 turnaround may not be skipped when occlusionRisk ({occlusion_risk}) > 0")
     if tier != "simple":
         gaps.append("2x2 turnaround may be skipped only when complexity.tier is simple")
     if not isinstance(skip, dict):
@@ -439,6 +444,14 @@ def pre_spec_gaps(spec: dict[str, Any]) -> list[str]:
         for field in required_fields:
             if not has_non_empty(object_class.get(field)):
                 gaps.append(f"fill preSpecAssessment.objectClass.{field} from visual inspection")
+    complexity = assessment.get("complexity")
+    if not isinstance(complexity, dict):
+        gaps.append("preSpecAssessment.complexity is required before blockout")
+    elif is_stateful_complexity_contract(complexity):
+        if complexity.get("status") != "assessed":
+            gaps.append("preSpecAssessment.complexity must be assessed before blockout build")
+    elif complexity.get("tier") not in {"simple", "moderate", "complex", "ultra"}:
+        gaps.append("legacy preSpecAssessment.complexity requires a valid assessed tier")
     silhouette = spec.get("silhouette")
     if not isinstance(silhouette, dict) or not has_non_empty(
         [silhouette.get("boundingShape"), silhouette.get("aspectRatios"), silhouette.get("dominantCurves")]

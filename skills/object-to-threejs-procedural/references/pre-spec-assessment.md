@@ -36,23 +36,41 @@ The Form contract completes geometry-bound assembly and landmark mappings plus t
 
 ## Complexity Scoring
 
-Score `preSpecAssessment.complexity.scores.*` as ordinal integers `0–3`, from lowest to highest complexity; do not convert normalized `0–1` review scores into this scale. `globalSpec.scores.*` uses the same ordinal scale, with higher better except for `occlusion_risk`. Judge these axes independently:
+`preSpecAssessment.complexity` is a stateful contract. A newly initialized spec starts as `status: unassessed` with `tier: unassessed` and all score values `null`. `--complexity` provides an `initialTierHint` for temporary scaffolding; Blockout generation is blocked until assessment is complete (`status: assessed`). Complexity scores measure construction difficulty. Top-level `globalSpec.scores.*` measure suitability evidence strength instead; higher is generally stronger evidence except for `occlusion_risk`, and none of these values is a fidelity review score.
 
-- silhouette complexity: simple outline to heavily interrupted/organic silhouette
-- component count: one piece to many visible subparts
-- hierarchy depth: flat object to deep parent-child structure
-- repetition density: none to thousands of repeated marks/leaves/scales/rivets
-- material layer count: one material to many layered local material responses
-- local detail density: plain surface to dense scratches, bumps, moss, seams, chips, pores, or grain
-- occlusion risk: fully visible to many hidden/inferred parts
-- action readiness need: static to many pivots/sockets/colliders/destruction seams
+When `status: assessed`, all 8 core axes and 2 modifier axes must be scored as ordinal integers `0–3`:
 
-Map total judgment to:
+### Core Complexity Axes (0 → 3)
 
-- `simple`: few parts, low detail, one or two materials
-- `moderate`: several parts, visible local detail, shallow hierarchy
-- `complex`: many parts, repeated systems, multiple materials, several hierarchy levels
-- `ultra`: dense organic/mechanical/architectural structure where fidelity depends on deep hierarchy and repeated microstructure
+| Axis | 0 | 1 | 2 | 3 |
+| --- | --- | --- | --- | --- |
+| `silhouetteComplexity` | primitive or convex outline | a few controlled cuts or negative spaces | several concavities and secondary contours | dense, branched, organic, or heavily interrupted contour |
+| `formTopologyComplexity` | flat or primitive surface | simple continuous curvature or bevels | several curvature transitions or junctions | continuous sculpting or topology is identity-critical |
+| `componentCount` | 1 construction unit | 2–5 units | 6–17 units | 18+ units |
+| `hierarchyDepth` | 1 structural level | 2 levels | 3 levels | 4+ levels |
+| `repetitionDensity` | none | one small regular pattern | multiple patterns or meaningful variation | multi-tier procedural distribution defines the form |
+| `materialLayerCount` | one uniform material | 2–3 materials | 4–6 materials or masked zones | nested layered PBR response defines identity |
+| `localDetailDensity` | smooth or intentionally plain | sparse discrete features | several meso/micro feature groups | dense multi-tier detail covers most surfaces |
+| `representationComplexity` | standard solid mesh | compound meshes or simple curves | one specialized instancing, shell, fiber, implicit, or volume subsystem | multiple interacting specialized systems |
+
+### Modifier Axes (0 → 3)
+Modifiers retain the `0–3` ordinal scale but do not add to the base complexity tier:
+
+| Modifier | 0 | 1 | 2 | 3 |
+| --- | --- | --- | --- | --- |
+| `occlusionRisk` | all identity-critical structure is visible | minor hidden geometry is safely inferable | several important parts or contacts are ambiguous | core or internal structure is substantially hidden |
+| `actionReadinessNeed` | static object | whole-object transforms or one simple affordance | several joints, sockets, colliders, or simulation constraints | deep articulation, destruction, or interacting simulation systems |
+
+If `occlusionRisk > 0`, the 2x2 turnaround cannot be skipped; if it is `3`, suitability cannot be `pass`. `actionReadinessNeed=2` sets minimum required depth to `moderate`; `3` sets it to `complex` and requires `needsActionReadyHierarchy=true`.
+
+### Tier Derivation Rules
+Base tier is calculated deterministically from core axis scores based on count of high-complexity axes (`high`: score ≥ 2) and extreme-complexity axes (`extreme`: score = 3):
+- `ultra`: `extreme ≥ 3` OR (`extreme ≥ 2` AND `high ≥ 5`) OR `high ≥ 7`
+- `complex`: `extreme ≥ 1` OR `high ≥ 3`
+- `moderate`: `high ≥ 1` OR `core score sum ≥ 4`
+- `simple`: all remaining cases
+
+`tier` always equals `baseTier`. `specDepthDecision.requiredDepth` may be higher if promoted by `actionReadinessNeed`.
 
 ## Bounded Uncertainty
 

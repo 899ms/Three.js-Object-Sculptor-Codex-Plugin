@@ -18,6 +18,12 @@ from sculpt_contract import (
     CURRENT_SCHEMA_VERSION,
     MAX_BLIND_SCOUT_OBSERVATIONS,
     SIMPLIFIED_AI_OVERALL_FLOOR,
+    CORE_COMPLEXITY_AXES,
+    MODIFIER_COMPLEXITY_AXES,
+    TIER_RANKS,
+    derive_complexity_tier,
+    complexity_minimums,
+    is_stateful_complexity_contract,
     adaptive_hypothesis_views,
     blind_scout_phase_rubrics,
     component_type,
@@ -346,22 +352,166 @@ def validate_pre_spec_assessment(spec: dict[str, Any], errors: list[str], warnin
     if not isinstance(complexity, dict):
         errors.append("preSpecAssessment.complexity must be an object")
     else:
-        tier = complexity.get("tier")
-        if tier not in VALID_COMPLEXITY_TIERS:
-            errors.append(f"preSpecAssessment.complexity.tier must be one of: {', '.join(sorted(VALID_COMPLEXITY_TIERS))}")
-        if tier == "unassessed":
-            warnings.append("quality: preSpecAssessment.complexity.tier is unassessed")
+        status = complexity.get("status")
         scores = complexity.get("scores")
-        if not isinstance(scores, dict):
-            errors.append("preSpecAssessment.complexity.scores must be an object")
+        modifiers = complexity.get("modifiers")
+        tier = complexity.get("tier")
+
+        is_stateful = is_stateful_complexity_contract(complexity)
+
+        if is_stateful:
+            if status not in {"unassessed", "assessed"}:
+                errors.append("preSpecAssessment.complexity.status must be 'unassessed' or 'assessed'")
+            if complexity.get("initialTierHint") not in TIER_RANKS:
+                errors.append(
+                    "preSpecAssessment.complexity.initialTierHint must be simple, moderate, complex, or ultra"
+                )
+
+            if not isinstance(scores, dict):
+                errors.append("preSpecAssessment.complexity.scores must be an object")
+            else:
+                score_keys = set(scores.keys())
+                expected_core = set(CORE_COMPLEXITY_AXES)
+                if score_keys != expected_core:
+                    missing = expected_core - score_keys
+                    extra = score_keys - expected_core
+                    if missing:
+                        errors.append(f"preSpecAssessment.complexity.scores missing core axes: {', '.join(sorted(missing))}")
+                    if extra:
+                        errors.append(f"preSpecAssessment.complexity.scores has unexpected axes: {', '.join(sorted(extra))}")
+                for key, value in scores.items():
+                    if value is not None and (
+                        not isinstance(value, int)
+                        or isinstance(value, bool)
+                        or value < 0
+                        or value > 3
+                    ):
+                        errors.append(
+                            f"preSpecAssessment.complexity.scores.{key} must be null or an integer from 0 to 3"
+                        )
+
+            if not isinstance(modifiers, dict):
+                errors.append("preSpecAssessment.complexity.modifiers must be an object")
+            else:
+                mod_keys = set(modifiers.keys())
+                expected_mod = set(MODIFIER_COMPLEXITY_AXES)
+                if mod_keys != expected_mod:
+                    missing = expected_mod - mod_keys
+                    extra = mod_keys - expected_mod
+                    if missing:
+                        errors.append(f"preSpecAssessment.complexity.modifiers missing modifier axes: {', '.join(sorted(missing))}")
+                    if extra:
+                        errors.append(f"preSpecAssessment.complexity.modifiers has unexpected axes: {', '.join(sorted(extra))}")
+                for key, value in modifiers.items():
+                    if value is not None and (
+                        not isinstance(value, int)
+                        or isinstance(value, bool)
+                        or value < 0
+                        or value > 3
+                    ):
+                        errors.append(
+                            f"preSpecAssessment.complexity.modifiers.{key} must be null or an integer from 0 to 3"
+                        )
+
+            evidence_refs = complexity.get("evidenceRefs")
+            if not isinstance(evidence_refs, list) or any(
+                not isinstance(ref, str) or not ref.strip()
+                for ref in evidence_refs
+            ):
+                errors.append(
+                    "preSpecAssessment.complexity.evidenceRefs must be an array of non-empty strings"
+                )
+            reasoning = complexity.get("reasoning")
+            if not isinstance(reasoning, list) or any(
+                not isinstance(reason, str) or not reason.strip()
+                for reason in reasoning
+            ):
+                errors.append(
+                    "preSpecAssessment.complexity.reasoning must be an array of non-empty strings"
+                )
+
+            if status == "unassessed":
+                if tier != "unassessed":
+                    errors.append("preSpecAssessment.complexity.tier must be 'unassessed' when status is 'unassessed'")
+                warnings.append("quality: preSpecAssessment.complexity is unassessed")
+            elif status == "assessed":
+                if tier not in {"simple", "moderate", "complex", "ultra"}:
+                    errors.append("preSpecAssessment.complexity.tier must be a valid tier (simple, moderate, complex, ultra) when assessed")
+
+                if isinstance(scores, dict):
+                    for k, v in scores.items():
+                        if v is None:
+                            errors.append(f"preSpecAssessment.complexity.scores.{k} cannot be null when status is 'assessed'")
+
+                if isinstance(modifiers, dict):
+                    for k, v in modifiers.items():
+                        if v is None:
+                            errors.append(f"preSpecAssessment.complexity.modifiers.{k} cannot be null when status is 'assessed'")
+
+                if not isinstance(evidence_refs, list) or not any(isinstance(r, str) and r.strip() for r in evidence_refs):
+                    errors.append("preSpecAssessment.complexity.evidenceRefs must be a non-empty list of string references when assessed")
+
+                if not isinstance(reasoning, list) or not any(isinstance(r, str) and r.strip() and "initial estimate" not in r for r in reasoning):
+                    errors.append("preSpecAssessment.complexity.reasoning must contain explicit specific observations when assessed")
+
+                derivation = derive_complexity_tier(complexity)
+                derived_tier = derivation.get("baseTier")
+                if tier != derived_tier:
+                    errors.append(f"preSpecAssessment.complexity.tier {tier!r} does not match derived tier {derived_tier!r}")
+
+                derived_req_depth = derivation.get("requiredDepth")
+                decision = assessment.get("specDepthDecision")
+                if isinstance(decision, dict):
+                    req = decision.get("requiredDepth")
+                    if req in TIER_RANKS and derived_req_depth in TIER_RANKS:
+                        if TIER_RANKS[req] < TIER_RANKS[derived_req_depth]:
+                            errors.append(f"preSpecAssessment.specDepthDecision.requiredDepth {req!r} is lower than derived minimum required depth {derived_req_depth!r}")
+
+                quality_contract = spec.get("qualityContract")
+                if isinstance(quality_contract, dict) and derived_req_depth in TIER_RANKS:
+                    quality_bar = quality_contract.get("qualityBar")
+                    if quality_bar in TIER_RANKS and (
+                        TIER_RANKS[quality_bar] < TIER_RANKS[derived_req_depth]
+                    ):
+                        errors.append(
+                            f"qualityContract.qualityBar {quality_bar!r} is lower than derived required depth {derived_req_depth!r}"
+                        )
+                    min_depth = quality_contract.get("minimumSpecDepth")
+                    if isinstance(min_depth, dict):
+                        mins = complexity_minimums(derived_req_depth)
+                        for field, key in (
+                            ("macroComponents", "macroLayers"),
+                            ("mesoComponents", "mesoLayers"),
+                            ("microFeatureGroups", "microLayers"),
+                            ("materialLayers", "materials"),
+                        ):
+                            val = min_depth.get(field)
+                            if isinstance(val, int) and val < mins[key]:
+                                errors.append(f"qualityContract.minimumSpecDepth.{field} ({val}) is lower than derived minimum floor ({mins[key]}) for depth {derived_req_depth!r}")
+
+                if isinstance(modifiers, dict) and modifiers.get("occlusionRisk") == 3:
+                    if spec.get("suitability") == "pass":
+                        errors.append("suitability cannot be 'pass' when occlusionRisk is 3")
+
         else:
-            for key, value in scores.items():
-                if not isinstance(value, int) or value < 0 or value > 3:
-                    errors.append(
-                        f"preSpecAssessment.complexity.scores.{key} must be an ordinal "
-                        "integer from 0 to 3 measuring complexity magnitude; decimal "
-                        "0-to-1 review quality scores must not be converted into this field"
-                    )
+            warnings.append(
+                "quality: preSpecAssessment.complexity uses the legacy flat shape; "
+                "update to the current stateful contract when practical"
+            )
+            if tier not in VALID_COMPLEXITY_TIERS:
+                errors.append(f"preSpecAssessment.complexity.tier must be one of: {', '.join(sorted(VALID_COMPLEXITY_TIERS))}")
+            if tier == "unassessed":
+                warnings.append("quality: preSpecAssessment.complexity.tier is unassessed")
+            scores = complexity.get("scores")
+            if not isinstance(scores, dict):
+                errors.append("preSpecAssessment.complexity.scores must be an object")
+            else:
+                for key, value in scores.items():
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > 3:
+                        errors.append(
+                            f"preSpecAssessment.complexity.scores.{key} must be an ordinal integer from 0 to 3"
+                        )
+
         estimated = complexity.get("estimatedCounts")
         if not isinstance(estimated, dict):
             errors.append("preSpecAssessment.complexity.estimatedCounts must be an object")
@@ -369,7 +519,6 @@ def validate_pre_spec_assessment(spec: dict[str, Any], errors: list[str], warnin
             for field in ("macroComponents", "mesoComponents", "microFeatureGroups", "materialLayers", "repetitionSystems"):
                 if field in estimated:
                     validate_nonnegative_int(estimated[field], f"preSpecAssessment.complexity.estimatedCounts.{field}", errors)
-        validate_string_array(complexity.get("reasoning"), "preSpecAssessment.complexity.reasoning", errors)
     decision = assessment.get("specDepthDecision")
     if not isinstance(decision, dict):
         errors.append("preSpecAssessment.specDepthDecision must be an object")
@@ -850,7 +999,14 @@ def validate_view_hypothesis_policy(
     else:
         assessment = spec.get("preSpecAssessment")
         complexity = assessment.get("complexity") if isinstance(assessment, dict) else None
-        tier = complexity.get("tier") if isinstance(complexity, dict) else "moderate"
+        derivation = (
+            derive_complexity_tier(complexity)
+            if isinstance(complexity, dict)
+            else {}
+        )
+        tier = derivation.get("requiredDepth")
+        if tier not in TIER_RANKS:
+            tier = complexity.get("tier") if isinstance(complexity, dict) else "moderate"
         if first_view == "exploded" and str(tier) not in {"complex", "ultra"}:
             errors.append(
                 "exploded planning sheets require a complex or ultra assembly"

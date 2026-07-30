@@ -1318,6 +1318,157 @@ def is_number(value: Any) -> bool:
     )
 
 
+CORE_COMPLEXITY_AXES = (
+    "silhouetteComplexity",
+    "formTopologyComplexity",
+    "componentCount",
+    "hierarchyDepth",
+    "repetitionDensity",
+    "materialLayerCount",
+    "localDetailDensity",
+    "representationComplexity",
+)
+
+MODIFIER_COMPLEXITY_AXES = (
+    "occlusionRisk",
+    "actionReadinessNeed",
+)
+
+TIER_RANKS = {"simple": 1, "moderate": 2, "complex": 3, "ultra": 4}
+RANK_TO_TIER = {1: "simple", 2: "moderate", 3: "complex", 4: "ultra"}
+
+
+def is_stateful_complexity_contract(complexity: Mapping[str, Any]) -> bool:
+    """Return whether a complexity payload uses the current stateful shape."""
+    if not isinstance(complexity, Mapping):
+        return False
+    scores = complexity.get("scores")
+    return (
+        "status" in complexity
+        or "modifiers" in complexity
+        or (
+            isinstance(scores, Mapping)
+            and "formTopologyComplexity" in scores
+        )
+    )
+
+
+def derive_complexity_tier(complexity: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive tier, requiredDepth, and overrides from current or legacy complexity."""
+    if not isinstance(complexity, Mapping):
+        return {
+            "status": "unassessed",
+            "baseTier": "unassessed",
+            "tier": "unassessed",
+            "requiredDepth": "moderate",
+            "activeOverrides": [],
+            "highCount": 0,
+            "extremeCount": 0,
+            "scoreSum": 0,
+        }
+
+    status = complexity.get("status")
+    scores = complexity.get("scores") if isinstance(complexity.get("scores"), Mapping) else {}
+    modifiers = complexity.get("modifiers") if isinstance(complexity.get("modifiers"), Mapping) else {}
+
+    is_stateful = is_stateful_complexity_contract(complexity)
+
+    if not is_stateful:
+        tier = str(complexity.get("tier") or "moderate")
+        tier = tier if tier in TIER_RANKS else "moderate"
+        return {
+            "status": "assessed",
+            "baseTier": tier,
+            "tier": tier,
+            "requiredDepth": tier,
+            "activeOverrides": ["legacy flat complexity tier"],
+            "highCount": 0,
+            "extremeCount": 0,
+            "scoreSum": 0,
+        }
+
+    if status == "unassessed":
+        hint = str(complexity.get("initialTierHint") or complexity.get("tier") or "moderate")
+        req_depth = hint if hint in TIER_RANKS else "moderate"
+        return {
+            "status": "unassessed",
+            "baseTier": "unassessed",
+            "tier": "unassessed",
+            "requiredDepth": req_depth,
+            "activeOverrides": [],
+            "highCount": 0,
+            "extremeCount": 0,
+            "scoreSum": 0,
+        }
+
+    core_values: list[int] = []
+    for axis in CORE_COMPLEXITY_AXES:
+        val = scores.get(axis)
+        if not isinstance(val, int) or isinstance(val, bool) or val < 0 or val > 3:
+            hint = str(complexity.get("initialTierHint") or complexity.get("tier") or "moderate")
+            req_depth = hint if hint in TIER_RANKS else "moderate"
+            return {
+                "status": "unassessed",
+                "baseTier": "unassessed",
+                "tier": "unassessed",
+                "requiredDepth": req_depth,
+                "activeOverrides": [],
+                "highCount": 0,
+                "extremeCount": 0,
+                "scoreSum": 0,
+            }
+        core_values.append(val)
+
+    high = sum(1 for v in core_values if v >= 2)
+    extreme = sum(1 for v in core_values if v == 3)
+    score_sum = sum(core_values)
+
+    if extreme >= 3 or (extreme >= 2 and high >= 5) or high >= 7:
+        base_tier = "ultra"
+    elif extreme >= 1 or high >= 3:
+        base_tier = "complex"
+    elif high >= 1 or score_sum >= 4:
+        base_tier = "moderate"
+    else:
+        base_tier = "simple"
+
+    active_overrides: list[str] = []
+    occ_risk = modifiers.get("occlusionRisk")
+    action_need = modifiers.get("actionReadinessNeed")
+
+    action_min_depth = "simple"
+    if isinstance(action_need, int) and not isinstance(action_need, bool):
+        if action_need == 2:
+            action_min_depth = "moderate"
+            if TIER_RANKS[base_tier] < TIER_RANKS["moderate"]:
+                active_overrides.append("actionReadinessNeed=2 promoted requiredDepth to moderate")
+        elif action_need == 3:
+            action_min_depth = "complex"
+            if TIER_RANKS[base_tier] < TIER_RANKS["complex"]:
+                active_overrides.append("actionReadinessNeed=3 promoted requiredDepth to complex")
+            active_overrides.append("actionReadinessNeed=3 requires action-ready hierarchy")
+
+    if isinstance(occ_risk, int) and not isinstance(occ_risk, bool):
+        if occ_risk > 0:
+            active_overrides.append(f"occlusionRisk={occ_risk} forbids 2x2 turnaround view skip")
+        if occ_risk == 3:
+            active_overrides.append("occlusionRisk=3 forbids pass suitability score")
+
+    required_rank = max(TIER_RANKS[base_tier], TIER_RANKS[action_min_depth])
+    required_depth = RANK_TO_TIER[required_rank]
+
+    return {
+        "status": "assessed",
+        "baseTier": base_tier,
+        "tier": base_tier,
+        "requiredDepth": required_depth,
+        "activeOverrides": active_overrides,
+        "highCount": high,
+        "extremeCount": extreme,
+        "scoreSum": score_sum,
+    }
+
+
 def complexity_minimums(complexity: str) -> dict[str, int]:
     presets = {
         "simple": {
@@ -1631,8 +1782,23 @@ def pass_config(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
 def _spec_complexity(spec: Mapping[str, Any]) -> str:
     assessment = spec.get("preSpecAssessment")
     complexity = assessment.get("complexity") if isinstance(assessment, dict) else None
-    tier = complexity.get("tier") if isinstance(complexity, dict) else None
-    return str(tier) if tier in {"simple", "moderate", "complex", "ultra"} else "moderate"
+    if isinstance(complexity, dict):
+        derivation = derive_complexity_tier(complexity)
+        req = derivation.get("requiredDepth")
+        if req in TIER_RANKS:
+            return str(req)
+        tier = complexity.get("tier")
+        if tier in TIER_RANKS:
+            return str(tier)
+        hint = complexity.get("initialTierHint")
+        if hint in TIER_RANKS:
+            return str(hint)
+    decision = assessment.get("specDepthDecision") if isinstance(assessment, dict) else None
+    if isinstance(decision, dict):
+        req = decision.get("requiredDepth")
+        if req in TIER_RANKS:
+            return str(req)
+    return "moderate"
 
 
 def effective_pass_config(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
@@ -2193,6 +2359,12 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
         object_class = object_class if isinstance(object_class, Mapping) else {}
         complexity = assessment.get("complexity")
         complexity = complexity if isinstance(complexity, Mapping) else {}
+        decision_map = assessment.get("specDepthDecision") if isinstance(assessment.get("specDepthDecision"), Mapping) else {}
+        complexity_hash_payload = {
+            "tier": complexity.get("tier"),
+            "modifiers": copy.deepcopy(complexity.get("modifiers")) if isinstance(complexity.get("modifiers"), Mapping) else {},
+            "requiredDepth": decision_map.get("requiredDepth"),
+        }
         if pass_id == "blockout":
             payload["preSpecAssessment"] = {
                 "objectClass": {
@@ -2205,7 +2377,7 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
                     )
                     if key in object_class
                 },
-                "complexity": {"tier": complexity.get("tier")},
+                "complexity": complexity_hash_payload,
             }
         elif pass_id in {"structure", "form", "structural-pass", "form-refinement"}:
             payload["preSpecAssessment"] = {
@@ -2219,7 +2391,7 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
                     )
                     if key in object_class
                 },
-                "complexity": copy.deepcopy(complexity),
+                "complexity": complexity_hash_payload,
                 "specDepthDecision": copy.deepcopy(
                     assessment.get("specDepthDecision", {})
                 ),
@@ -3027,6 +3199,7 @@ def phase_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, An
                     )
                     if key in object_class
                 },
+                "complexity": copy.deepcopy(complexity),
                 "complexityTier": (
                     complexity.get("tier") if isinstance(complexity, Mapping) else "moderate"
                 ),
@@ -4076,6 +4249,118 @@ def next_required_evidence(spec: dict[str, Any], pass_id: str) -> list[str]:
 
 
 def sync_pipeline(spec: dict[str, Any]) -> dict[str, Any]:
+    assessment = spec.get("preSpecAssessment")
+    derivation: dict[str, Any] | None = None
+    if isinstance(assessment, dict):
+        complexity_value = assessment.get("complexity")
+        if isinstance(complexity_value, dict):
+            complexity_is_stateful = is_stateful_complexity_contract(complexity_value)
+            derivation = derive_complexity_tier(complexity_value)
+            if complexity_is_stateful:
+                if derivation.get("status") == "assessed":
+                    complexity_value["tier"] = derivation["baseTier"]
+                complexity_value["derivation"] = derivation
+
+    effective_tier = _spec_complexity(spec)
+    mins = complexity_minimums(effective_tier)
+    quality_profile = str(spec.get("qualityProfile") or "balanced")
+    required_hypothesis_views = adaptive_hypothesis_views(
+        effective_tier,
+        quality_profile,
+        _hypothesis_first_view(spec),
+    )
+
+    if isinstance(assessment, dict) and isinstance(derivation, dict):
+        decision = assessment.get("specDepthDecision")
+        if isinstance(decision, dict):
+            decision["requiredDepth"] = derivation["requiredDepth"]
+            required_levels = [
+                level
+                for level, count in (
+                    ("macro", mins["macroLayers"]),
+                    ("meso", mins["mesoLayers"]),
+                    ("micro", mins["microLayers"]),
+                )
+                if count > 0
+            ]
+            existing_levels = decision.get("minimumComponentLevels")
+            if isinstance(existing_levels, list):
+                decision["minimumComponentLevels"] = list(
+                    dict.fromkeys(
+                        [
+                            *required_levels,
+                            *(
+                                str(level)
+                                for level in existing_levels
+                                if isinstance(level, str) and level
+                            ),
+                        ]
+                    )
+                )
+            else:
+                decision["minimumComponentLevels"] = required_levels
+            decision["needsRepetitionSystems"] = (
+                decision.get("needsRepetitionSystems") is True
+                or effective_tier in {"complex", "ultra"}
+            )
+            decision["needsMaterialLocalOverrides"] = (
+                decision.get("needsMaterialLocalOverrides") is True
+                or effective_tier != "simple"
+            )
+            decision["needsMultipleReviewViews"] = (
+                decision.get("needsMultipleReviewViews") is True
+                or len(required_hypothesis_views) > 1
+            )
+            decision["needsActionReadyHierarchy"] = (
+                decision.get("needsActionReadyHierarchy") is True
+                or "actionReadinessNeed=3 requires action-ready hierarchy"
+                in derivation.get("activeOverrides", [])
+            )
+
+    quality_contract = spec.get("qualityContract")
+    if isinstance(quality_contract, dict):
+        quality_bar = quality_contract.get("qualityBar")
+        if (
+            not isinstance(quality_bar, str)
+            or quality_bar not in TIER_RANKS
+            or TIER_RANKS[quality_bar] < TIER_RANKS[effective_tier]
+        ):
+            quality_contract["qualityBar"] = effective_tier
+        min_depth = quality_contract.get("minimumSpecDepth")
+        if isinstance(min_depth, dict):
+            for field, key in (
+                ("macroComponents", "macroLayers"),
+                ("mesoComponents", "mesoLayers"),
+                ("microFeatureGroups", "microLayers"),
+                ("materialLayers", "materials"),
+            ):
+                current_val = min_depth.get(field)
+                if isinstance(current_val, int):
+                    min_depth[field] = max(current_val, mins[key])
+                else:
+                    min_depth[field] = mins[key]
+
+    view_policy = spec.get("viewHypothesisPolicy")
+    if isinstance(view_policy, dict):
+        registration_fields = (
+            view_policy.get("manifestPath"),
+            view_policy.get("manifestSha256"),
+            view_policy.get("cacheKey"),
+        )
+        has_registered_evidence = any(
+            isinstance(value, str) and value.strip()
+            for value in registration_fields
+        )
+        if not has_registered_evidence:
+            view_policy["requiredViews"] = required_hypothesis_views
+            skip = view_policy.get("skipAssessment")
+            if isinstance(skip, dict):
+                base_tier = derivation.get("baseTier") if isinstance(derivation, dict) else None
+                skip["objectIsSimple"] = (
+                    base_tier == "simple"
+                    or (base_tier == "unassessed" and effective_tier == "simple")
+                )
+
     execution = spec.get("phaseExecutionContract")
     if (
         isinstance(execution, dict)
