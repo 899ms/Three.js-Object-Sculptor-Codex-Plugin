@@ -2,13 +2,11 @@
 
 Use this reference while filling the integrated `preSpecAssessment` created by `sculpt init`. It is part of the same `ObjectSculptSpec`, not a separate required file.
 
-## Reference preparation gate
+## Reference preparation evidence
 
-Assess two independent conditions before describing geometry: subject/background separation, and whether source detail/quality is practical to reconstruct. Use the supplied image directly when its boundary is readable and its construction is manageable; a white, neutral, transparent, or strongly contrasting background is acceptable. Use the `imagegen` skill when the subject mixes with its background, source defects obscure construction, complexity would make direct procedural reconstruction impractical, or a real-object photo needs a cleaner buildable 3D-style target. ImageGen must produce a clean solid-white background with strong contrast, not transparency.
+Apply the parent `SKILL.md` preparation policy; record only the assessment evidence here. Judge subject/background separation independently from whether source detail and quality are practical to reconstruct. In `referencePreparation`, state the observed basis for `subjectBackgroundSeparation`. For a generated target, ensure `outputImage` equals `sourceImage`, `outputBackground=solid-white`, `whiteBackgroundValidated` and `subjectContrastValidated` are true, and `modificationPolicy.mode` distinguishes `cleanup-only` from `bounded-simplification`.
 
-The generated reference may simplify declared non-signature microdetail, surface noise, tiny repeated detail, ambiguous minor geometry, and difficult real-world surface variation into clean buildable masses. It must preserve the recognizable class, macro silhouette and proportions, major component layout, signature features, dominant material/color zones, pose, and viewpoint in the generated target. Store the result as `sourceImage`; it becomes the sole reconstruction and acceptance reference. An `unassessed` preparation, unvalidated white background, or undeclared simplification blocks strict quality.
-
-Do not use fixed domain profiles. Assess the object from observed traits, complexity, and target fidelity.
+Name every intentional simplification in `modificationPolicy.declaredChanges`; keep identity, primary silhouette/proportions, major component layout, signature features, dominant material/color zones, pose, and viewpoint in `protectedTraits`. `sourceImage` remains the sole reconstruction and acceptance reference. `unassessed` preparation, failed background or contrast validation, or undeclared simplification blocks strict quality. Do not use fixed domain profiles; assess observed traits, complexity, and target fidelity.
 
 ## Soft Object Classification
 
@@ -21,7 +19,7 @@ Describe the object using multiple axes:
 
 These are descriptors, not domain templates. Use only what the image supports.
 
-Keep material observations short and executable. For every important material, fill `surfaceDescriptor` with three separate claims: physical `rigidity`, optical `finish`, and tactile `microRelief`. Each claim needs `basis: observed|inferred` and confidence, while the descriptor needs source `evidenceRefs`. Do not use “smooth” to mean glossy: smooth is relief, glossy is low roughness, and a rigid surface may still be matte or pebbled. The numeric `roughness` and selected `normal|bump|displacement` channel must agree with these claims before lookdev.
+For every important material, fill `surfaceDescriptor` with separate physical `rigidity`, optical `finish`, and tactile `microRelief` claims. Each needs `basis: observed|inferred` and confidence; the descriptor needs source `evidenceRefs`, and its numeric `roughness` plus `normal|bump|displacement` channel must agree.
 
 ## Sensitive Face And Hand Regions
 
@@ -31,12 +29,7 @@ See `anatomical-regions.md` for the supported landmark, articulation, contact, a
 
 ## Complexity Scoring
 
-Do not mix the two numeric contracts:
-
-- `globalSpec.scores.*` and `preSpecAssessment.complexity.scores.*`: ordinal **integers 0–3**. They measure axis strength or complexity, not quality percentage. For complexity, `0` means lowest/none and `3` means highest. For suitability, higher is better except `occlusion_risk`, where higher means worse.
-- Review `overallScore`, `layerScores.*`, `aiVisionScore`, `minimumScore`, and confidence: normalized **numbers 0–1**. Decimals such as `0.96` and `0.82` are valid and expected.
-
-Never convert `0.96 → 3` or otherwise map between these scales mechanically. Judge each ordinal axis from its meaning. Score each complexity axis from integer 0 to 3:
+Score `preSpecAssessment.complexity.scores.*` as ordinal integers `0–3`, from lowest to highest complexity; do not convert normalized `0–1` review scores into this scale. `globalSpec.scores.*` uses the same ordinal scale, with higher better except for `occlusion_risk`. Judge these axes independently:
 
 - silhouette complexity: simple outline to heavily interrupted/organic silhouette
 - component count: one piece to many visible subparts
@@ -71,17 +64,11 @@ Before generating code, define exactly what makes the model good enough:
 - minimum macro, meso, and micro feature counts
 - required repeated systems and their distribution rules
 - required material layers and local overrides
-- screenshot viewpoints required for visual comparison; package two to four views in one 2x2 sheet
-- one ImageGen 2x2 planning sheet for hidden-form planning by default; use an exploded first tile for a complex/ultra assembly with separable or internal parts, and skip only for an explicitly assessed `simple` object with strong evidenced bilateral, radial, or axial symmetry
+- screenshot viewpoints required for visual comparison
+- the resolved `viewHypothesisPolicy` required by `SKILL.md`: record `layoutId` and `layoutMode`, keep `allowedUse=planning-veto` and `acceptanceAuthority=false`, and when skipped require `skipAssessment.objectIsSimple=true`, bilateral/radial/axial symmetry, confidence `>=0.8`, `evidenceRefs`, and a reason
 - failure modes that should block `continue`
 
-Good feature groups are specific to the image:
-
-- weak: `make leaves look good`
-- strong: `leaf clusters must form irregular overlapping canopy masses, with varied card size/orientation/color and gaps exposing secondary branches`
-
-- weak: `add bark texture`
-- strong: `trunk and primary branches need vertical ridges, cavity-darkened cracks, moss/lichen patches near roots and inner forks, roughness variation, and nonuniform displacement/bump`
+Make every feature group image-specific and testable: name its visible structure, distribution, material response, and blocking failure instead of using generic goals such as `make leaves look good`.
 
 ## Strict Quality Gate
 
