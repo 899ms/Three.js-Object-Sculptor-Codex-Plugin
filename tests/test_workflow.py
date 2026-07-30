@@ -56,6 +56,7 @@ from sculpt_contract import (  # noqa: E402
 from sculpt_pass_orchestrator import pass_specific_gaps  # noqa: E402
 from sculpt_view_hypotheses import register_views  # noqa: E402
 from validate_sculpt_spec import load_spec, validate_spec  # noqa: E402
+from tests.style_helpers import make_assessed_visual_style  # noqa: E402
 
 
 def downstream_impact(phase: str = "finalization") -> list[dict[str, str]]:
@@ -81,6 +82,7 @@ def fill_pre_spec(spec: dict) -> None:
             "materialFamilies": ["painted wood"],
         }
     )
+    spec["preSpecAssessment"]["visualStyle"] = make_assessed_visual_style()
     spec["preSpecAssessment"]["complexity"].update(
         {
             "status": "assessed",

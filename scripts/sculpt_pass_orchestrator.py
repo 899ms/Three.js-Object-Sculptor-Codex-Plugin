@@ -30,6 +30,7 @@ from sculpt_geometry import (
 )
 from sculpt_capabilities import capability_report
 from sculpt_perception import perceptual_context
+from sculpt_style import validate_visual_style, visual_style_assessment_gaps
 from visual_feature_gate import (
     feature_target_is_generic,
     required_feature_targets_for_pass,
@@ -464,6 +465,21 @@ def pre_spec_gaps(spec: dict[str, Any]) -> list[str]:
             gaps.append("preSpecAssessment.complexity must be assessed before blockout build")
     elif complexity.get("tier") not in {"simple", "moderate", "complex", "ultra"}:
         gaps.append("legacy preSpecAssessment.complexity requires a valid assessed tier")
+    visual_style = assessment.get("visualStyle")
+    gaps.extend(visual_style_assessment_gaps(visual_style))
+    if isinstance(visual_style, dict) and visual_style.get("status") == "assessed":
+        evidence_ids = {
+            item.get("id")
+            for item in spec.get("viewEvidence", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and item["id"].strip()
+        }
+        style_errors, _ = validate_visual_style(
+            visual_style,
+            evidence_ids=evidence_ids,
+        )
+        gaps.extend(f"invalid visual style: {error}" for error in style_errors)
     silhouette = spec.get("silhouette")
     if not isinstance(silhouette, dict) or not has_non_empty(
         [silhouette.get("boundingShape"), silhouette.get("aspectRatios"), silhouette.get("dominantCurves")]

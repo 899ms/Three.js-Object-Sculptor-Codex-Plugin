@@ -23,6 +23,7 @@ from sculpt_contract import (
 )
 from validate_sculpt_spec import validate_spec
 from sculpt_pass_orchestrator import pre_spec_gaps, view_hypothesis_skip_gaps
+from tests.style_helpers import make_assessed_visual_style
 
 
 def make_assessed_complexity(
@@ -355,6 +356,7 @@ class TestWorkflowComplexity(unittest.TestCase):
         spec["preSpecAssessment"]["objectClass"]["representationKind"] = ["solid mesh"]
         spec["preSpecAssessment"]["objectClass"]["formLanguage"] = ["ceramic"]
         spec["preSpecAssessment"]["objectClass"]["structureKind"] = ["single body"]
+        spec["preSpecAssessment"]["visualStyle"] = make_assessed_visual_style()
         spec["silhouette"] = {"boundingShape": "cylinder", "aspectRatios": [1.0], "dominantCurves": ["curved"]}
         gaps = pre_spec_gaps(spec)
         self.assertFalse(any("must be assessed" in g for g in gaps))

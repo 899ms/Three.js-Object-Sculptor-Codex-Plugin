@@ -85,6 +85,7 @@ from sculpt_view_hypotheses import (  # noqa: E402
     status as hypothesis_status,
 )
 from validate_sculpt_spec import main as validate_main  # noqa: E402
+from tests.style_helpers import make_assessed_visual_style  # noqa: E402
 
 
 def downstream_impact(phase: str = "finalization") -> list[dict[str, str]]:
@@ -134,6 +135,7 @@ def fill_global_contract(manifest: dict) -> None:
             "materialFamilies": ["painted polymer"],
         }
     )
+    spec["preSpecAssessment"]["visualStyle"] = make_assessed_visual_style()
     spec["preSpecAssessment"]["complexity"].update(
         {
             "status": "assessed",

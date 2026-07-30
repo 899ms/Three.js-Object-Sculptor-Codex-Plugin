@@ -21,6 +21,11 @@ from visual_feature_gate import (
     required_feature_targets_for_pass,
 )
 from sculpt_perception import perceptual_review_failures
+from sculpt_style import (
+    sync_visual_style,
+    visual_style_directives,
+    visual_style_projection,
+)
 
 
 DEFAULT_PASS_ORDER = ["blockout", "form", "lookdev"]
@@ -2415,6 +2420,14 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
             payload["preSpecAssessment"] = {
                 "motionPotential": copy.deepcopy(object_class.get("motionPotential", []))
             }
+        style_projection = visual_style_projection(
+            assessment.get("visualStyle"),
+            pass_id,
+        )
+        if style_projection:
+            pre_spec_payload = payload.setdefault("preSpecAssessment", {})
+            if isinstance(pre_spec_payload, dict):
+                pre_spec_payload["visualStyle"] = style_projection
     targets = spec.get("qualityTargets") if isinstance(spec.get("qualityTargets"), dict) else {}
     payload["qualityTargets"] = phase_quality_targets(spec, pass_id)
     payload["buildPasses"] = configs
@@ -3307,6 +3320,20 @@ def phase_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, An
                 "qualityTargets": phase_quality_targets(spec, selected),
             }
         )
+    assessment = spec.get("preSpecAssessment")
+    if isinstance(assessment, Mapping):
+        style_projection = visual_style_projection(
+            assessment.get("visualStyle"),
+            selected,
+        )
+        if style_projection:
+            projected_assessment = projection.setdefault("preSpecAssessment", {})
+            if isinstance(projected_assessment, dict):
+                projected_assessment["visualStyle"] = style_projection
+            projection["styleDirectives"] = visual_style_directives(
+                assessment.get("visualStyle"),
+                selected,
+            )
     return projection
 
 
@@ -3417,14 +3444,25 @@ def phase_work_packet(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
         and phase_execution_version(spec) >= SIMPLIFIED_PHASE_EXECUTION_VERSION
     ):
         phase_rubrics = visual_scout.get("phaseRubrics")
-        active_rubric = (
+        active_rubric = copy.deepcopy(
             phase_rubrics.get(canonical_phase, {})
             if isinstance(phase_rubrics, Mapping)
             else {}
         )
+        assessment = spec.get("preSpecAssessment")
+        style = (
+            assessment.get("visualStyle")
+            if isinstance(assessment, Mapping)
+            else None
+        )
+        if isinstance(active_rubric, dict):
+            active_rubric["styleChecks"] = visual_style_directives(
+                style,
+                canonical_phase,
+            )
         visual_scout["activePhaseInput"] = {
             "phaseId": canonical_phase,
-            "phaseRubric": copy.deepcopy(active_rubric),
+            "phaseRubric": active_rubric,
             "qualityContract": copy.deepcopy(spec.get("qualityContract", {})),
             "requiredFeatureTargets": copy.deepcopy(
                 required_feature_targets_for_pass(spec, canonical_phase)
@@ -4308,6 +4346,9 @@ def sync_pipeline(spec: dict[str, Any]) -> dict[str, Any]:
     assessment = spec.get("preSpecAssessment")
     derivation: dict[str, Any] | None = None
     if isinstance(assessment, dict):
+        visual_style = assessment.get("visualStyle")
+        if isinstance(visual_style, dict):
+            sync_visual_style(visual_style)
         complexity_value = assessment.get("complexity")
         if isinstance(complexity_value, dict):
             complexity_is_stateful = is_stateful_complexity_contract(complexity_value)

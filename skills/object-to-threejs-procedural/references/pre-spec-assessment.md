@@ -22,6 +22,21 @@ Fill every `preSpecAssessment.objectClass` axis. The values below are broad, com
 
 `motionPotential` is a pre-spec hypothesis, not authorization to require Interaction or invent hidden mechanisms. Representation kinds classify visible construction without promising unsupported simulation. Material families identify only a broad substance or rendering-medium class; record rigidity, finish, microrelief, and PBR behavior under `material-lighting-realism.md`.
 
+## Visual Style Classification
+
+Assess all nine `preSpecAssessment.visualStyle.axes` before Blockout: realism,
+form, proportion, detail, shading, surface, edge, palette, and medium emulation.
+The axes are authoritative and composable; `derivation.family` and familiar
+labels such as Low Poly, Cel-Shading, Hand-Painted 3D, or Voxel Art are
+system-derived summaries. Use `other` only with a custom label and operational
+definition; use `unassessed` while evidence is incomplete.
+
+Every assessed axis needs confidence, exact `viewEvidence[].id` references, and
+observed cues. Style describes treatment, not object type, construction
+complexity, concrete PBR values, or camera/presentation. It never overrides
+`sourceImage`. Read `visual-style-classification.md` for the complete controlled
+vocabulary, derivation rules, and phase projection contract.
+
 ## Identity-Critical Region Screening
 
 Screen every target—not only characters—for local regions or semantic systems whose failure would make the object unrecognizable even when its whole-object silhouette or average review score looks acceptable. Rank observed candidates in `visualIdentitySpec.salienceGraph` by identity impact at the target display size, not by geometric complexity. Replace generic starter `featureReviewTargets` with the decision-critical object-specific systems; require dedicated `reviewViewIds` only when full-object evidence cannot judge one reliably. Route matched components through `capabilityPlan`, and record a `capability-gap` instead of inventing unsupported handling.

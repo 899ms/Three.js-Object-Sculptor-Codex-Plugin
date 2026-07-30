@@ -72,7 +72,7 @@ Always-loaded stable core:
 
 Phase-owned fields:
 
-- `blockout`: object class, complexity tier, macro components, primary framing, silhouette, proportions.
+- `blockout`: object class, assessed visual style, complexity tier, macro components, primary framing, silhouette, proportions.
 - `form`: recursive children/features, topology strategy, attachments, repetition systems, signature detail, conditional view hypotheses.
 - `lookdev`: materials, colors, rigidity, roughness/gloss, microrelief, PBR maps, lighting, contact shadow.
 - `interaction`: motion assessment, exact moving component IDs, pivots, axes, limits/rates, motion clearance, runtime evidence.
@@ -253,6 +253,7 @@ Performance is an optional post-lookdev audit activated only by an explicit user
 Load only the reference named by the current phase packet:
 
 - suitability/global contract: `references/pre-spec-assessment.md`;
+- visual-style axes, values, and derivation: `references/visual-style-classification.md`;
 - geometry/recursive representation: `references/procedural-patterns.md`;
 - attachments: `references/attachment-joint-correctness.md`;
 - materials/lighting: `references/material-lighting-realism.md`;

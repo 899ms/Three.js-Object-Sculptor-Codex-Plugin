@@ -20,6 +20,7 @@ from sculpt_contract import (
     write_spec_atomic,
 )
 from sculpt_perception import make_perceptual_fields
+from sculpt_style import make_unassessed_visual_style
 from sculpt_view_hypotheses import make_view_hypothesis_policy
 
 
@@ -44,6 +45,7 @@ def make_pre_spec_assessment(
             "materialFamilies": [],
             "notes": "",
         },
+        "visualStyle": make_unassessed_visual_style(),
         "complexity": {
             "status": "unassessed",
             "initialTierHint": complexity,
@@ -164,6 +166,7 @@ def make_phase_execution_contract() -> dict[str, Any]:
         "phaseOwnedFields": {
             "blockout": [
                 "preSpecAssessment.objectClass",
+                "preSpecAssessment.visualStyle",
                 "preSpecAssessment.complexity",
                 "qualityContract",
                 "featureReviewTargets",
@@ -547,6 +550,7 @@ def make_spec(
             detail_decomposition_contract = assessment_payload["detailDecompositionContract"]
         if not image and isinstance(assessment_payload.get("sourceImage"), str):
             image = assessment_payload["sourceImage"]
+    pre_spec.setdefault("visualStyle", make_unassessed_visual_style())
 
     interactive = intended_use in {"animated", "playable", "destructible"}
     interaction_contract = make_interaction_contract(intended_use)

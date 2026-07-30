@@ -51,6 +51,7 @@ from sculpt_geometry import (
 from sculpt_specialized_regions import validate_specialized_regions
 from sculpt_capabilities import validate_capability_plan
 from sculpt_perception import validate_perceptual_contract
+from sculpt_style import validate_visual_style
 
 
 REQUIRED_TOP_LEVEL = {
@@ -164,6 +165,7 @@ PASS_WARNING_KEYWORDS = {
         "risk",
     ),
     "structure": (
+        "visualStyle",
         "component",
         "attachment",
         "hierarchy",
@@ -174,6 +176,7 @@ PASS_WARNING_KEYWORDS = {
         "meso",
     ),
     "form": (
+        "visualStyle",
         "component",
         "attachment",
         "hierarchy",
@@ -185,6 +188,7 @@ PASS_WARNING_KEYWORDS = {
         "micro",
     ),
     "lookdev": (
+        "visualStyle",
         "material",
         "lookDev",
         "lighting",
@@ -195,7 +199,7 @@ PASS_WARNING_KEYWORDS = {
         "featureReviewTargets",
         "reviewView",
     ),
-    "interaction": ("action", "pivot", "socket", "collider"),
+    "interaction": ("visualStyle", "action", "pivot", "socket", "collider"),
     "optimization": ("performance", "FPS", "draw", "triangle"),
 }
 PASS_ALIASES = {
@@ -379,6 +383,20 @@ def validate_pre_spec_assessment(spec: dict[str, Any], errors: list[str], warnin
         notes = object_class.get("notes")
         if notes is not None and not isinstance(notes, str):
             errors.append("preSpecAssessment.objectClass.notes must be a string")
+    visual_style = assessment.get("visualStyle")
+    evidence_ids = {
+        item.get("id")
+        for item in spec.get("viewEvidence", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and item["id"].strip()
+    }
+    style_errors, style_warnings = validate_visual_style(
+        visual_style,
+        evidence_ids=evidence_ids,
+    )
+    errors.extend(style_errors)
+    warnings.extend(style_warnings)
     complexity = assessment.get("complexity")
     if not isinstance(complexity, dict):
         errors.append("preSpecAssessment.complexity must be an object")

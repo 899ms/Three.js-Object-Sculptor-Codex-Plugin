@@ -23,6 +23,7 @@ from new_sculpt_spec import (
     make_phase_execution_contract,
 )
 from sculpt_perception import ensure_perceptual_fields
+from sculpt_style import make_unassessed_visual_style
 
 
 TARGET_SCHEMA = CURRENT_SCHEMA_VERSION
@@ -63,6 +64,14 @@ def add_progressive_execution_contract(spec: dict[str, Any]) -> int:
     return 1
 
 
+def add_visual_style_scaffolding(spec: dict[str, Any]) -> int:
+    assessment = spec.get("preSpecAssessment")
+    if not isinstance(assessment, dict) or "visualStyle" in assessment:
+        return 0
+    assessment["visualStyle"] = make_unassessed_visual_style()
+    return 1
+
+
 def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dict[str, Any], dict[str, Any]]:
     if target != TARGET_SCHEMA:
         raise ValueError(f"only migration target {TARGET_SCHEMA!r} is supported")
@@ -77,18 +86,25 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
         detail_updates = add_detail_decomposition_scaffolding(migrated)
         execution_updates = add_progressive_execution_contract(migrated)
         perceptual_updates = ensure_perceptual_fields(migrated)
-        if detail_updates or execution_updates or perceptual_updates:
+        style_updates = add_visual_style_scaffolding(migrated)
+        if detail_updates or execution_updates or perceptual_updates or style_updates:
             revision = migrated.get("specRevision", 0)
             migrated["specRevision"] = revision + 1 if isinstance(revision, int) else 1
             sync_pipeline(migrated)
         return migrated, {
-            "changed": detail_updates > 0 or execution_updates > 0 or perceptual_updates > 0,
+            "changed": (
+                detail_updates > 0
+                or execution_updates > 0
+                or perceptual_updates > 0
+                or style_updates > 0
+            ),
             "fromVersion": source,
             "toVersion": target,
             "componentsUpdated": 0,
             "detailDecompositionUpdates": detail_updates,
             "phaseExecutionContractUpdates": execution_updates,
             "perceptualContractUpdates": perceptual_updates,
+            "visualStyleUpdates": style_updates,
             "reviewHistoryPreserved": True,
         }
 
@@ -177,6 +193,7 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
     detail_updates = add_detail_decomposition_scaffolding(migrated)
     execution_updates = add_progressive_execution_contract(migrated)
     perceptual_updates = ensure_perceptual_fields(migrated)
+    style_updates = add_visual_style_scaffolding(migrated)
 
     migrated["schemaVersion"] = target
     revision = migrated.get("specRevision", 0)
@@ -190,6 +207,7 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
         "detailDecompositionUpdates": detail_updates,
         "phaseExecutionContractUpdates": execution_updates,
         "perceptualContractUpdates": perceptual_updates,
+        "visualStyleUpdates": style_updates,
         "reviewHistoryPreserved": True,
         "retiredPasses": ["structure", "optimization"],
         "interactionRequiresFreshAssessment": not interaction_required,
