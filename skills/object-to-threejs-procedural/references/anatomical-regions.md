@@ -4,13 +4,15 @@ Use this reference only when the target contains a visible face or hand. These a
 
 This contract does not add a build pass and does not claim medical anatomy or automatic rigging. It strengthens the existing pre-spec, component hierarchy, form/lookdev review, and optional post-quality performance no-regression audit.
 
+Face and hand handling is a strict extension of the general identity-critical screening in `pre-spec-assessment.md`, not the only kind of critical-region handling. During assessment, establish visibility, confidence, occlusion, evidence needs, constraints, and bounded unknowns. Complete component-bound assemblies, landmark mappings, feature targets, and the relevant `surfaceTopologyPlan` at the start of Form, before generating detailed region geometry. Blockout still includes the visible identity-defining macro masses, but it must not speculate about detailed topology.
+
 ## Declare The Region
 
 Set `preSpecAssessment.specializedRegions.status` to:
 
-- `declared` when at least one face or hand is visible;
+- `declared` when at least one face or hand is visible and its full region contract has been completed at the start of Form;
 - `none` only after inspection, with a concrete reason;
-- `unassessed` only while the pre-spec is unfinished.
+- `unassessed` only during assessment and Blockout while Form-owned component mappings are unavailable; record the pending contract in notes or a bounded risk.
 
 Each declared region needs:
 
@@ -76,7 +78,7 @@ The region score cannot be averaged away by the full-object score. A missing cro
 
 ## Modeling Guidance
 
-- Use a topology plan first. Prefer one `sculpted-surface` host when face contour, cheeks, muzzle, and jaw transition continuously; use separate ellipsoids, extrudes, curve sweeps, or parts only at real anatomical/accessory boundaries. There is intentionally no one-click `face` or `hand` primitive.
+- At the start of Form, complete the relevant topology plan before detailed region geometry. Prefer one `sculpted-surface` host when face contour, cheeks, muzzle, and jaw transition continuously; use separate ellipsoids, extrudes, curve sweeps, or parts only at real anatomical/accessory boundaries. There is intentionally no one-click `face` or `hand` primitive.
 - Separate eyeballs, teeth, a true mouth cavity, and accessories when their boundary is visible. Keep fleshy muzzle/nose, eyelids, brows, lips, folds, and fur relief embedded when the topology plan identifies an uninterrupted host surface.
 - Preserve wrist, palm, thumb/digit chains or grouped digit mass as semantic regions. Keep them on one sculpted host for continuous static anatomy; separate them only for real seams/accessories or action-ready articulation.
 - Validate neutral form before relying on fur, skin, cloth, nail, eye, or accessory materials.

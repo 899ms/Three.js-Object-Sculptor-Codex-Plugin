@@ -22,11 +22,17 @@ Fill every `preSpecAssessment.objectClass` axis. The values below are broad, com
 
 `motionPotential` is a pre-spec hypothesis, not authorization to require Interaction or invent hidden mechanisms. Representation kinds classify visible construction without promising unsupported simulation. Material families identify only a broad substance or rendering-medium class; record rigidity, finish, microrelief, and PBR behavior under `material-lighting-realism.md`.
 
-## Sensitive Face And Hand Regions
+## Identity-Critical Region Screening
 
-Inspect visible faces and hands separately from general object complexity. Fill `preSpecAssessment.specializedRegions` and `surfaceTopologyPlan` before creating visual modules: use `declared` with one contract per visible region, or `none` with a reason. A clear region needs a named assembly, landmark-to-geometry mapping, proportion plus expression/pose constraints, dedicated crop views, and its own critical feature target. Landmark names do not require separate meshes; classify continuous tissue, real assemblies, fitted shells, embedded relief, strands, and material-only detail from visible evidence. Partial or occluded anatomy needs explicit unknowns; never infer hidden digits or facial forms as facts.
+Screen every target—not only characters—for local regions or semantic systems whose failure would make the object unrecognizable even when its whole-object silhouette or average review score looks acceptable. Rank observed candidates in `visualIdentitySpec.salienceGraph` by identity impact at the target display size, not by geometric complexity. Replace generic starter `featureReviewTargets` with the decision-critical object-specific systems; require dedicated `reviewViewIds` only when full-object evidence cannot judge one reliably. Route matched components through `capabilityPlan`, and record a `capability-gap` instead of inventing unsupported handling.
 
-See `anatomical-regions.md` for the supported landmark, articulation, contact, and evidence contract.
+Examples include a vehicle grille or lamp cluster, a machine tool head or control panel, an enclosure opening or visible internal mechanism, a product lens or logo, a branching hub, and a character face or hand. These examples are not a closed taxonomy: use the observed source to decide what carries identity.
+
+### Face And Hand Exception
+
+Faces and hands are one stricter exception, not the only regions screened. Each visible face or hand remains an independent critical target because proportion, gaze, expression, digit, or contact errors cannot be averaged away by the rest of the object. During assessment, identify visibility, confidence, occlusion, evidence needs, constraints, dedicated crop needs, and bounded unknowns. Set `preSpecAssessment.specializedRegions.status=none` as soon as absence is established, with a reason. When a visible region needs Form-owned component mappings, keep it `unassessed` only through Blockout, record the pending contract in its notes or a bounded risk, then complete one `declared` contract per region at the start of Form.
+
+The Form contract completes geometry-bound assembly and landmark mappings plus the relevant `surfaceTopologyPlan` before generating Form geometry or visual modules; do not pre-author detailed topology during Blockout. Landmark names do not require separate meshes, and multiple landmarks may share one continuous host when the evidence supports it. Never infer hidden digits or facial forms as facts. See `anatomical-regions.md` for the supported landmark, articulation, contact, and evidence contract.
 
 ## Complexity Scoring
 
