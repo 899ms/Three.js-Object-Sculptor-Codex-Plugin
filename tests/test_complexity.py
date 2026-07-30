@@ -236,7 +236,7 @@ class TestSyncPipelineComplexity(unittest.TestCase):
         self.assertEqual(spec["preSpecAssessment"]["complexity"]["tier"], "ultra")
         self.assertEqual(spec["preSpecAssessment"]["specDepthDecision"]["requiredDepth"], "ultra")
         self.assertGreaterEqual(
-            spec["qualityContract"]["minimumSpecDepth"]["materialLayers"], 4
+            spec["qualityContract"]["minimumSpecDepth"]["materials"], 4
         )
 
     def test_upgrade_simple_to_ultra_syncs_downstream_contracts(self) -> None:
@@ -250,7 +250,10 @@ class TestSyncPipelineComplexity(unittest.TestCase):
         )
         sync_pipeline(spec)
         decision = spec["preSpecAssessment"]["specDepthDecision"]
-        self.assertEqual(spec["qualityContract"]["qualityBar"], "ultra")
+        self.assertNotIn("qualityBar", spec["qualityContract"])
+        self.assertGreaterEqual(
+            spec["qualityContract"]["minimumSpecDepth"]["repetitionSystems"], 1
+        )
         self.assertEqual(decision["minimumComponentLevels"], ["macro", "meso", "micro"])
         self.assertTrue(decision["needsRepetitionSystems"])
         self.assertTrue(decision["needsMaterialLocalOverrides"])
@@ -291,13 +294,13 @@ class TestSyncPipelineComplexity(unittest.TestCase):
 
     def test_manual_overrides_not_downgraded(self) -> None:
         spec = make_spec("Test Object", "ref.png", complexity="complex")
-        spec["qualityContract"]["minimumSpecDepth"]["materialLayers"] = 6
+        spec["qualityContract"]["minimumSpecDepth"]["materials"] = 6
         spec["preSpecAssessment"]["complexity"] = make_assessed_complexity(
             scores={"silhouetteComplexity": 0}
         )  # derives simple
         sync_pipeline(spec)
         self.assertEqual(
-            spec["qualityContract"]["minimumSpecDepth"]["materialLayers"], 6
+            spec["qualityContract"]["minimumSpecDepth"]["materials"], 6
         )
 
     def test_action_modifier_promotes_depth(self) -> None:
@@ -321,6 +324,12 @@ class TestWorkflowComplexity(unittest.TestCase):
             proj["preSpecAssessment"]["complexity"]["status"],
             "unassessed",
         )
+        self.assertIn("qualityContract", proj)
+        self.assertEqual(
+            proj["qualityContract"]["requiredReviewViewIds"],
+            ["full-object"],
+        )
+        self.assertIn("specDepthDecision", proj["preSpecAssessment"])
 
     def test_blockout_packet_can_edit_full_complexity_contract(self) -> None:
         spec = make_spec("Test Object", "ref.png", complexity="moderate")
@@ -328,6 +337,8 @@ class TestWorkflowComplexity(unittest.TestCase):
             spec, "blockout"
         )["specDeltaContract"]["editablePaths"]
         self.assertIn("preSpecAssessment.complexity", editable)
+        self.assertIn("qualityContract", editable)
+        self.assertIn("featureReviewTargets", editable)
         self.assertNotIn("preSpecAssessment.complexity.tier", editable)
 
     def test_pre_blockout_gap_when_unassessed(self) -> None:

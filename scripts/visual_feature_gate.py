@@ -7,6 +7,17 @@ import math
 from typing import Any
 
 
+STARTER_FEATURE_TARGET_IDS = frozenset(
+    {
+        "overall-silhouette",
+        "primary-structure",
+        "reference-material-system",
+        "reference-lookdev",
+    }
+)
+STARTER_CRITERION_PREFIX = "replace this starter criterion"
+
+
 def is_number(value: Any) -> bool:
     return (
         isinstance(value, (int, float))
@@ -40,6 +51,55 @@ def feature_targets_for_pass(spec: dict[str, Any], pass_id: str) -> list[dict[st
     return applicable
 
 
+def required_feature_targets_for_pass(
+    spec: dict[str, Any], pass_id: str
+) -> list[dict[str, Any]]:
+    return [
+        target
+        for target in feature_targets_for_pass(spec, pass_id)
+        if target.get("tier") == "critical" or target.get("mustPass") is True
+    ]
+
+
+def required_feature_targets(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    targets = spec.get("featureReviewTargets")
+    if not isinstance(targets, list):
+        return []
+    return [
+        target
+        for target in targets
+        if isinstance(target, dict)
+        and (target.get("tier") == "critical" or target.get("mustPass") is True)
+    ]
+
+
+def feature_target_is_generic(target: dict[str, Any]) -> bool:
+    target_id = target.get("id")
+    if target_id not in STARTER_FEATURE_TARGET_IDS:
+        return False
+    criteria = target.get("criteria")
+    if not isinstance(criteria, list):
+        return True
+    return not any(
+        isinstance(criterion, str)
+        and criterion.strip()
+        and not criterion.strip().lower().startswith(STARTER_CRITERION_PREFIX)
+        for criterion in criteria
+    )
+
+
+def feature_targets_are_generic(spec: dict[str, Any]) -> bool:
+    """Return true only for a wholly untouched starter contract."""
+
+    targets = spec.get("featureReviewTargets")
+    if not isinstance(targets, list) or not targets:
+        return True
+    valid_targets = [target for target in targets if isinstance(target, dict)]
+    return bool(valid_targets) and all(
+        feature_target_is_generic(target) for target in valid_targets
+    )
+
+
 def feature_gate_failures(
     spec: dict[str, Any],
     entry: dict[str, Any],
@@ -50,11 +110,7 @@ def feature_gate_failures(
         return []
 
     targets = feature_targets_for_pass(spec, pass_id)
-    critical = [
-        target
-        for target in targets
-        if target.get("tier") == "critical" or target.get("mustPass") is True
-    ]
+    critical = required_feature_targets_for_pass(spec, pass_id)
     max_critical = policy.get("maxCriticalFeaturesPerPass", 5)
     failures: list[str] = []
     if is_number(max_critical) and len(critical) > int(max_critical):

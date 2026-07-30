@@ -28,6 +28,7 @@ from sculpt_module_contract import (
     module_document_errors,
     module_path,
 )
+from visual_feature_gate import required_feature_targets
 
 
 @dataclass
@@ -140,8 +141,8 @@ def make_manifest(base_spec: dict[str, Any]) -> dict[str, Any]:
         "coverageContract": {
             "assemblyFeatureGroups": [
                 str(item["id"])
-                for item in global_spec.get("featureReviewTargets", [])
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
+                for item in required_feature_targets(global_spec)
+                if isinstance(item.get("id"), str)
             ],
             "rule": "Every required feature group has exactly one owner mode: one visual module or the assembled-pass gate.",
         },
@@ -608,8 +609,12 @@ def add_module(
     if unknown:
         raise ValueError("unknown dependencies: " + ", ".join(unknown))
     coverage = list(dict.fromkeys(covers or []))
-    quality_contract = manifest.get("globalSpec", {}).get("qualityContract", {})
-    known_groups = ids(quality_contract.get("featureGroups", []))
+    global_spec = manifest.get("globalSpec", {})
+    known_groups = ids(
+        global_spec.get("featureReviewTargets", [])
+        if isinstance(global_spec, dict)
+        else []
+    )
     unknown_coverage = sorted(set(coverage) - known_groups)
     if unknown_coverage:
         raise ValueError("unknown global feature groups: " + ", ".join(unknown_coverage))

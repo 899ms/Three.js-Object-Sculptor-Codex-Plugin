@@ -83,7 +83,7 @@ def make_pre_spec_assessment(
                 "mesoComponents": minimums["mesoLayers"],
                 "microFeatureGroups": minimums["microLayers"],
                 "materialLayers": minimums["materials"],
-                "repetitionSystems": 0,
+                "repetitionSystems": 1 if complexity in {"complex", "ultra"} else 0,
             },
         },
         "specDepthDecision": {
@@ -120,61 +120,19 @@ def make_pre_spec_assessment(
 
 def make_quality_contract(
     complexity: str = "moderate",
-    quality_profile: str = "balanced",
 ) -> dict[str, Any]:
+    """Create measurable floors; object-specific criteria live in featureReviewTargets."""
+
     minimums = complexity_minimums(complexity)
     return {
-        "qualityBar": complexity,
-        "qualityProfile": quality_profile,
-        "definitionOfDone": [
-            "The final render preserves the reference silhouette, proportions, recognizable structure, material response, and required runtime behavior."
-        ],
         "minimumSpecDepth": {
             "macroComponents": minimums["macroLayers"],
             "mesoComponents": minimums["mesoLayers"],
             "microFeatureGroups": minimums["microLayers"],
-            "materialLayers": minimums["materials"],
-            "repetitionSystems": 0,
-            "reviewViewpoints": 3 if quality_profile == "reference-fidelity" else 1,
+            "materials": minimums["materials"],
+            "repetitionSystems": 1 if complexity in {"complex", "ultra"} else 0,
         },
-        "featureGroups": [
-            {
-                "id": "overall-silhouette",
-                "name": "Overall silhouette and proportions",
-                "required": True,
-                "qualityCriteria": ["Bounding shape, negative space, and main mass ratios are explicit."],
-                "evidenceRefs": ["full-object"],
-                "failureModes": ["The model reads as a generic placeholder."],
-            },
-            {
-                "id": "primary-structure",
-                "name": "Primary structure and attachments",
-                "required": True,
-                "qualityCriteria": ["Major parts, hierarchy, joints, and contacts are explicit."],
-                "evidenceRefs": ["full-object"],
-                "failureModes": ["Parts float, intersect accidentally, or use the wrong hierarchy."],
-            },
-            {
-                "id": "reference-lookdev",
-                "name": "Material, surface, lighting, and contact shadow",
-                "required": True,
-                "qualityCriteria": ["Color and light response remain believable under review lighting."],
-                "evidenceRefs": ["full-object"],
-                "failureModes": ["The object looks flat, uniformly plastic, or detached from the ground."],
-            },
-        ],
-        "visualDeltaChecks": [
-            "silhouette and proportion delta",
-            "structure and attachment delta",
-            "material and lighting delta",
-        ],
-        "antiShallowSpecRules": [
-            "Do not generate blockout before the integrated pre-spec fields and silhouette are filled.",
-            "Every component id/name must identify its observed construction role; generic or placeholder names are invalid.",
-            "Do not continue a visual pass without a hash-bound comparison manifest and artifact-bound AI review.",
-            "Do not lower global or pass-specific thresholds from a review command.",
-            "Do not use polygon, draw-call, FPS, or receipt success to compensate for a failed visual gate.",
-        ],
+        "requiredReviewViewIds": ["full-object"],
     }
 
 
@@ -207,6 +165,8 @@ def make_phase_execution_contract() -> dict[str, Any]:
             "blockout": [
                 "preSpecAssessment.objectClass",
                 "preSpecAssessment.complexity",
+                "qualityContract",
+                "featureReviewTargets",
                 "componentTree[macro]",
                 "qualityTargets",
                 "viewingContract",
@@ -218,7 +178,6 @@ def make_phase_execution_contract() -> dict[str, Any]:
                 "surfaceTopologyPlan",
                 "detailDecompositionContract",
                 "repetitionSystems",
-                "featureReviewTargets",
                 "viewHypothesisPolicy",
                 "capabilityPlan",
                 "representationPlan",
@@ -566,7 +525,7 @@ def make_spec(
         "exploded" if planning_sheet_layout == "exploded" else "three-quarter"
     )
     pre_spec = make_pre_spec_assessment(target_name, complexity, intended_use)
-    quality_contract = make_quality_contract(complexity, quality_profile)
+    quality_contract = make_quality_contract(complexity)
     detail_decomposition_contract = make_detail_decomposition_contract()
     surface_topology_plan: dict[str, Any] = {
         "status": "unassessed",
@@ -959,6 +918,9 @@ def make_spec(
                 "mustPass": True,
                 "componentRefs": ["root"],
                 "evidenceRefs": ["full-object"],
+                "criteria": [
+                    "Replace this starter criterion with the source-specific silhouette, negative spaces, and primary proportions."
+                ],
             },
             {
                 "id": "primary-structure",
@@ -973,6 +935,9 @@ def make_spec(
                 "mustPass": True,
                 "componentRefs": ["root"],
                 "evidenceRefs": ["full-object"],
+                "criteria": [
+                    "Replace this starter criterion with the source-specific major parts, hierarchy, attachments, and contacts."
+                ],
             },
             {
                 "id": "reference-lookdev",
@@ -985,6 +950,9 @@ def make_spec(
                 "mustPass": True,
                 "componentRefs": ["root"],
                 "evidenceRefs": ["full-object"],
+                "criteria": [
+                    "Replace this starter criterion with the source-specific material zones, surface response, lighting, and grounding."
+                ],
             },
         ],
         "actionReadiness": {

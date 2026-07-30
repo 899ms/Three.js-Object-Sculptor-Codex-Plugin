@@ -131,6 +131,11 @@ def fill_pre_spec(spec: dict) -> None:
         }
     )
     spec["detailDecompositionContract"]["status"] = "planned"
+    for target in spec.get("featureReviewTargets", []):
+        if isinstance(target, dict):
+            target["criteria"] = [
+                f"Match the observed test prop {str(target.get('name') or target.get('id')).lower()}."
+            ]
     for component in spec.get("componentTree", []):
         if not isinstance(component, dict):
             continue
@@ -741,7 +746,7 @@ class PassPlanTests(unittest.TestCase):
         future["repetitionSystems"] = [
             {"id": "future-rivets", "type": "grid", "counts": [2, 2, 1]}
         ]
-        future["qualityContract"]["featureGroups"][-1]["qualityCriteria"] = [
+        future["featureReviewTargets"][-1]["criteria"] = [
             "A future Lookdev-only criterion changed."
         ]
         future["qualityTargets"]["mustMatch"][-1] = "updated material response"

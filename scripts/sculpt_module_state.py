@@ -35,6 +35,7 @@ from sculpt_manifest import (
     resolve_manifest,
 )
 from sculpt_module_contract import MANIFEST_SCHEMA_VERSION, SEGMENTED_FIELDS, manifest_errors
+from visual_feature_gate import required_feature_targets
 
 
 GLOBAL_DERIVED_FIELDS = {
@@ -503,22 +504,17 @@ def _visual_gate_contract_failures(
     payload = module.get("payload") if isinstance(module.get("payload"), dict) else {}
     global_spec = manifest.get("globalSpec") if isinstance(manifest.get("globalSpec"), dict) else {}
     simplified = simplified_visual_gate_enabled(global_spec)
-    quality_contract = (
-        global_spec.get("qualityContract")
-        if isinstance(global_spec.get("qualityContract"), dict)
-        else {}
-    )
     covered_ids = set(entry.get("covers", []))
-    covered_groups = [
-        group
-        for group in quality_contract.get("featureGroups", [])
-        if isinstance(group, dict) and group.get("id") in covered_ids
+    covered_targets = [
+        target
+        for target in global_spec.get("featureReviewTargets", [])
+        if isinstance(target, dict) and target.get("id") in covered_ids
     ]
     semantic_text = json.dumps(
         [
             payload.get("featureReviewTargets", []),
             payload.get("specializedRegions", []),
-            covered_groups,
+            covered_targets,
         ],
         ensure_ascii=False,
     ).lower()
@@ -633,12 +629,6 @@ def implementation_contract_paths(
 
 def _coverage_status(manifest: dict[str, Any], entries: dict[str, dict[str, Any]]) -> dict[str, Any]:
     global_spec = manifest.get("globalSpec") if isinstance(manifest.get("globalSpec"), dict) else {}
-    quality_contract = (
-        global_spec.get("qualityContract")
-        if isinstance(global_spec.get("qualityContract"), dict)
-        else {}
-    )
-    groups = quality_contract.get("featureGroups", [])
     coverage_contract = manifest.get("coverageContract")
     assembly_scoped = set(
         str(item)
@@ -650,11 +640,9 @@ def _coverage_status(manifest: dict[str, Any], entries: dict[str, dict[str, Any]
         if isinstance(item, str)
     )
     required = {
-        str(group.get("id"))
-        for group in (groups if isinstance(groups, list) else [])
-        if isinstance(group, dict)
-        and isinstance(group.get("id"), str)
-        and group.get("required", True) is True
+        str(target.get("id"))
+        for target in required_feature_targets(global_spec)
+        if isinstance(target.get("id"), str)
     }
     covered_by: dict[str, list[str]] = {}
     for module_id, entry in entries.items():

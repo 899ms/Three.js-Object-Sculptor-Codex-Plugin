@@ -83,17 +83,18 @@ Do not leave uncertainty as a plain sentence. An assumption must state where it 
 
 ## Quality Contract
 
-Before generating code, define exactly what makes the model good enough:
+Treat `qualityContract` as the Blockout-owned acceptance floor between assessment and implementation, not as a second description of quality. Keep only:
 
-- definition of done for this object
-- minimum macro, meso, and micro feature counts
-- required repeated systems and their distribution rules
-- required material layers and local overrides
-- screenshot viewpoints required for visual comparison
-- the resolved `viewHypothesisPolicy` required by `SKILL.md`: record `layoutId` and `layoutMode`, keep `allowedUse=planning-veto` and `acceptanceAuthority=false`, and when skipped require `skipAssessment.objectIsSimple=true`, bilateral/radial/axial symmetry, confidence `>=0.8`, `evidenceRefs`, and a reason
-- failure modes that should block `continue`
+- `minimumSpecDepth.macroComponents`, `mesoComponents`, `microFeatureGroups`, `materials`, and `repetitionSystems`
+- non-empty `requiredReviewViewIds` that resolve to exact `viewEvidence[].id` values
 
-Make every feature group image-specific and testable: name its visible structure, distribution, material response, and blocking failure instead of using generic goals such as `make leaves look good`.
+The derived complexity depth supplies non-lowerable floors; assessment may raise them but synchronization never lowers an explicit stronger requirement. `repetitionSystems` must be at least `1` when `needsRepetitionSystems=true`. `materials` counts material definitions—do not call this value material layers. Describe masked zones, stacked responses, and local overrides in the material/component contracts that implement them.
+
+Use `featureReviewTargets` as the sole source for object-specific visible obligations. Every critical or `mustPass` target for the active pass needs non-empty `componentRefs`, `evidenceRefs`, and source-specific `criteria`; replace each untouched starter criterion before Blockout approval. Use dedicated `reviewViewIds` only when full-object evidence cannot judge the target reliably.
+
+The fixed definition of done is operational: all active-pass depth floors are met, every required review-view ID exists, every applicable critical or `mustPass` feature target passes, and no blocking phase validation remains. Pass rubrics and `qualityTargets` own visual deltas and failure rules; do not duplicate them inside `qualityContract`.
+
+Resolve `viewHypothesisPolicy` independently as required by `SKILL.md`: record `layoutId` and `layoutMode`, keep `allowedUse=planning-veto` and `acceptanceAuthority=false`, and when skipped require `skipAssessment.objectIsSimple=true`, bilateral/radial/axial symmetry, confidence `>=0.8`, `evidenceRefs`, and a reason.
 
 ## Strict Quality Gate
 
@@ -106,9 +107,9 @@ python3 ../../scripts/sculpt.py validate spec.json --for-pass <current-pass> --s
 If strict validation fails:
 
 - refine `preSpecAssessment` if complexity was underestimated
-- refine `qualityContract` if definition of done is too generic
-- add missing components, material layers, repetition systems, evidence refs, or local features
-- only lower the quality bar if the user explicitly accepts a simpler approximation
+- raise `qualityContract` floors or add exact review-view evidence when the assessment requires more proof
+- replace generic `featureReviewTargets` and add missing components, materials, repetition systems, evidence refs, or local features
+- do not lower a derived floor; represent an explicitly accepted simplification in the source/reference preparation contract
 
 The gate should block code generation when the spec could describe many different objects instead of the provided reference.
 

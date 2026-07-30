@@ -30,6 +30,10 @@ from sculpt_geometry import (
 )
 from sculpt_capabilities import capability_report
 from sculpt_perception import perceptual_context
+from visual_feature_gate import (
+    feature_target_is_generic,
+    required_feature_targets_for_pass,
+)
 
 
 ATTACHMENT_ROLES = {
@@ -185,10 +189,18 @@ def material_gaps(
     gaps: list[str] = []
     contract = spec.get("qualityContract")
     minimums = contract.get("minimumSpecDepth") if isinstance(contract, dict) else {}
-    minimum_materials = minimums.get("materialLayers") if isinstance(minimums, dict) else None
-    if isinstance(minimum_materials, int) and len(materials) < minimum_materials:
+    minimum_materials = minimums.get("materials") if isinstance(minimums, dict) else None
+    if (
+        not isinstance(minimum_materials, int)
+        or isinstance(minimum_materials, bool)
+        or minimum_materials < 0
+    ):
         gaps.append(
-            f"materialLayers is below the selected complexity depth ({len(materials)} < {minimum_materials})"
+            "qualityContract.minimumSpecDepth.materials must be a non-negative integer"
+        )
+    elif len(materials) < minimum_materials:
+        gaps.append(
+            f"materials is below the selected complexity depth ({len(materials)} < {minimum_materials})"
         )
     hero_ids = _hero_material_ids(spec, materials)
     for material in materials:
@@ -460,7 +472,103 @@ def pre_spec_gaps(spec: dict[str, Any]) -> list[str]:
     return gaps
 
 
-def spec_depth_gaps(spec: dict[str, Any], include_micro: bool) -> list[str]:
+def quality_contract_view_gaps(spec: dict[str, Any]) -> list[str]:
+    contract = spec.get("qualityContract")
+    if not isinstance(contract, dict):
+        return ["qualityContract is required"]
+    required = contract.get("requiredReviewViewIds")
+    if not isinstance(required, list) or not required:
+        return ["qualityContract.requiredReviewViewIds must be a non-empty array"]
+    if not all(isinstance(item, str) and item.strip() for item in required):
+        return ["qualityContract.requiredReviewViewIds must contain non-empty strings"]
+    if len(set(required)) != len(required):
+        return ["qualityContract.requiredReviewViewIds contains duplicates"]
+    known = {
+        item.get("id")
+        for item in spec.get("viewEvidence", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    missing = sorted(set(required) - known)
+    return (
+        [
+            "qualityContract.requiredReviewViewIds references missing viewEvidence: "
+            + ", ".join(missing)
+        ]
+        if missing
+        else []
+    )
+
+
+def quality_contract_shape_gaps(spec: dict[str, Any]) -> list[str]:
+    contract = spec.get("qualityContract")
+    if not isinstance(contract, dict):
+        return ["qualityContract is required"]
+    gaps: list[str] = []
+    allowed_fields = {"minimumSpecDepth", "requiredReviewViewIds"}
+    unknown_fields = sorted(set(contract) - allowed_fields)
+    if unknown_fields:
+        gaps.append(
+            "qualityContract has unsupported fields: " + ", ".join(unknown_fields)
+        )
+    minimums = contract.get("minimumSpecDepth")
+    if not isinstance(minimums, dict):
+        return [*gaps, "qualityContract.minimumSpecDepth is required"]
+    required_fields = (
+        "macroComponents",
+        "mesoComponents",
+        "microFeatureGroups",
+        "materials",
+        "repetitionSystems",
+    )
+    unknown_minimums = sorted(set(minimums) - set(required_fields))
+    if unknown_minimums:
+        gaps.append(
+            "qualityContract.minimumSpecDepth has unsupported fields: "
+            + ", ".join(unknown_minimums)
+        )
+    for field in required_fields:
+        value = minimums.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            gaps.append(
+                f"qualityContract.minimumSpecDepth.{field} must be a non-negative integer"
+            )
+    return gaps
+
+
+def feature_contract_gaps(spec: dict[str, Any], pass_id: str) -> list[str]:
+    canonical = (
+        "form"
+        if pass_id in {"structure", "structural-pass", "form-refinement"}
+        else "lookdev"
+        if pass_id in {"material-pass", "surface-pass", "lighting-pass"}
+        else pass_id
+    )
+    targets = required_feature_targets_for_pass(spec, canonical)
+    if not targets:
+        return [
+            f"featureReviewTargets needs at least one critical or mustPass target for {canonical!r}"
+        ]
+    gaps: list[str] = []
+    for target in targets:
+        target_id = str(target.get("id") or "(unnamed)")
+        for field in ("passIds", "componentRefs", "evidenceRefs", "criteria"):
+            value = target.get(field)
+            if not isinstance(value, list) or not any(
+                isinstance(item, str) and item.strip() for item in value
+            ):
+                gaps.append(
+                    f"required featureReviewTarget {target_id!r} needs non-empty {field}"
+                )
+        if feature_target_is_generic(target):
+            gaps.append(
+                f"replace generic starter featureReviewTarget {target_id!r} with source-specific evidence and criteria"
+            )
+    return gaps
+
+
+def spec_depth_gaps(
+    spec: dict[str, Any], fields: tuple[str, ...]
+) -> list[str]:
     contract = spec.get("qualityContract")
     minimums = contract.get("minimumSpecDepth") if isinstance(contract, dict) else None
     if not isinstance(minimums, dict):
@@ -474,15 +582,22 @@ def spec_depth_gaps(spec: dict[str, Any], include_micro: bool) -> list[str]:
         "macroComponents": sum(item.get("level") == "macro" for item in components),
         "mesoComponents": sum(item.get("level") == "meso" for item in components),
         "microFeatureGroups": detail_feature_count(spec),
+        "repetitionSystems": len(
+            [item for item in spec.get("repetitionSystems", []) if isinstance(item, dict)]
+        ),
     }
-    fields = ("macroComponents", "mesoComponents")
-    if include_micro:
-        fields += ("microFeatureGroups",)
-    return [
-        f"{field} is below the selected complexity depth ({actual[field]} < {minimums[field]})"
-        for field in fields
-        if isinstance(minimums.get(field), int) and actual[field] < minimums[field]
-    ]
+    gaps: list[str] = []
+    for field in fields:
+        required = minimums.get(field)
+        if not isinstance(required, int) or isinstance(required, bool) or required < 0:
+            gaps.append(
+                f"qualityContract.minimumSpecDepth.{field} must be a non-negative integer"
+            )
+        elif actual[field] < required:
+            gaps.append(
+                f"{field} is below the selected complexity depth ({actual[field]} < {required})"
+            )
+    return gaps
 
 
 def detail_decomposition_gaps(
@@ -533,21 +648,38 @@ def pass_specific_evidence(pass_id: str) -> list[str]:
 
 
 def pass_specific_gaps(spec: dict[str, Any], pass_id: str) -> list[str]:
-    gaps: list[str] = []
+    gaps = quality_contract_shape_gaps(spec)
     if pass_id == "blockout":
         gaps.extend(pre_spec_gaps(spec))
         gaps.extend(view_hypothesis_decision_gaps(spec))
+        gaps.extend(quality_contract_view_gaps(spec))
+        gaps.extend(feature_contract_gaps(spec, pass_id))
+        gaps.extend(spec_depth_gaps(spec, ("macroComponents",)))
     if pass_id in {"structure", "form", "structural-pass", "form-refinement"}:
         gaps.extend(attachment_gaps(spec))
         gaps.extend(detail_decomposition_gaps(spec, include_all_components=True))
+        gaps.extend(quality_contract_view_gaps(spec))
+        gaps.extend(feature_contract_gaps(spec, pass_id))
         if pass_id in {"form", "form-refinement"}:
             gaps.extend(view_hypothesis_decision_gaps(spec))
         gaps.extend(
             spec_depth_gaps(
                 spec,
-                include_micro=pass_id in {"form", "form-refinement"},
+                (
+                    "macroComponents",
+                    "mesoComponents",
+                    *(
+                        ("microFeatureGroups",)
+                        if pass_id in {"form", "form-refinement"}
+                        else ()
+                    ),
+                    "repetitionSystems",
+                ),
             )
         )
+    if pass_id in {"lookdev", "material-pass", "surface-pass", "lighting-pass"}:
+        gaps.extend(quality_contract_view_gaps(spec))
+        gaps.extend(feature_contract_gaps(spec, pass_id))
     if pass_id in {"lookdev", "material-pass", "surface-pass"}:
         gaps.extend(material_gaps(spec, require_surface_descriptor=True))
     if pass_id in {"lookdev", "surface-pass"}:

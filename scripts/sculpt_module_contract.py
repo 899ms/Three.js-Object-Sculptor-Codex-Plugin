@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from visual_feature_gate import required_feature_targets
+
 
 MANIFEST_SCHEMA_VERSION = "4.0"
 MODULE_SCHEMA_VERSION = "4.0-module"
@@ -106,9 +108,17 @@ def manifest_errors(
                 errors.append(
                     f"manifest globalSpec.{field} must stay empty; visible payload belongs to visual modules"
                 )
-    quality_contract = global_spec.get("qualityContract") if isinstance(global_spec, dict) else None
-    feature_groups = quality_contract.get("featureGroups") if isinstance(quality_contract, dict) else []
-    known_feature_groups = ids(feature_groups)
+    feature_targets = (
+        global_spec.get("featureReviewTargets", [])
+        if isinstance(global_spec, dict)
+        else []
+    )
+    known_feature_groups = ids(feature_targets)
+    required_targets = {
+        item.get("id"): item
+        for item in required_feature_targets(global_spec)
+        if isinstance(item.get("id"), str)
+    } if isinstance(global_spec, dict) else {}
     coverage_contract = manifest.get("coverageContract")
     assembly_feature_groups: list[str] = []
     if coverage_contract is not None and not isinstance(coverage_contract, dict):
@@ -129,16 +139,8 @@ def manifest_errors(
                     "manifest assembly coverage contains unknown feature groups: "
                     + ", ".join(unknown_assembly_groups)
                 )
-            feature_targets = {
-                item.get("id"): item
-                for item in global_spec.get("featureReviewTargets", [])
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
-            } if isinstance(global_spec, dict) else {}
             for feature_id in assembly_feature_groups:
-                target = feature_targets.get(feature_id)
-                if not isinstance(target, dict) or not (
-                    target.get("tier") == "critical" or target.get("mustPass") is True
-                ):
+                if feature_id not in required_targets:
                     errors.append(
                         f"assembly feature group {feature_id!r} needs a matching critical global featureReviewTarget"
                     )

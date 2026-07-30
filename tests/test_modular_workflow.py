@@ -179,6 +179,43 @@ def fill_global_contract(manifest: dict) -> None:
         "environment fill",
         "ACES tone mapping and contact shadow",
     ]
+    for target in spec["featureReviewTargets"]:
+        target["criteria"] = [
+            f"Match the observed Modular Prop {target['name'].lower()}."
+        ]
+
+
+def add_required_global_feature_target(manifest: dict) -> None:
+    global_spec = manifest["globalSpec"]
+    global_spec["viewEvidence"].append(
+        {
+            "id": "reference",
+            "view": "hero-detail",
+            "imageRegion": {
+                "x": 0.2,
+                "y": 0.2,
+                "width": 0.4,
+                "height": 0.4,
+                "units": "normalized",
+            },
+            "observations": ["The hero detail is visible and reference-specific."],
+            "confidence": 0.9,
+        }
+    )
+    global_spec["featureReviewTargets"].append(
+        {
+            "id": "hero-detail",
+            "name": "Hero detail",
+            "tier": "critical",
+            "passIds": ["form"],
+            "minimumScore": 0.8,
+            "mustPass": True,
+            "componentRefs": ["root"],
+            "evidenceRefs": ["full-object"],
+            "reviewViewIds": ["reference"],
+            "criteria": ["Preserve the observed hero detail shape and placement."],
+        }
+    )
 
 
 class ModularWorkflowTests(unittest.TestCase):
@@ -4495,16 +4532,7 @@ class ModularWorkflowTests(unittest.TestCase):
 
     def test_assembly_requires_declared_coverage_and_full_strict_spec(self) -> None:
         manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        manifest["globalSpec"]["qualityContract"]["featureGroups"].append(
-            {
-                "id": "hero-detail",
-                "name": "Hero detail",
-                "required": True,
-                "qualityCriteria": ["The hero detail is visible and reference-specific."],
-                "evidenceRefs": ["reference"],
-                "failureModes": ["The detail is omitted or generic."],
-            }
-        )
+        add_required_global_feature_target(manifest)
         write_spec_atomic(self.manifest_path, manifest)
         self.add_visual_foundation(covers=[])
         implementation = self.make_implementation()
@@ -4537,16 +4565,7 @@ class ModularWorkflowTests(unittest.TestCase):
 
     def test_claimed_feature_coverage_needs_visible_independent_review(self) -> None:
         manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        manifest["globalSpec"]["qualityContract"]["featureGroups"].append(
-            {
-                "id": "hero-detail",
-                "name": "Hero detail",
-                "required": True,
-                "qualityCriteria": ["The hero detail is visible and reference-specific."],
-                "evidenceRefs": ["reference"],
-                "failureModes": ["The detail is omitted or generic."],
-            }
-        )
+        add_required_global_feature_target(manifest)
         write_spec_atomic(self.manifest_path, manifest)
         self.add_visual_foundation(covers=["hero-detail"])
         implementation = self.make_implementation()

@@ -284,7 +284,7 @@ def main(argv: list[str]) -> int:
         "--covers",
         action="append",
         default=[],
-        help="Global qualityContract.featureGroups id owned by this module (repeatable)",
+        help="Global featureReviewTargets id owned by this module (repeatable)",
     )
     add.add_argument("--gate-type", choices=sorted(GATE_TYPES), default="visual")
     add.add_argument("--template", choices=("empty", "foundation"), default="empty")

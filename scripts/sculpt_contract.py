@@ -15,7 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from visual_feature_gate import feature_gate_failures
+from visual_feature_gate import (
+    feature_gate_failures,
+    feature_targets_for_pass,
+    required_feature_targets_for_pass,
+)
 from sculpt_perception import perceptual_review_failures
 
 
@@ -2326,32 +2330,36 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
             if pass_id == "blockout"
             else ("macroComponents", "mesoComponents", "microFeatureGroups", "repetitionSystems")
             if pass_id in {"structure", "form", "structural-pass", "form-refinement"}
-            else ("materialLayers", "reviewViewpoints")
+            else ("materials",)
             if pass_id in {"lookdev", "material-pass", "surface-pass", "lighting-pass"}
             else ()
         )
-        feature_groups = quality_contract.get("featureGroups")
-        feature_groups = feature_groups if isinstance(feature_groups, list) else []
-        if pass_id in {"blockout", "structure", "form", "structural-pass", "form-refinement"}:
-            feature_groups = [
-                copy.deepcopy(item)
-                for item in feature_groups
-                if isinstance(item, Mapping)
-                and item.get("id") in {"overall-silhouette", "primary-structure"}
-            ]
-        else:
-            feature_groups = [
-                copy.deepcopy(item) for item in feature_groups if isinstance(item, Mapping)
-            ]
         payload["qualityContract"] = {
-            "qualityBar": quality_contract.get("qualityBar"),
-            "qualityProfile": quality_contract.get("qualityProfile"),
             "minimumSpecDepth": {
                 key: copy.deepcopy(minimum_depth.get(key))
                 for key in depth_fields
                 if key in minimum_depth
             },
-            "featureGroups": feature_groups,
+            "requiredReviewViewIds": copy.deepcopy(
+                quality_contract.get("requiredReviewViewIds", [])
+            ),
+            "unsupportedFields": {
+                key: copy.deepcopy(value)
+                for key, value in quality_contract.items()
+                if key not in {"minimumSpecDepth", "requiredReviewViewIds"}
+            },
+            "unsupportedMinimumSpecDepthFields": {
+                key: copy.deepcopy(value)
+                for key, value in minimum_depth.items()
+                if key
+                not in {
+                    "macroComponents",
+                    "mesoComponents",
+                    "microFeatureGroups",
+                    "materials",
+                    "repetitionSystems",
+                }
+            },
         }
     assessment = spec.get("preSpecAssessment")
     if isinstance(assessment, Mapping):
@@ -2415,12 +2423,21 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
         if isinstance(spec.get("selfCorrectLoop"), dict)
         else {}
     )
+    target_pass_id = (
+        "form"
+        if pass_id in {"structure", "structural-pass", "form-refinement"}
+        else "lookdev"
+        if pass_id in {"material-pass", "surface-pass", "lighting-pass"}
+        else "interaction"
+        if pass_id in RUNTIME_PASS_IDS
+        else pass_id
+    )
     payload["featureReviewTargets"] = [
         target
         for target in spec.get("featureReviewTargets", [])
         if isinstance(target, dict)
         and isinstance(target.get("passIds"), list)
-        and pass_id in target["passIds"]
+        and target_pass_id in target["passIds"]
     ]
 
     components = [item for item in spec.get("componentTree", []) if isinstance(item, dict)]
@@ -3176,6 +3193,8 @@ def phase_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, An
         for field in stable_fields
         if field in spec
     }
+    if isinstance(spec.get("qualityContract"), Mapping):
+        projection["qualityContract"] = copy.deepcopy(spec["qualityContract"])
     components = [
         item
         for item in spec.get("componentTree", [])
@@ -3203,6 +3222,9 @@ def phase_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, An
                 "complexityTier": (
                     complexity.get("tier") if isinstance(complexity, Mapping) else "moderate"
                 ),
+                "specDepthDecision": copy.deepcopy(
+                    assessment.get("specDepthDecision", {})
+                ),
             }
         allowed = {
             "id", "name", "componentType", "level", "role", "parent",
@@ -3217,6 +3239,9 @@ def phase_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, An
         ]
         projection["viewHypothesisPolicy"] = copy.deepcopy(
             spec.get("viewHypothesisPolicy", {})
+        )
+        projection["featureReviewTargets"] = copy.deepcopy(
+            feature_targets_for_pass(dict(spec), "blockout")
         )
         projection["qualityTargets"] = phase_quality_targets(spec, selected)
     elif selected in {"form", "structure", "structural-pass", "form-refinement"}:
@@ -3236,7 +3261,9 @@ def phase_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, An
                     spec.get("detailDecompositionContract", {})
                 ),
                 "repetitionSystems": copy.deepcopy(spec.get("repetitionSystems", [])),
-                "featureReviewTargets": copy.deepcopy(spec.get("featureReviewTargets", [])),
+                "featureReviewTargets": copy.deepcopy(
+                    feature_targets_for_pass(dict(spec), "form")
+                ),
                 "viewHypothesisPolicy": copy.deepcopy(spec.get("viewHypothesisPolicy", {})),
                 "qualityTargets": phase_quality_targets(spec, selected),
             }
@@ -3255,6 +3282,9 @@ def phase_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, An
                 "materials": copy.deepcopy(spec.get("materials", [])),
                 "lookDevTargets": copy.deepcopy(spec.get("lookDevTargets", {})),
                 "lightingFromPhoto": copy.deepcopy(spec.get("lightingFromPhoto", [])),
+                "featureReviewTargets": copy.deepcopy(
+                    feature_targets_for_pass(dict(spec), "lookdev")
+                ),
                 "qualityTargets": phase_quality_targets(spec, selected),
             }
         )
@@ -3271,6 +3301,9 @@ def phase_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[str, An
                 ],
                 "interactionContract": copy.deepcopy(spec.get("interactionContract", {})),
                 "actionReadiness": copy.deepcopy(spec.get("actionReadiness", {})),
+                "featureReviewTargets": copy.deepcopy(
+                    feature_targets_for_pass(dict(spec), "interaction")
+                ),
                 "qualityTargets": phase_quality_targets(spec, selected),
             }
         )
@@ -3320,6 +3353,20 @@ def phase_work_packet(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
         "macroComponents": sum(item.get("level", "macro") == "macro" for item in components),
         "mesoComponents": sum(item.get("level") == "meso" for item in components),
         "microFeatureGroups": detail_feature_count(spec),
+        "materials": len(
+            [
+                item
+                for item in spec.get("materials", [])
+                if isinstance(item, Mapping)
+            ]
+        ),
+        "repetitionSystems": len(
+            [
+                item
+                for item in spec.get("repetitionSystems", [])
+                if isinstance(item, Mapping)
+            ]
+        ),
     }
     execution = (
         spec.get("phaseExecutionContract")
@@ -3378,9 +3425,18 @@ def phase_work_packet(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
         visual_scout["activePhaseInput"] = {
             "phaseId": canonical_phase,
             "phaseRubric": copy.deepcopy(active_rubric),
+            "qualityContract": copy.deepcopy(spec.get("qualityContract", {})),
+            "requiredFeatureTargets": copy.deepcopy(
+                required_feature_targets_for_pass(spec, canonical_phase)
+            ),
             "inputRule": (
                 "Pass only the allowed images (including previousRender when a prior "
-                "checkpoint exists), this phaseId, and this phaseRubric to the blind scout."
+                "checkpoint exists), this phaseId, phaseRubric, qualityContract, and "
+                "requiredFeatureTargets to the blind scout."
+            ),
+            "approvalRule": (
+                "Approve only when every required feature target relevant to this phase "
+                "satisfies its source-specific criteria and no contract-blocking defect is visible."
             ),
         }
     return {
@@ -4319,26 +4375,36 @@ def sync_pipeline(spec: dict[str, Any]) -> dict[str, Any]:
 
     quality_contract = spec.get("qualityContract")
     if isinstance(quality_contract, dict):
-        quality_bar = quality_contract.get("qualityBar")
-        if (
-            not isinstance(quality_bar, str)
-            or quality_bar not in TIER_RANKS
-            or TIER_RANKS[quality_bar] < TIER_RANKS[effective_tier]
-        ):
-            quality_contract["qualityBar"] = effective_tier
         min_depth = quality_contract.get("minimumSpecDepth")
         if isinstance(min_depth, dict):
             for field, key in (
                 ("macroComponents", "macroLayers"),
                 ("mesoComponents", "mesoLayers"),
                 ("microFeatureGroups", "microLayers"),
-                ("materialLayers", "materials"),
+                ("materials", "materials"),
             ):
+                if field not in min_depth:
+                    continue
                 current_val = min_depth.get(field)
-                if isinstance(current_val, int):
+                if isinstance(current_val, int) and not isinstance(current_val, bool):
                     min_depth[field] = max(current_val, mins[key])
-                else:
-                    min_depth[field] = mins[key]
+            repetition_floor = 1 if effective_tier in {"complex", "ultra"} else 0
+            decision = (
+                assessment.get("specDepthDecision")
+                if isinstance(assessment, dict)
+                and isinstance(assessment.get("specDepthDecision"), dict)
+                else {}
+            )
+            if decision.get("needsRepetitionSystems") is True:
+                repetition_floor = 1
+            current_repetitions = min_depth.get("repetitionSystems")
+            if isinstance(current_repetitions, int) and not isinstance(
+                current_repetitions, bool
+            ):
+                min_depth["repetitionSystems"] = max(
+                    current_repetitions,
+                    repetition_floor,
+                )
 
     view_policy = spec.get("viewHypothesisPolicy")
     if isinstance(view_policy, dict):

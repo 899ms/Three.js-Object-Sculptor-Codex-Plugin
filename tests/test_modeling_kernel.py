@@ -39,6 +39,11 @@ def _component(spec: dict[str, Any], component_id: str) -> dict[str, Any]:
 def sculpted_face_spec() -> dict[str, Any]:
     spec = special_surface_spec()
     spec["targetName"] = "Continuous Beaver Face"
+    for target in spec.get("featureReviewTargets", []):
+        if isinstance(target, dict):
+            target["criteria"] = [
+                f"Match the observed beaver-face {str(target.get('name') or target.get('id')).lower()}."
+            ]
     face = _part(
         "face-surface",
         "sculpted-surface",

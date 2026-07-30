@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from visual_feature_gate import feature_review_policy
+from visual_feature_gate import feature_review_policy, feature_targets_are_generic
 from sculpt_contract import (
     BLIND_SCOUT_ARTIFACT_VERSION,
     COMPONENT_TYPES,
@@ -157,13 +157,44 @@ PASS_WARNING_KEYWORDS = {
     "blockout": (
         "preSpecAssessment",
         "silhouette",
+        "qualityContract",
         "featureReviewTargets",
+        "reviewView",
         "assumption",
         "risk",
     ),
-    "structure": ("component", "attachment", "hierarchy", "qualityContract", "detail", "meso"),
-    "form": ("component", "attachment", "hierarchy", "qualityContract", "detail", "surfaceDetail", "micro"),
-    "lookdev": ("material", "lookDev", "lighting", "surface", "PBR", "texture"),
+    "structure": (
+        "component",
+        "attachment",
+        "hierarchy",
+        "qualityContract",
+        "featureReviewTargets",
+        "reviewView",
+        "detail",
+        "meso",
+    ),
+    "form": (
+        "component",
+        "attachment",
+        "hierarchy",
+        "qualityContract",
+        "featureReviewTargets",
+        "reviewView",
+        "detail",
+        "surfaceDetail",
+        "micro",
+    ),
+    "lookdev": (
+        "material",
+        "lookDev",
+        "lighting",
+        "surface",
+        "PBR",
+        "texture",
+        "qualityContract",
+        "featureReviewTargets",
+        "reviewView",
+    ),
     "interaction": ("action", "pivot", "socket", "collider"),
     "optimization": ("performance", "FPS", "draw", "triangle"),
 }
@@ -469,13 +500,6 @@ def validate_pre_spec_assessment(spec: dict[str, Any], errors: list[str], warnin
 
                 quality_contract = spec.get("qualityContract")
                 if isinstance(quality_contract, dict) and derived_req_depth in TIER_RANKS:
-                    quality_bar = quality_contract.get("qualityBar")
-                    if quality_bar in TIER_RANKS and (
-                        TIER_RANKS[quality_bar] < TIER_RANKS[derived_req_depth]
-                    ):
-                        errors.append(
-                            f"qualityContract.qualityBar {quality_bar!r} is lower than derived required depth {derived_req_depth!r}"
-                        )
                     min_depth = quality_contract.get("minimumSpecDepth")
                     if isinstance(min_depth, dict):
                         mins = complexity_minimums(derived_req_depth)
@@ -483,11 +507,27 @@ def validate_pre_spec_assessment(spec: dict[str, Any], errors: list[str], warnin
                             ("macroComponents", "macroLayers"),
                             ("mesoComponents", "mesoLayers"),
                             ("microFeatureGroups", "microLayers"),
-                            ("materialLayers", "materials"),
+                            ("materials", "materials"),
                         ):
                             val = min_depth.get(field)
                             if isinstance(val, int) and val < mins[key]:
                                 errors.append(f"qualityContract.minimumSpecDepth.{field} ({val}) is lower than derived minimum floor ({mins[key]}) for depth {derived_req_depth!r}")
+                        repetition_floor = (
+                            1
+                            if derived_req_depth in {"complex", "ultra"}
+                            or (
+                                isinstance(decision, dict)
+                                and decision.get("needsRepetitionSystems") is True
+                            )
+                            else 0
+                        )
+                        repetitions = min_depth.get("repetitionSystems")
+                        if isinstance(repetitions, int) and repetitions < repetition_floor:
+                            errors.append(
+                                "qualityContract.minimumSpecDepth.repetitionSystems "
+                                f"({repetitions}) is lower than derived minimum floor "
+                                f"({repetition_floor})"
+                            )
 
                 if isinstance(modifiers, dict) and modifiers.get("occlusionRisk") == 3:
                     if spec.get("suitability") == "pass":
@@ -2798,58 +2838,77 @@ def validate_quality_targets(spec: dict[str, Any], errors: list[str], warnings: 
 def validate_quality_contract(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
     contract = spec.get("qualityContract")
     if contract is None:
-        warnings.append("quality: missing qualityContract; no explicit definition of done prevents shallow specs")
+        errors.append("qualityContract is required")
         return
     if not isinstance(contract, dict):
         errors.append("qualityContract must be an object")
         return
-    quality_bar = contract.get("qualityBar")
-    if quality_bar is not None and not isinstance(quality_bar, str):
-        errors.append("qualityContract.qualityBar must be a string")
-    if quality_bar in {None, "", "unassessed"}:
-        warnings.append("quality: qualityContract.qualityBar is unassessed")
-    validate_string_array(contract.get("definitionOfDone"), "qualityContract.definitionOfDone", errors)
-    if isinstance(contract.get("definitionOfDone"), list) and not contract["definitionOfDone"]:
-        warnings.append("quality: qualityContract.definitionOfDone is empty")
+    allowed_fields = {"minimumSpecDepth", "requiredReviewViewIds"}
+    unknown_fields = sorted(set(contract) - allowed_fields)
+    if unknown_fields:
+        errors.append(
+            "qualityContract has unsupported duplicate or non-operational fields: "
+            + ", ".join(unknown_fields)
+        )
     minimums = contract.get("minimumSpecDepth")
     if not isinstance(minimums, dict):
         errors.append("qualityContract.minimumSpecDepth must be an object")
     else:
-        for field in (
+        required_depth_fields = (
             "macroComponents",
             "mesoComponents",
             "microFeatureGroups",
-            "materialLayers",
+            "materials",
             "repetitionSystems",
-            "reviewViewpoints",
-        ):
-            if field in minimums:
-                validate_nonnegative_int(minimums[field], f"qualityContract.minimumSpecDepth.{field}", errors)
-    feature_groups = contract.get("featureGroups")
-    if not isinstance(feature_groups, list):
-        errors.append("qualityContract.featureGroups must be an array")
+        )
+        unknown_depth_fields = sorted(set(minimums) - set(required_depth_fields))
+        if unknown_depth_fields:
+            errors.append(
+                "qualityContract.minimumSpecDepth has unsupported fields: "
+                + ", ".join(unknown_depth_fields)
+            )
+        for field in required_depth_fields:
+            if field not in minimums:
+                errors.append(
+                    f"qualityContract.minimumSpecDepth.{field} is required"
+                )
+            else:
+                validate_nonnegative_int(
+                    minimums[field],
+                    f"qualityContract.minimumSpecDepth.{field}",
+                    errors,
+                )
+    required_views = contract.get("requiredReviewViewIds")
+    validate_string_array(
+        required_views,
+        "qualityContract.requiredReviewViewIds",
+        errors,
+    )
+    if not isinstance(required_views, list) or not required_views:
+        errors.append("qualityContract.requiredReviewViewIds must be a non-empty array")
     else:
-        if len(feature_groups) < 3:
-            warnings.append("quality: qualityContract.featureGroups has fewer than 3 groups; spec may miss important visual layers")
-        for index, group in enumerate(feature_groups):
-            if not isinstance(group, dict):
-                errors.append(f"qualityContract.featureGroups[{index}] must be an object")
-                continue
-            for field in ("id", "name"):
-                value = group.get(field)
-                if not isinstance(value, str) or not value.strip():
-                    errors.append(f"qualityContract.featureGroups[{index}].{field} is required")
-            if "required" in group and not isinstance(group["required"], bool):
-                errors.append(f"qualityContract.featureGroups[{index}].required must be boolean")
-            validate_string_array(group.get("qualityCriteria"), f"qualityContract.featureGroups[{index}].qualityCriteria", errors)
-            validate_string_array(group.get("evidenceRefs"), f"qualityContract.featureGroups[{index}].evidenceRefs", errors)
-            validate_string_array(group.get("failureModes"), f"qualityContract.featureGroups[{index}].failureModes", errors)
-            if group.get("required") is True and not group.get("qualityCriteria"):
-                warnings.append(f"quality: required feature group {group.get('id', index)!r} has no qualityCriteria")
-    for field in ("visualDeltaChecks", "antiShallowSpecRules"):
-        validate_string_array(contract.get(field), f"qualityContract.{field}", errors)
-        if isinstance(contract.get(field), list) and not contract[field]:
-            warnings.append(f"quality: qualityContract.{field} is empty")
+        if not all(
+            isinstance(item, str) and item.strip() for item in required_views
+        ):
+            errors.append(
+                "qualityContract.requiredReviewViewIds must contain non-empty strings"
+            )
+        normalized = [
+            item for item in required_views if isinstance(item, str) and item.strip()
+        ]
+        if len(set(normalized)) != len(normalized):
+            errors.append("qualityContract.requiredReviewViewIds contains duplicates")
+        evidence_ids = {
+            item.get("id")
+            for item in spec.get("viewEvidence", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        missing = sorted(set(normalized) - evidence_ids)
+        if missing:
+            errors.append(
+                "qualityContract.requiredReviewViewIds references missing viewEvidence: "
+                + ", ".join(missing)
+            )
 
 
 def validate_phase_execution_contract(
@@ -3271,7 +3330,14 @@ def validate_phase_execution_contract(
             )
 
 
-def validate_quality_depth(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
+def validate_quality_depth(
+    spec: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+    for_pass: str | None = None,
+) -> None:
+    if for_pass is not None:
+        return
     contract = spec.get("qualityContract")
     if not isinstance(contract, dict) or not isinstance(contract.get("minimumSpecDepth"), dict):
         return
@@ -3285,17 +3351,15 @@ def validate_quality_depth(spec: dict[str, Any], errors: list[str], warnings: li
         "macroComponents": sum(1 for item in components if item.get("level") == "macro"),
         "mesoComponents": sum(1 for item in components if item.get("level") == "meso"),
         "microFeatureGroups": detail_feature_count(spec),
-        "materialLayers": len([item for item in spec.get("materials", []) if isinstance(item, dict)]),
+        "materials": len([item for item in spec.get("materials", []) if isinstance(item, dict)]),
         "repetitionSystems": len([item for item in spec.get("repetitionSystems", []) if isinstance(item, dict)]),
-        "reviewViewpoints": len(spec.get("qualityTargets", {}).get("reviewViewpoints", []))
-        if isinstance(spec.get("qualityTargets"), dict)
-        and isinstance(spec.get("qualityTargets", {}).get("reviewViewpoints"), list)
-        else 0,
     }
     for field, actual in level_counts.items():
         required = minimums.get(field)
         if isinstance(required, int) and actual < required:
-            warnings.append(f"quality: {field} below qualityContract minimum ({actual} < {required})")
+            warnings.append(
+                f"quality: qualityContract {field} minimum is not met ({actual} < {required})"
+            )
 
 
 def validate_action_readiness(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
@@ -3762,19 +3826,7 @@ def validate_feature_review_targets(
                     f"pass {pass_id!r} has {count} important feature targets; "
                     f"maximum is {int(important_maximum)}"
                 )
-    assessment = spec.get("preSpecAssessment")
-    complexity = (
-        assessment.get("complexity", {}).get("tier")
-        if isinstance(assessment, dict) and isinstance(assessment.get("complexity"), dict)
-        else None
-    )
-    starter_ids = {
-        "overall-silhouette",
-        "primary-structure",
-        "reference-material-system",
-        "reference-lookdev",
-    }
-    if complexity in {"moderate", "complex", "ultra", "ultra-complex"} and ids.issubset(starter_ids):
+    if feature_targets_are_generic(spec):
         warnings.append(
             "quality: replace generic starter featureReviewTargets with object-specific "
             "identity-defining semantic systems before strict validation"
@@ -4587,7 +4639,7 @@ def validate_spec(
             )
             if audit.get("maximumVisualRegression") != 0:
                 errors.append("performanceAudit.maximumVisualRegression must be 0")
-    validate_quality_depth(spec, errors, warnings)
+    validate_quality_depth(spec, errors, warnings, for_pass)
     if for_pass is not None:
         ids = canonical_pass_order(spec)
         if for_pass not in ids:

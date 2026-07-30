@@ -1764,15 +1764,10 @@ def _feature_gate_failures(
     }
     global_spec = manifest.get("globalSpec") if isinstance(manifest.get("globalSpec"), dict) else {}
     simplified = simplified_visual_gate_enabled(global_spec)
-    quality_contract = (
-        global_spec.get("qualityContract")
-        if isinstance(global_spec.get("qualityContract"), dict)
-        else {}
-    )
     group_by_id = {
-        group.get("id"): group
-        for group in quality_contract.get("featureGroups", [])
-        if isinstance(group, dict) and isinstance(group.get("id"), str)
+        target.get("id"): target
+        for target in global_spec.get("featureReviewTargets", [])
+        if isinstance(target, dict) and isinstance(target.get("id"), str)
     }
     for feature_id in entry.get("covers", []):
         group = group_by_id.get(feature_id)
@@ -1780,7 +1775,9 @@ def _feature_gate_failures(
             covered_target = dict(group)
             covered_target.setdefault("minimumScore", module.get("qualityGate", {}).get("minimumScore", 0.0))
             covered_target["requiresDedicatedEvidence"] = True
-            covered_target["reviewViewIds"] = list(group.get("evidenceRefs", []))
+            covered_target["reviewViewIds"] = list(
+                group.get("reviewViewIds") or group.get("evidenceRefs", [])
+            )
             targets[feature_id] = covered_target
 
     reviews = verdict.get("featureReviews", [])
