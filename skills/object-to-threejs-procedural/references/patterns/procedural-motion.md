@@ -19,6 +19,15 @@ component ID, behavior, pivot, normalized axis, rate or limits, source,
 confidence, evidence refs, and tested neutral/extreme states. Keep the moving
 component semantic and independently addressable.
 
+### Pivot selection
+
+- use a center pivot only when the part rotates around its center of mass;
+- use a base pivot for a rooted upright part such as a tree, sign, bottle, pole,
+  or leg;
+- use a hinge pivot for a lid, door, handle, flap, jaw, lever, or wing;
+- use a branch/root pivot for an organic appendage that bends from one end;
+- use a custom pivot only when evidence supports a mechanical joint or socket.
+
 ### Articulated digits
 
 Do not split a static hand merely to satisfy landmark semantics. When

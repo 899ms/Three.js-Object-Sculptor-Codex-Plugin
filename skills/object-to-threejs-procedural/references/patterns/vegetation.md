@@ -44,7 +44,8 @@ transmission/thickness as a bounded optical choice, not generic fake SSS.
 
 ## Interaction routing
 
-When the reference or object class strongly implies sway:
+When the reference or object class strongly implies sway, route implementation
+and shader safety to `procedural-motion.md`, then:
 
 - target exact stem/branch/leaf component IDs;
 - preserve the rooted base and weight displacement toward tips;
@@ -52,10 +53,6 @@ When the reference or object class strongly implies sway:
   in `interactionContract.motionAffordances`;
 - use object/bone transforms for small assemblies and a verified shader/TSL
   implementation only for genuinely dense repeated vegetation.
-
-Never mutate vertices after the projection stage of a vertex shader. Raw shader
-recipes require renderer/version compile proof and are never copied directly
-into the JSON spec.
 
 ## Visual vetoes
 

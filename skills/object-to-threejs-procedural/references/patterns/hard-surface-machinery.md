@@ -38,18 +38,11 @@ Use `materialProfile`, `baseColor`, layered `roughness`, `metalness`,
 `anisotropy`, `anisotropyRotation`, `clearcoat`, `clearcoatRoughness`,
 `normal`, `wear`, `dirt`, and `localOverrides`. Environment lighting is strongly
 recommended for reflective materials but cannot compensate for wrong geometry.
-For generated review scenes, install the exported look-dev environment helper;
-it accepts an equirectangular source and otherwise creates a bounded procedural
-studio PMREM. Dispose the returned cleanup function when the scene is removed.
+Use `../material-lighting-realism.md` for the shared environment helper and
+texture-projection contract.
 Use anisotropy only when the active generator/material profile actually consumes
 it; otherwise encode the observed brushing through directional roughness/normal
 fields rather than inventing an unsupported shader path.
-
-`textureProjection.mode` values `planar`, `cylindrical`, and `spherical` are
-emitted onto generated component and embedded-feature geometry. `uv` preserves
-authored UVs. Set `textureProjection.axis` to `x`, `y`, or `z` when the
-projection axis is observable; otherwise the generator infers it from effective
-scaled dimensions. Do not describe these modes as triplanar blending.
 
 ## Interaction routing
 

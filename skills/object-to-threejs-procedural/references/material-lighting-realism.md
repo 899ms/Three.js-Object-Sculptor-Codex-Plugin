@@ -29,7 +29,7 @@ Before accepting `lookdev`, the spec must contain:
 - independent PBR channels: albedo, roughness, height/normal, and AO must be generated or authored separately; never reuse albedo as a roughness, height, normal, or AO map.
 - reference-derived PBR extraction: for `reference-fidelity`, crop one material region and run `python3 ../../scripts/sculpt.py pbr` with `--material-crop-confirmed` and an explicit `--url-prefix`. Never patch from a full UI/demo screenshot. Below the configured suitability target, stop or request better material evidence.
 - scale hierarchy: close-up materials must describe macro, meso, and micro surface-frequency bands with object-relative frequency and amplitude.
-- projection/UV intent: state UV, triplanar, cylindrical, planar, or another projection strategy, plus repeat/texel-density intent so detail does not stretch across scaled components.
+- projection/UV intent: use emitted `textureProjection.mode` values `uv`, `planar`, `cylindrical`, or `spherical`; `uv` preserves authored UVs. Set `axis` to `x`, `y`, or `z` when observable, otherwise let the generator infer it from effective scaled dimensions. State repeat/texel-density intent, and do not describe these modes as triplanar blending.
 - quality-first resolution: use at least 1024px procedural maps for important close-up materials and prefer 2048px when reference fidelity is the priority.
 - runtime/offline split: author important 2048px reference maps offline with material masks and tile-safe borders; keep runtime procedural fallback bounded so map generation does not stall the browser.
 - geometric relief: if a ridge, crack, seam, chip, bark plate, fold, or dent affects the visible silhouette, represent it with geometry or displacement-capable topology instead of texture alone.
@@ -69,6 +69,10 @@ The same `lookdev` review must also contain:
 - exposure and tone-mapping intent
 - background color or gradient
 - contact shadow / ground shadow behavior
+
+For generated review scenes, install the exported look-dev environment helper.
+It accepts an equirectangular source and otherwise creates a bounded procedural
+studio PMREM. Dispose its cleanup function when the scene is removed.
 
 Separate object material from photo lighting: a material should still read correctly in neutral turntable lighting, then a reference-matching lighting setup can be added.
 

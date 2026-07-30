@@ -12,6 +12,9 @@ Every active affordance declares `id`, `componentId`, `behavior`, numeric `pivot
 
 Typical strong priors include a helicopter main/tail rotor, fan blades, wheels, and clock hands. Doors, hatches, retractable landing gear, deformation, detachment, physics, and destruction require direct evidence or explicit user intent.
 
+Use `patterns/procedural-motion.md` for pivot selection, implementation choice,
+and transformed-state review once motion is active.
+
 ## Hierarchy Pattern
 
 Use this structure:
@@ -22,14 +25,6 @@ Use this structure:
 - `socket Object3D`: child of the relevant pivot; marks attachment, effect, grip, or joint positions.
 - collider metadata/proxy: simplified runtime shape, not necessarily a visible mesh.
 - destruction group metadata: semantic grouping for detach/break logic.
-
-## Pivot Rules
-
-- Use center pivots only when the object rotates around its center of mass.
-- Use base pivots for trees, signs, bottles, poles, legs, and upright props.
-- Use hinge pivots for lids, doors, handles, flaps, jaws, levers, and wings.
-- Use branch/root pivots for organic appendages that bend from one end.
-- Use custom pivots when the reference clearly implies a mechanical joint or socket.
 
 ## Collider Rules
 
