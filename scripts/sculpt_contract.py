@@ -2120,7 +2120,28 @@ def generation_spec_projection(spec: Mapping[str, Any], pass_id: str) -> dict[st
         result["preSpecAssessment"] = {
             "specializedRegions": copy.deepcopy(
                 assessment.get("specializedRegions", {})
-            )
+            ),
+            **(
+                {
+                    "visualStyle": {
+                        "status": assessment["visualStyle"].get("status"),
+                        "axes": {
+                            "shadingTreatment": {
+                                "primary": (
+                                    assessment["visualStyle"]["axes"].get("shadingTreatment", {})
+                                ).get("primary")
+                            }
+                        },
+                    }
+                }
+                if canonical in {"lookdev", "interaction"}
+                and isinstance(assessment.get("visualStyle"), Mapping)
+                and isinstance(assessment["visualStyle"].get("axes"), Mapping)
+                and isinstance(
+                    assessment["visualStyle"]["axes"].get("shadingTreatment"), Mapping
+                )
+                else {}
+            ),
         }
     return result
 

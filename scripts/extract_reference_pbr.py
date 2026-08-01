@@ -3,7 +3,8 @@
 
 This is not photogrammetry and it does not claim exact inverse rendering from a
 single image. It extracts pixel evidence that is useful for procedural PBR:
-albedo palette, de-lit albedo, roughness estimate, height, normal, and AO maps.
+albedo palette, de-lit albedo, roughness estimates, and only evidence-eligible
+height, normal, and AO maps.
 An unconfirmed crop never patches a spec. Low extraction suitability also blocks
 patching unless ``--allow-low-confidence`` is explicit. The legacy ``confidence``
 field is retained for schema compatibility.
@@ -313,7 +314,8 @@ def make_maps(
     meso_frequency = blur_scalar(lumas, size, meso_radius)
     p05 = percentile(masked_lumas, 0.05, 0.2)
     p95 = percentile(masked_lumas, 0.95, 0.8)
-    value_range = max(0.08, p95 - p05)
+    raw_value_range = max(0.0, p95 - p05)
+    value_range = max(0.08, raw_value_range)
     micro_detail = [
         clamp((luma - meso + value_range * 0.5) / value_range, 0.0, 1.0)
         for luma, meso in zip(lumas, meso_frequency)
@@ -403,6 +405,7 @@ def make_maps(
         },
         {
             "valueRange": round(value_range, 4),
+            "rawValueRange": round(raw_value_range, 4),
             "heightP90Gradient": round(grad_p90, 5),
             "roughnessBase": round(percentile(roughness_values, 0.5, 0.72), 3),
             "roughnessVariation": round(max(0.05, percentile(roughness_values, 0.85, 0.82) - percentile(roughness_values, 0.15, 0.62)), 3),
@@ -412,6 +415,139 @@ def make_maps(
             "tileEdgeBlendFraction": 0.08,
         },
     )
+
+
+def flat_pattern_diagnostics(
+    pixels: list[tuple[int, int, int]],
+    mask: list[bool],
+    size: int,
+) -> dict[str, Any]:
+    """Detect repeated, nearly discrete color regions that are not relief evidence."""
+    kept_indices = [index for index, keep in enumerate(mask) if keep]
+    if not kept_indices:
+        kept_indices = list(range(len(pixels)))
+    step = max(1, len(kept_indices) // 12000)
+    sampled_indices = kept_indices[::step][:12000]
+
+    def quantized(rgb: tuple[int, int, int]) -> tuple[int, int, int]:
+        return tuple(min(255, (channel // 12) * 12) for channel in rgb)  # type: ignore[return-value]
+
+    counts = Counter(quantized(pixels[index]) for index in sampled_indices)
+    total = max(1, sum(counts.values()))
+    dominant = counts.most_common(4)
+    top_two_coverage = sum(count for _, count in dominant[:2]) / total
+    top_four_coverage = sum(count for _, count in dominant) / total
+    significant = [(color, count) for color, count in counts.items() if count / total >= 0.02]
+    second_share = dominant[1][1] / total if len(dominant) > 1 else 0.0
+    dominant_contrast = (
+        color_distance(dominant[0][0], dominant[1][0]) / math.sqrt(3 * 255 * 255)
+        if len(dominant) > 1
+        else 0.0
+    )
+
+    transitions = 0
+    neighbor_pairs = 0
+    for y in range(size):
+        for x in range(size):
+            index = y * size + x
+            if index >= len(mask) or not mask[index]:
+                continue
+            for neighbor in ((index + 1) if x + 1 < size else -1, (index + size) if y + 1 < size else -1):
+                if neighbor < 0 or neighbor >= len(mask) or not mask[neighbor]:
+                    continue
+                neighbor_pairs += 1
+                if color_distance(pixels[index], pixels[neighbor]) >= 28.0:
+                    transitions += 1
+    transition_fraction = transitions / max(1, neighbor_pairs)
+    flat_two_color_pattern = bool(
+        2 <= len(significant) <= 6
+        and top_two_coverage >= 0.82
+        and top_four_coverage >= 0.97
+        and second_share >= 0.08
+        and dominant_contrast >= 0.16
+        and transition_fraction >= 0.01
+    )
+    return {
+        "flatTwoColorPattern": flat_two_color_pattern,
+        "quantizedColorCount": len(counts),
+        "significantColorCount": len(significant),
+        "topTwoColorCoverage": round(top_two_coverage, 4),
+        "topFourColorCoverage": round(top_four_coverage, 4),
+        "secondColorCoverage": round(second_share, 4),
+        "dominantColorContrast": round(dominant_contrast, 4),
+        "neighborTransitionFraction": round(transition_fraction, 4),
+    }
+
+
+def assess_channels(
+    confidence: float,
+    map_stats: dict[str, Any],
+    pattern: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Estimate channel support without treating color boundaries as surface relief."""
+    detail = max(0.0, float(map_stats.get("heightP90Gradient", 0.0)))
+    raw_value_range = max(0.0, float(map_stats.get("rawValueRange", 0.0)))
+    flat_two_color = pattern.get("flatTwoColorPattern") is True
+    detail_support = clamp(detail / 0.012, 0.0, 1.0)
+    relief_confidence = clamp01(confidence * (0.3 + detail_support * 0.7))
+    has_relief_evidence = bool(
+        not flat_two_color
+        and raw_value_range >= 0.025
+        and detail >= 0.002
+        and relief_confidence >= 0.45
+    )
+    roughness_confidence = clamp01(confidence * (0.72 if not flat_two_color else 0.35))
+
+    relief_reason = (
+        "discrete repeated color/value boundaries are albedo evidence, not proof of relief"
+        if flat_two_color
+        else (
+            "local value gradients provide bounded single-image relief evidence"
+            if has_relief_evidence
+            else "insufficient non-pattern value variation to infer relief safely"
+        )
+    )
+    assessments = {
+        "albedo": {
+            "confidence": round(clamp01(confidence), 3),
+            "eligible": True,
+            "reason": "source color samples provide direct albedo evidence after bounded de-lighting",
+        },
+        "roughness": {
+            "confidence": round(roughness_confidence, 3),
+            "eligible": not flat_two_color and roughness_confidence >= 0.45,
+            "reason": (
+                "flat color/value regions do not isolate roughness from albedo"
+                if flat_two_color
+                else "single-image highlight and local-gradient estimate; requires render review"
+            ),
+        },
+        "height": {
+            "confidence": round(relief_confidence, 3),
+            "eligible": has_relief_evidence,
+            "reason": relief_reason,
+        },
+        "normal": {
+            "confidence": round(relief_confidence, 3),
+            "eligible": has_relief_evidence,
+            "reason": relief_reason,
+        },
+        "ao": {
+            "confidence": round(clamp01(relief_confidence * 0.82), 3),
+            "eligible": has_relief_evidence,
+            "reason": (
+                "AO is omitted because color/value boundaries do not prove cavities"
+                if flat_two_color
+                else (
+                    "local minima in eligible relief evidence provide a bounded cavity estimate"
+                    if has_relief_evidence
+                    else "AO cannot be inferred safely without eligible relief evidence"
+                )
+            ),
+        },
+    }
+    blockers = ["flat-two-color-pattern-is-not-full-pbr-evidence"] if flat_two_color else []
+    return assessments, blockers
 
 
 def explicit_mask_from_image(
@@ -445,9 +581,21 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
     return (138, 122, 95)
 
 
-def surface_bands_from_stats(stats: dict[str, Any]) -> list[dict[str, Any]]:
+def surface_bands_from_stats(
+    stats: dict[str, Any],
+    include_relief: bool = True,
+) -> list[dict[str, Any]]:
     value_range = float(stats.get("valueRange", 0.4))
     detail = float(stats.get("heightP90Gradient", 0.02))
+    if not include_relief:
+        return [
+            {
+                "id": "macro",
+                "frequency": 2.0,
+                "amplitude": round(clamp(0.28 + value_range * 0.35, 0.22, 0.52), 3),
+                "role": "reference-derived broad albedo pattern; no relief inferred",
+            }
+        ]
     return [
         {
             "id": "macro",
@@ -482,7 +630,9 @@ def estimate_confidence(
     min_dim = min(width, height)
     resolution_score = clamp(min_dim / 1024.0, 0.35, 1.0)
     coverage = float(mask_diagnostics.get("foregroundCoverage", 1.0))
-    if 0.08 <= coverage <= 0.82:
+    if mask_diagnostics.get("source") == "confirmed-material-crop":
+        mask_score = 1.0
+    elif 0.08 <= coverage <= 0.82:
         mask_score = 1.0
     elif 0.035 <= coverage < 0.08:
         mask_score = 0.55
@@ -527,11 +677,14 @@ def material_patch(
     size: int,
     threshold: float,
     confidence: float,
+    extraction_suitability: float,
     verdict: str,
     palette: list[str],
     map_stats: dict[str, Any],
     diagnostics: dict[str, Any],
     warnings: list[str],
+    channel_assessments: dict[str, dict[str, Any]],
+    suitability_blockers: list[str],
 ) -> dict[str, Any]:
     prefix = slugify(material_id)
     maps: dict[str, dict[str, Any]] = {
@@ -540,29 +693,39 @@ def material_patch(
             "channel": channel,
             "source": "reference-pixel-extraction",
             "tileSafe": True,
+            "confidence": channel_assessments[channel]["confidence"],
+            "eligible": True,
         }
         for channel in ("albedo", "roughness", "height", "normal", "ao")
+        if channel_assessments[channel]["eligible"] is True
     }
     if url_prefix:
         for channel, entry in maps.items():
             entry["url"] = map_url(url_prefix, f"{prefix}_{channel}.png")
-    usable = confidence >= threshold
-    return {
-        "referencePbr": {
-            "version": "1.0",
-            "sourceImage": str(image.resolve()),
-            "extractor": "extract_reference_pbr.py",
-            "method": "single-image pixel evidence with broad/meso/micro de-lighting and tile-edge blending; not photogrammetry",
-            "usable": usable,
-            "verdict": verdict,
-            "confidence": confidence,
-            "extractionSuitability": confidence,
-            "targetThreshold": threshold,
-            "hardLimit": "A single image cannot uniquely recover true albedo/roughness/normal/AO; maps are reference-derived estimates.",
-            "maps": maps,
-            "diagnostics": diagnostics,
-            "warnings": warnings,
-        },
+    usable = extraction_suitability >= threshold and not suitability_blockers
+    reference_pbr = {
+        "version": "1.0",
+        "sourceImage": str(image.resolve()),
+        "extractor": "extract_reference_pbr.py",
+        "method": "single-image pixel evidence with broad/meso/micro de-lighting and tile-edge blending; not photogrammetry",
+        "usable": usable,
+        "verdict": verdict,
+        "confidence": confidence,
+        "extractionSuitability": extraction_suitability,
+        "targetThreshold": threshold,
+        "hardLimit": "A single image cannot uniquely recover true albedo/roughness/normal/AO; maps are reference-derived estimates.",
+        "maps": maps,
+        "channelAssessments": channel_assessments,
+        "availableChannels": list(maps),
+        "omittedChannels": [
+            channel for channel in ("albedo", "roughness", "height", "normal", "ao") if channel not in maps
+        ],
+        "suitabilityBlockers": suitability_blockers,
+        "diagnostics": diagnostics,
+        "warnings": warnings,
+    }
+    patch: dict[str, Any] = {
+        "referencePbr": reference_pbr,
         "textureResolution": size,
         "albedo": {
             "dominant": palette[0],
@@ -574,39 +737,26 @@ def material_patch(
             "palette": palette,
             "pattern": "reference-derived pixel palette",
             "amplitude": round(clamp(float(map_stats.get("valueRange", 0.4)) * 0.42, 0.08, 0.35), 3),
-            "heightCorrelation": 0.42,
+            "heightCorrelation": 0.42 if "height" in maps else 0.0,
         },
         "roughness": {
             "base": map_stats["roughnessBase"],
-            "variation": map_stats["roughnessVariation"],
-            "map": maps["roughness"],
-            "localResponse": "reference-derived roughness estimate; cavities and textured zones trend rougher, bright highlights trend smoother",
+            "variation": map_stats["roughnessVariation"] if "roughness" in maps else 0.0,
+            "localResponse": (
+                "reference-derived roughness estimate; cavities and textured zones trend rougher, bright highlights trend smoother"
+                if "roughness" in maps
+                else "No roughness map was emitted because the image did not separate roughness from flat color evidence."
+            ),
         },
-        "normal": {
-            "pattern": "reference-derived height-gradient normal map",
-            "strength": map_stats["normalStrength"],
-            "map": maps["normal"],
-            "heightSource": maps["height"],
-            "space": "tangent",
-        },
-        "bump": {
-            "pattern": "reference-derived height field",
-            "amplitude": round(clamp(float(map_stats.get("heightP90Gradient", 0.02)) * 0.45, 0.01, 0.08), 3),
-            "map": maps["height"],
-        },
-        "ambientOcclusion": {
-            "cavityStrength": 0.38,
-            "contactShadowBias": 0.35,
-            "map": maps["ao"],
-            "notes": "Reference-derived cavity estimate from local height minima; verify against grazing-light screenshot.",
-        },
-        "surfaceFrequencyBands": surface_bands_from_stats(map_stats),
+        "surfaceFrequencyBands": surface_bands_from_stats(map_stats, "height" in maps),
         "localOverrides": [
             {
                 "id": "reference-pbr-pixel-evidence",
                 "type": "material-map-evidence",
                 "evidenceRefs": ["full-object"],
-                "channels": ["albedo", "roughness", "height", "normal", "ambient-occlusion"],
+                "channels": [
+                    "ambient-occlusion" if channel == "ao" else channel for channel in maps
+                ],
                 "notes": "Use generated maps as material evidence, then refine after browser screenshot comparison.",
             }
         ],
@@ -616,6 +766,34 @@ def material_patch(
             "Offline map borders are blended for repeat safety; inspect for visible repetition at the target texel density.",
         ],
     }
+    if "roughness" in maps:
+        patch["roughness"]["map"] = maps["roughness"]
+    if "normal" in maps and "height" in maps:
+        patch["normal"] = {
+            "pattern": "reference-derived height-gradient normal map",
+            "strength": map_stats["normalStrength"],
+            "map": maps["normal"],
+            "heightSource": maps["height"],
+            "space": "tangent",
+        }
+    if "height" in maps:
+        patch["bump"] = {
+            "pattern": "reference-derived height field",
+            "amplitude": round(clamp(float(map_stats.get("heightP90Gradient", 0.02)) * 0.45, 0.01, 0.08), 3),
+            "map": maps["height"],
+        }
+    if "ao" in maps:
+        patch["ambientOcclusion"] = {
+            "cavityStrength": 0.38,
+            "contactShadowBias": 0.35,
+            "map": maps["ao"],
+            "notes": "Reference-derived cavity estimate from local height minima; verify against grazing-light screenshot.",
+        }
+    if suitability_blockers:
+        patch["shaderNotes"].append(
+            "Only eligible source channels were emitted; discrete color/value patterns were not converted into relief or AO."
+        )
+    return patch
 
 
 def merge_material_patch(spec: dict[str, Any], material_id: str, patch: dict[str, Any]) -> None:
@@ -676,18 +854,45 @@ def extract(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
         mask_diag["source"] = "explicit-mask"
         mask_diag["path"] = str(resolved_mask)
         mask_diag["foregroundCoverage"] = round(sum(mask) / max(1, len(mask)), 4)
+    elif args.material_crop_confirmed:
+        # A confirmed material crop is texture evidence, not an isolated object.
+        # Preserve every visible crop color instead of misclassifying a valid
+        # color region as corner background.
+        mask = [alpha > 16 for _, _, _, alpha in source_pixels]
+        mask_warnings = []
+        mask_diag["source"] = "confirmed-material-crop"
+        mask_diag["foregroundCoverage"] = round(sum(mask) / max(1, len(mask)), 4)
     bbox = mask_bbox(width, height, mask)
     sampled_pixels, sampled_mask = resample_crop(width, height, source_pixels, mask, bbox, size)
     samples = representative_samples(sampled_pixels, sampled_mask)
     palette = kmeans_palette(samples, max(2, min(6, args.palette_size)))
-    maps, map_stats = make_maps(sampled_pixels, sampled_mask, size, palette)
+    candidate_maps, map_stats = make_maps(sampled_pixels, sampled_mask, size, palette)
+    warnings = load_warnings + mask_warnings
+    pattern = flat_pattern_diagnostics(sampled_pixels, sampled_mask, size)
+    confidence, confidence_notes = estimate_confidence(
+        original_dimensions[0] if original_dimensions else width,
+        original_dimensions[1] if original_dimensions else height,
+        mask_diag,
+        map_stats,
+        warnings,
+        single_image=True,
+    )
+    channel_assessments, suitability_blockers = assess_channels(
+        confidence,
+        map_stats,
+        pattern,
+    )
+    if suitability_blockers:
+        warnings.append(
+            "flat repeated color/value evidence can supply albedo, but cannot unlock a complete inferred PBR set"
+        )
     maps = {
         channel: make_tileable_rgb(payload, size)
-        for channel, payload in maps.items()
+        for channel, payload in candidate_maps.items()
+        if channel_assessments[channel]["eligible"] is True
     }
     for channel, payload in maps.items():
         write_png_rgb(out_dir / f"{slugify(args.material_id)}_{channel}.png", size, size, payload)
-    warnings = load_warnings + mask_warnings
     diagnostics = {
         "sourceWidth": original_dimensions[0] if original_dimensions else width,
         "sourceHeight": original_dimensions[1] if original_dimensions else height,
@@ -702,16 +907,10 @@ def extract(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
         },
         "mask": mask_diag,
         "mapStats": map_stats,
+        "patternEvidence": pattern,
+        "channelAssessments": channel_assessments,
         "palette": palette,
     }
-    confidence, confidence_notes = estimate_confidence(
-        original_dimensions[0] if original_dimensions else width,
-        original_dimensions[1] if original_dimensions else height,
-        mask_diag,
-        map_stats,
-        warnings,
-        single_image=True,
-    )
     if args.multi_view_reference:
         confidence_notes.append(
             "--multi-view-reference is deprecated: one supplied image cannot prove multi-view material evidence"
@@ -722,7 +921,16 @@ def extract(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
         )
     warnings.extend(confidence_notes)
     threshold = clamp01(args.target_threshold)
-    verdict = "pass" if confidence >= threshold else ("conditional" if confidence >= threshold - 0.12 else "reject")
+    extraction_suitability = min(confidence, 0.35) if suitability_blockers else confidence
+    verdict = (
+        "reject"
+        if suitability_blockers
+        else (
+            "pass"
+            if extraction_suitability >= threshold
+            else ("conditional" if extraction_suitability >= threshold - 0.12 else "reject")
+        )
+    )
     if not args.material_crop_confirmed and verdict == "pass":
         verdict = "conditional"
     patch = material_patch(
@@ -733,28 +941,38 @@ def extract(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
         size,
         threshold,
         confidence,
+        extraction_suitability,
         verdict,
         palette,
         map_stats,
         diagnostics,
         warnings,
+        channel_assessments,
+        suitability_blockers,
     )
     patch["referencePbr"]["materialCropConfirmed"] = args.material_crop_confirmed
     patch["referencePbr"]["usable"] = bool(
-        confidence >= threshold and args.material_crop_confirmed
+        extraction_suitability >= threshold
+        and args.material_crop_confirmed
+        and not suitability_blockers
+        and channel_assessments["albedo"]["eligible"] is True
     )
     report = {
-        "ok": confidence >= threshold and args.material_crop_confirmed,
+        "ok": patch["referencePbr"]["usable"],
         "usable": patch["referencePbr"]["usable"],
         "verdict": verdict,
         "confidence": confidence,
-        "extractionSuitability": confidence,
+        "extractionSuitability": extraction_suitability,
         "targetThreshold": threshold,
         "materialId": args.material_id,
         "sourceImage": str(image),
         "outDir": str(out_dir),
         "palette": palette,
         "maps": patch["referencePbr"]["maps"],
+        "channelAssessments": channel_assessments,
+        "availableChannels": patch["referencePbr"]["availableChannels"],
+        "omittedChannels": patch["referencePbr"]["omittedChannels"],
+        "suitabilityBlockers": suitability_blockers,
         "diagnostics": diagnostics,
         "warnings": warnings,
         "materialCropConfirmed": args.material_crop_confirmed,
@@ -812,8 +1030,15 @@ def main(argv: list[str]) -> int:
                     "spec patching requires --url-prefix so generated browser asset URLs are explicit"
                 )
             if not report["ok"] and not args.allow_low_confidence:
+                blockers = report.get("suitabilityBlockers")
+                if isinstance(blockers, list) and blockers:
+                    raise ValueError(
+                        "PBR extraction is blocked by unsafe channel evidence: "
+                        + ", ".join(str(item) for item in blockers)
+                        + "; spec was not patched"
+                    )
                 raise ValueError(
-                    f"PBR extraction confidence {report['confidence']} is below target "
+                    f"PBR extraction suitability {report['extractionSuitability']} is below target "
                     f"{report['targetThreshold']}; spec was not patched"
                 )
             spec_path = args.spec.expanduser().resolve()

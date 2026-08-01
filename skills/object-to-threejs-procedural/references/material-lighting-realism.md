@@ -22,12 +22,12 @@ Before accepting `lookdev`, the spec must contain:
 - an assessed `surfaceDescriptor` for every important material: `rigidity` (`rigid`, `semi-rigid`, `flexible`, or `soft`), optical `finish` (`mirror`, `glossy`, `satin`, or `matte`), and `microRelief` (`smooth`, `grain`, `pebbled`, `wrinkled`, `fibrous`, `pitted`, `brushed`, or `custom`) with its executable `none|normal|bump|displacement` channel. Each claim records `basis: observed|inferred` and confidence; the descriptor records `evidenceRefs`.
 - `albedo` palette: dominant, secondary, accent colors, and where they appear on the object.
 - `roughness` response: base value, variation, and local response such as smoother worn edges or rougher cavities.
-- tactile response: at least one of `normal`, `bump`, or `displacement` with scale/amplitude/strength.
+- tactile response: for visibly tactile surfaces, at least one of `normal`, `bump`, or `displacement` with scale/amplitude/strength; an evidenced smooth surface explicitly uses `microRelief.channel: none`.
 - locality: `localOverrides`, dirt, wear, scratches, chips, stains, moss, patina, wetness, soot, or cavity masks tied to `viewEvidence`.
 - material-specific behavior: alpha/transmission/translucency for thin or transparent parts, metalness/clearcoat for reflective parts, cloth/fiber grain for fabric-like parts.
 - explicit special response: select `materialProfile` only when `cloth`, `fiber`, `glass`, `liquid`, or `volume` behavior is needed; omitted profiles stay on the standard material path.
-- independent PBR channels: albedo, roughness, height/normal, and AO must be generated or authored separately; never reuse albedo as a roughness, height, normal, or AO map.
-- reference-derived PBR extraction: for `reference-fidelity`, crop one material region and run `python3 ../../scripts/sculpt.py pbr` with `--material-crop-confirmed` and an explicit `--url-prefix`. Never patch from a full UI/demo screenshot. Below the configured suitability target, stop or request better material evidence.
+- independent PBR channels: every channel that is present must be generated or authored independently; never reuse albedo as a roughness, height, normal, or AO map. Omit an unsupported channel instead of fabricating it, then use an evidence-backed scalar or an explicit smooth/unlit rule.
+- reference-derived PBR extraction: for `reference-fidelity`, crop one material region and run `python3 ../../scripts/sculpt.py pbr` with `--material-crop-confirmed` and an explicit `--url-prefix`. Never patch from a full UI/demo screenshot. Respect each channel's eligibility; below the configured suitability target, stop, omit unsafe channels, use an authored fallback, or request better material evidence.
 - scale hierarchy: close-up materials must describe macro, meso, and micro surface-frequency bands with object-relative frequency and amplitude.
 - projection/UV intent: use emitted `textureProjection.mode` values `uv`, `planar`, `cylindrical`, or `spherical`; `uv` preserves authored UVs. Set `axis` to `x`, `y`, or `z` when observable, otherwise let the generator infer it from effective scaled dimensions. State repeat/texel-density intent, and do not describe these modes as triplanar blending.
 - quality-first resolution: use at least 1024px procedural maps for important close-up materials and prefer 2048px when reference fidelity is the priority.
@@ -39,6 +39,28 @@ Do not accept "brown bark", "gold leaves", "dark metal", or "rough stone" as suf
 Do not conflate material axes. `rigid` describes physical/deformation behavior, `matte` or `glossy` describes optical roughness, and `smooth`, `wrinkled`, or `pebbled` describes geometric or normal-scale relief. For example, rigid painted metal can be matte and smooth; flexible rubber can be glossy and pebbled. The validator rejects an assessed descriptor when its numeric roughness or relief channel contradicts the declared surface.
 
 Do not claim exact PBR recovery from a single image. Pixels include baked lighting, exposure, shadow, view angle, and camera response. Treat extracted maps as reference-derived material evidence that still needs neutral/grazing/reference screenshot review.
+
+## Texture Source And ImageGen Fallback
+
+Choose one explicit source for the active texture set:
+
+- `procedural`: bounded generated fields for regular or parameterizable surfaces.
+- `reference-extracted`: confirmed source-material pixels, represented by the legacy-compatible `referencePbr` path or a texture set with per-channel eligibility.
+- `imagegen-authored`: an offline project-local texture created when irregular, hand-painted, ornamental, organic, distressed, or fantasy appearance is impractical to encode procedurally.
+- `external-authored`: a user-supplied project-local texture with traceable provenance.
+
+ImageGen texture authoring is a Lookdev fallback, distinct from ImageGen reference preparation. A prepared object image may become `sourceImage`; an authored material swatch never does. `sourceImage` remains the sole reconstruction and acceptance authority.
+
+For an `imagegen-authored` texture:
+
+- use the `imagegen` skill in built-in mode unless its own fallback rules require otherwise;
+- request a square front-on material swatch with flat neutral illumination, no perspective, object edges, cast shadows, directional highlights, text, or watermark;
+- request seamless borders only when the target projection repeats;
+- copy the selected output into the project workspace and record its browser URL, final prompt, SHA-256, and evidence refs;
+- use the output as albedo by default. Do not ask separate ImageGen calls to invent roughness, height, normal, AO, or metalness and assume they are aligned; author those channels independently or use evidence-backed scalar response;
+- record `authoringChecks.flatNeutralLighting`, `bakedLightingFree`, and `seamChecked` when repetition applies.
+
+The runtime marks loaded channels `pending`, `ready`, or `error` and exposes a `materialReady` promise. Lookdev cannot pass on `error`, before loading settles, or when the selected style treatment was silently replaced by generic PBR. Use the existing disposal hook; do not regenerate ImageGen assets during builds or browser runtime.
 
 An executable `localOverrides` entry needs `id`, a supported surface `type`, `amount`, `color`, at least one `evidenceRefs` id, and a `mask` with `pattern` (`noise`, `cavity`, `edge`, `vertical`, `speckle`, or `streak`). Use paired `mask.uvCenter`/`uvScale` plus `feather` when evidence confines the effect to one UV region. Optional `roughnessDelta`, `metalnessDelta`, and `heightDelta` alter independent map channels. Put scratches and chips here as `scratch`/`chip` layers; descriptive arrays alone do not change the shader. A `material-map-evidence` entry is provenance only and must never count as an applied dirt/wear layer.
 

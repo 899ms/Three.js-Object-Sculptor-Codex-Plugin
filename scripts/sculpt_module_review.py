@@ -1299,6 +1299,9 @@ def _generated_runtime_provenance_failures(
         failures.append("generated factory root was not attached to the rendered THREE.Scene")
     if runtime.get("rootEffectivelyVisible") is not True:
         failures.append("generated factory root was hidden in the rendered scene")
+    material_status = runtime.get("materialStatus")
+    if material_status is not None and material_status != "ready":
+        failures.append(f"material textures were not ready at capture: {material_status}")
     for field in (
         "missingComponentIds",
         "missingMeshComponentIds",

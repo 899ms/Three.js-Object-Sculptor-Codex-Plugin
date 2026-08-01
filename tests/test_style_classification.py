@@ -301,7 +301,7 @@ class VisualStyleContractTests(unittest.TestCase):
             5,
         )
 
-    def test_review_hashes_are_phase_selective_and_generation_hash_is_unchanged(self) -> None:
+    def test_review_and_generation_hashes_are_phase_selective(self) -> None:
         base = make_spec("Style Target", "reference.png")
         base["preSpecAssessment"]["visualStyle"] = make_assessed_visual_style()
         sync_pipeline(base)
@@ -331,11 +331,15 @@ class VisualStyleContractTests(unittest.TestCase):
             review_spec_hash(lookdev_edit, "lookdev"),
             baseline_review["lookdev"],
         )
-        for phase in ("blockout", "form", "lookdev"):
+        for phase in ("blockout", "form"):
             self.assertEqual(
                 generation_validation_hash(lookdev_edit, phase),
                 baseline_generation[phase],
             )
+        self.assertNotEqual(
+            generation_validation_hash(lookdev_edit, "lookdev"),
+            baseline_generation["lookdev"],
+        )
 
         detail_edit = copy.deepcopy(base)
         detail_edit["preSpecAssessment"]["visualStyle"]["axes"][

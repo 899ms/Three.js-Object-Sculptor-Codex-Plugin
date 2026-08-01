@@ -256,16 +256,46 @@ def material_gaps(
                 continue
             reference = material.get("referencePbr")
             maps = reference.get("maps") if isinstance(reference, dict) else None
+            assessments = reference.get("channelAssessments") if isinstance(reference, dict) else None
+            required_channels = ["albedo", "roughness", "height", "normal", "ao"]
+            if isinstance(assessments, dict):
+                required_channels = [
+                    channel
+                    for channel in required_channels
+                    if channel == "albedo" or not (
+                        isinstance(assessments.get(channel), dict)
+                        and assessments[channel].get("eligible") is False
+                    )
+                ]
             has_browser_urls = isinstance(maps, dict) and all(
                 isinstance(maps.get(channel), dict)
                 and has_non_empty(maps[channel].get("url"))
-                for channel in ("albedo", "roughness", "height", "normal", "ao")
+                for channel in required_channels
             )
             if (
-                not isinstance(reference, dict)
-                or reference.get("usable") is not True
-                or reference.get("materialCropConfirmed") is not True
-                or not has_browser_urls
+                isinstance(assessments, dict)
+                and isinstance(assessments.get("albedo"), dict)
+                and assessments["albedo"].get("eligible") is False
+            ):
+                has_browser_urls = False
+            texture_set = material.get("textureSet")
+            channels = texture_set.get("channels") if isinstance(texture_set, dict) else None
+            authored_albedo = (
+                isinstance(texture_set, dict)
+                and texture_set.get("status") == "ready"
+                and texture_set.get("sourceType") in {"imagegen-authored", "external-authored"}
+                and isinstance(channels, dict)
+                and isinstance(channels.get("albedo"), dict)
+                and has_non_empty(channels["albedo"].get("url"))
+            )
+            if (
+                not authored_albedo
+                and (
+                    not isinstance(reference, dict)
+                    or reference.get("usable") is not True
+                    or reference.get("materialCropConfirmed") is not True
+                    or not has_browser_urls
+                )
             ):
                 material_id = str(material.get("id") or "(unnamed)")
                 gaps.append(

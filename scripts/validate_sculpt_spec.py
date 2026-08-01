@@ -267,6 +267,24 @@ SURFACE_DESCRIPTOR_CHANNELS = frozenset(
 )
 SURFACE_DESCRIPTOR_BASIS = frozenset({"observed", "inferred"})
 LOOKDEV_SURFACE_PASSES = frozenset({"lookdev", "material-pass", "surface-pass"})
+EXECUTABLE_SHADING_TREATMENTS = frozenset(
+    {
+        "physically-based",
+        "physically-plausible-stylized",
+        "smooth-lit",
+        "flat-lit",
+        "unlit",
+        "toon-ramp",
+        "cel-banded",
+        "emissive-dominant",
+    }
+)
+TEXTURE_SOURCE_TYPES = frozenset(
+    {"procedural", "reference-extracted", "imagegen-authored", "external-authored"}
+)
+TEXTURE_CHANNELS = frozenset(
+    {"albedo", "roughness", "metalness", "height", "normal", "ao"}
+)
 
 
 def schema_at_least(spec: dict[str, Any], minimum: str) -> bool:
@@ -275,6 +293,23 @@ def schema_at_least(spec: dict[str, Any], minimum: str) -> bool:
         return schema_version_at_least(spec, minimum)
     except ValueError:
         return False
+
+
+def validate_shading_execution(
+    spec: dict[str, Any], errors: list[str], warnings: list[str], for_pass: str | None
+) -> None:
+    assessment = spec.get("preSpecAssessment")
+    style = assessment.get("visualStyle") if isinstance(assessment, dict) else None
+    axes = style.get("axes") if isinstance(style, dict) and style.get("status") == "assessed" else None
+    shading = axes.get("shadingTreatment") if isinstance(axes, dict) else None
+    primary = shading.get("primary") if isinstance(shading, dict) else None
+    if not isinstance(primary, str) or primary in EXECUTABLE_SHADING_TREATMENTS:
+        return
+    message = f"visualStyle shadingTreatment {primary!r} has no executable Three.js material route"
+    if PASS_ALIASES.get(for_pass, for_pass) == "lookdev":
+        errors.append(message)
+    else:
+        warnings.append("quality: " + message)
 
 
 def warning_applies_to_pass(warning: str, pass_id: str | None) -> bool:
@@ -1272,6 +1307,72 @@ def validate_reference_pbr_map(value: Any, label: str, errors: list[str]) -> Non
     tile_safe = value.get("tileSafe")
     if tile_safe is not None and not isinstance(tile_safe, bool):
         errors.append(f"{label}.tileSafe must be boolean")
+    eligible = value.get("eligible")
+    if eligible is not None and not isinstance(eligible, bool):
+        errors.append(f"{label}.eligible must be boolean")
+
+
+def validate_texture_set(
+    material_id: str, value: Any, errors: list[str], warnings: list[str]
+) -> None:
+    """Validate an optional authored texture source; legacy referencePbr stays valid."""
+    if value is None:
+        return
+    label = f"material {material_id!r} textureSet"
+    if not isinstance(value, dict):
+        errors.append(f"{label} must be an object")
+        return
+    source_type = value.get("sourceType")
+    if source_type not in TEXTURE_SOURCE_TYPES:
+        errors.append(f"{label}.sourceType is unsupported")
+    status = value.get("status")
+    if status not in {"declared", "ready", "failed"}:
+        errors.append(f"{label}.status must be declared, ready, or failed")
+    channels = value.get("channels")
+    if not isinstance(channels, dict):
+        errors.append(f"{label}.channels must be an object")
+        return
+    unknown = sorted(set(channels) - TEXTURE_CHANNELS)
+    if unknown:
+        errors.append(f"{label}.channels contains unsupported channels: " + ", ".join(unknown))
+    if source_type != "procedural" and "albedo" not in channels:
+        errors.append(f"{label} requires an albedo channel")
+    for channel, entry in channels.items():
+        if channel not in TEXTURE_CHANNELS:
+            continue
+        validate_reference_pbr_map(entry, f"{label}.channels.{channel}", errors)
+        if (
+            status == "ready"
+            and source_type != "procedural"
+            and isinstance(entry, dict)
+            and not (isinstance(entry.get("url"), str) and entry["url"].strip())
+        ):
+            errors.append(f"{label}.channels.{channel}.url is required at runtime")
+    if source_type == "imagegen-authored":
+        provenance = value.get("provenance")
+        if not isinstance(provenance, dict) or provenance.get("tool") != "imagegen":
+            errors.append(f"{label}.provenance.tool must be 'imagegen'")
+        else:
+            if not isinstance(provenance.get("prompt"), str) or not provenance["prompt"].strip():
+                errors.append(f"{label}.provenance.prompt is required")
+            digest = provenance.get("assetSha256")
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
+                errors.append(f"{label}.provenance.assetSha256 is required")
+        checks = value.get("authoringChecks")
+        if not isinstance(checks, dict) or any(
+            checks.get(check) is not True for check in ("flatNeutralLighting", "bakedLightingFree")
+        ):
+            errors.append(f"{label} must pass flatNeutralLighting and bakedLightingFree checks")
+        physical = sorted(set(channels) & {"roughness", "metalness", "height", "normal", "ao"})
+        if physical:
+            warnings.append(
+                f"quality: {label} physical channels need independent authoring: " + ", ".join(physical)
+            )
+    if "sourceImage" in value or (
+        isinstance(value.get("provenance"), dict)
+        and value["provenance"].get("acceptanceAuthority") is True
+    ):
+        errors.append(f"{label} is an implementation asset, not sourceImage acceptance authority")
 
 
 def validate_reference_pbr(material_id: str, value: Any, errors: list[str], warnings: list[str]) -> None:
@@ -1301,12 +1402,31 @@ def validate_reference_pbr(material_id: str, value: Any, errors: list[str], warn
     if not isinstance(maps, dict):
         errors.append(f"material {material_id!r} referencePbr.maps must be an object")
         return
+    assessments = value.get("channelAssessments")
+    if assessments is not None and not isinstance(assessments, dict):
+        errors.append(f"material {material_id!r} referencePbr.channelAssessments must be an object")
+        assessments = None
+    if isinstance(assessments, dict):
+        for channel, assessment in assessments.items():
+            label = f"material {material_id!r} referencePbr.channelAssessments.{channel}"
+            if channel not in {"albedo", "roughness", "height", "normal", "ao"}:
+                errors.append(f"{label} is unsupported")
+            elif not isinstance(assessment, dict) or not isinstance(assessment.get("eligible"), bool):
+                errors.append(f"{label}.eligible must be boolean")
+            elif "confidence" in assessment:
+                validate_unit_interval(assessment["confidence"], f"{label}.confidence", errors)
     required = ("albedo", "roughness", "height", "normal", "ao")
     for channel in required:
+        assessment = assessments.get(channel) if isinstance(assessments, dict) else None
         if channel not in maps:
-            warnings.append(f"quality: material {material_id!r} referencePbr.maps missing {channel}")
+            if not (isinstance(assessment, dict) and assessment.get("eligible") is False):
+                warnings.append(f"quality: material {material_id!r} referencePbr.maps missing {channel}")
         else:
             validate_reference_pbr_map(maps[channel], f"material {material_id!r} referencePbr.maps.{channel}", errors)
+            if isinstance(assessment, dict) and assessment.get("eligible") is False:
+                warnings.append(
+                    f"quality: material {material_id!r} referencePbr.maps.{channel} is ineligible and will not execute"
+                )
 
 
 def _layer_value(value: Any, keys: tuple[str, ...] = ("base", "amount")) -> float | None:
@@ -1749,6 +1869,7 @@ def validate_materials(
         validate_material_profile(material_id, material, errors)
         validate_material_surface_response(material_id, material, errors)
         validate_reference_pbr(material_id, material.get("referencePbr"), errors, warnings)
+        validate_texture_set(material_id, material.get("textureSet"), errors, warnings)
         validate_surface_descriptor(
             material_id,
             material,
@@ -4364,11 +4485,39 @@ def reference_pbr_usable(material: dict[str, Any], threshold: float) -> tuple[bo
     maps = reference.get("maps")
     if not isinstance(maps, dict):
         return False, f"material {material_id!r} referencePbr needs maps"
-    for channel in ("albedo", "roughness", "height", "normal", "ao"):
+    assessments = reference.get("channelAssessments")
+    required = ["albedo", "roughness", "height", "normal", "ao"]
+    if isinstance(assessments, dict):
+        required = [
+            channel
+            for channel in required
+            if channel == "albedo" or not (
+                isinstance(assessments.get(channel), dict)
+                and assessments[channel].get("eligible") is False
+            )
+        ]
+        albedo = assessments.get("albedo")
+        if isinstance(albedo, dict) and albedo.get("eligible") is False:
+            return False, f"material {material_id!r} referencePbr albedo is ineligible"
+    for channel in required:
         entry = maps.get(channel)
         if not isinstance(entry, dict) or not has_non_empty_detail(entry.get("url")):
             return False, f"material {material_id!r} referencePbr missing browser URL for {channel}"
     return True, ""
+
+
+def authored_texture_set_usable(material: dict[str, Any]) -> bool:
+    value = material.get("textureSet")
+    channels = value.get("channels") if isinstance(value, dict) else None
+    albedo = channels.get("albedo") if isinstance(channels, dict) else None
+    return bool(
+        isinstance(value, dict)
+        and value.get("sourceType") in {"imagegen-authored", "external-authored"}
+        and value.get("status") == "ready"
+        and isinstance(albedo, dict)
+        and isinstance(albedo.get("url"), str)
+        and albedo["url"].strip()
+    )
 
 
 def validate_look_dev_targets(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
@@ -4494,7 +4643,7 @@ def validate_look_dev_targets(spec: dict[str, Any], errors: list[str], warnings:
                     )
                 if pbr_required:
                     ok, message = reference_pbr_usable(material, float(pbr_threshold))
-                    if not ok:
+                    if not ok and not authored_texture_set_usable(material):
                         warnings.append(f"quality: {message}")
     lighting = spec.get("lightingFromPhoto", [])
     if not isinstance(lighting, list):
@@ -4568,6 +4717,7 @@ def validate_spec(
     if suitability not in VALID_SUITABILITY:
         errors.append("suitability must be pass, conditional, or reject")
     validate_pre_spec_assessment(spec, errors, warnings)
+    validate_shading_execution(spec, errors, warnings, for_pass)
     validate_uncertainty_contract(spec, errors, warnings)
     validate_terminology_profile(spec, errors, warnings)
     validate_score_block(spec, errors, warnings)

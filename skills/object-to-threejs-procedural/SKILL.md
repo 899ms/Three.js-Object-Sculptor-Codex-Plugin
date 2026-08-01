@@ -121,6 +121,22 @@ Goal: match color zones, material class, optical finish, surface response, light
 
 Only now extract or author independent albedo, roughness, height/normal, and AO. Describe materials concretely: hard/soft, rigid/flexible, matte/glossy, smooth/wrinkled/pitted/granular. Never reuse albedo as another PBR channel. Use geometry for silhouette-changing relief and material response for sub-silhouette microdetail.
 
+Resolve each material through one explicit `textureSet.sourceType`: `procedural`,
+`reference-extracted`, `imagegen-authored`, or `external-authored`. Keep legacy
+`referencePbr` valid as the reference-extracted compatibility path. If a
+source-supported surface is impractically complex to reproduce procedurally,
+invoke the `imagegen` skill once to author a flat, neutral-lit, project-local
+texture swatch offline. Use it primarily as albedo; roughness, height/normal,
+AO, metalness, and alpha remain independently evidenced channels. Record the
+final prompt, workspace path/URL, hash, evidence refs, and baked-light/seam
+checks. This authored texture is an implementation asset: it never replaces
+or gains acceptance authority over `sourceImage`.
+
+Await the generated runtime's `materialReady` promise before Lookdev review,
+confirm that the assessed shading treatment was applied, then inspect the
+`neutral`, `grazing`, and `reference` views. A failed texture load is a blocker,
+not a successful material with missing detail.
+
 Anti-aliasing is not a Lookdev effect: it belongs to the stable review render
 contract and applies from Blockout onward. Bloom, SSAO, depth of field, grading,
 and other appearance effects remain optional Lookdev work and must not be used
