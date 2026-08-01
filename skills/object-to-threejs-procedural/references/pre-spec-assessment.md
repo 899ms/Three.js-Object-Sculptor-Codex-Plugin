@@ -28,8 +28,10 @@ Assess all nine `preSpecAssessment.visualStyle.axes` before Blockout: realism,
 form, proportion, detail, shading, surface, edge, palette, and medium emulation.
 The axes are authoritative and composable; `derivation.family` and familiar
 labels such as Low Poly, Cel-Shading, Hand-Painted 3D, or Voxel Art are
-system-derived summaries. Use `other` only with a custom label and operational
-definition; use `unassessed` while evidence is incomplete.
+system-derived summaries. Synchronization also derives `overallStyleProfile`
+to combine them into one label, source-grounded signature traits, and
+phase-specific reconstruction guidance. Use `other` only with a custom label
+and operational definition; use `unassessed` while evidence is incomplete.
 
 Every assessed axis needs confidence, exact `viewEvidence[].id` references, and
 observed cues. Style describes treatment, not object type, construction

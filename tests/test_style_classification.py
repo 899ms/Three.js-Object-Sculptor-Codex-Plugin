@@ -55,6 +55,17 @@ class VisualStyleContractTests(unittest.TestCase):
             make_unassessed_visual_style(),
         )
 
+        legacy_profile = make_spec("Legacy Style Profile", "reference.png")
+        legacy_profile["preSpecAssessment"]["visualStyle"].pop(
+            "overallStyleProfile"
+        )
+        migrated, report = migrate_spec(legacy_profile)
+        self.assertEqual(report["visualStyleUpdates"], 1)
+        self.assertIn(
+            "overallStyleProfile",
+            migrated["preSpecAssessment"]["visualStyle"],
+        )
+
     def test_assessed_profile_validates_and_sync_owns_derivation(self) -> None:
         style = make_assessed_visual_style()
         style["derivation"] = {
@@ -200,6 +211,35 @@ class VisualStyleContractTests(unittest.TestCase):
             sync_visual_style(voxel)["derivation"]["archetypeLabels"],
         )
 
+    def test_overall_style_profile_synthesizes_phase_specific_guidance(self) -> None:
+        style = make_assessed_visual_style(
+            {
+                "realism": "stylized",
+                "formTreatment": "faceted",
+                "detailTreatment": "simplified",
+                "shadingTreatment": "cel-banded",
+                "surfaceTreatment": "hand-painted",
+            }
+        )
+        profile = style["overallStyleProfile"]
+
+        self.assertIn("Stylized", profile["label"])
+        self.assertIn("Low Poly", profile["label"])
+        self.assertIn("Cel-Shading", profile["label"])
+        self.assertEqual(len(profile["signatureTraits"]), len(STYLE_AXIS_VALUES))
+        blockout_guidance = "\n".join(profile["phaseDirectives"]["blockout"])
+        lookdev_guidance = "\n".join(profile["phaseDirectives"]["lookdev"])
+        self.assertIn("Overall style [", blockout_guidance)
+        self.assertNotIn("cel-banded", blockout_guidance)
+        self.assertIn("cel-banded", lookdev_guidance)
+
+        profile["label"] = "stale"
+        errors, warnings = validate_visual_style(style, {"full-object"})
+        self.assertEqual(errors, [])
+        self.assertTrue(any("overallStyleProfile is stale" in item for item in warnings))
+        sync_visual_style(style)
+        self.assertNotEqual(style["overallStyleProfile"]["label"], "stale")
+
     def test_phase_projection_and_work_packet_do_not_leak_future_style_axes(self) -> None:
         spec = make_spec("Style Target", "reference.png")
         style = make_assessed_visual_style(
@@ -250,7 +290,7 @@ class VisualStyleContractTests(unittest.TestCase):
 
         projection = phase_spec_projection(spec, "form")
         self.assertIn("visualStyle", projection["preSpecAssessment"])
-        self.assertEqual(len(projection["styleDirectives"]), 4)
+        self.assertEqual(len(projection["styleDirectives"]), 5)
         packet = phase_work_packet(spec, "form")
         self.assertIn(
             "preSpecAssessment.visualStyle",
@@ -258,7 +298,7 @@ class VisualStyleContractTests(unittest.TestCase):
         )
         self.assertEqual(
             len(packet["visualScout"]["activePhaseInput"]["phaseRubric"]["styleChecks"]),
-            4,
+            5,
         )
 
     def test_review_hashes_are_phase_selective_and_generation_hash_is_unchanged(self) -> None:

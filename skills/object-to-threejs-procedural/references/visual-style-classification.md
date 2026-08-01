@@ -9,7 +9,7 @@ style names are derived summaries, never a substitute for the axes.
 
 - Contract and evidence rules
 - Controlled axes
-- Influences and derived labels
+- Influences, derived labels, and overall synthesis
 - Phase execution
 - Ownership boundaries
 
@@ -36,6 +36,16 @@ style names are derived summaries, never a substitute for the axes.
     "archetypeLabels": [],
     "customLabel": ""
   },
+  "overallStyleProfile": {
+    "label": "Hybrid: Semi-Realistic",
+    "signatureTraits": ["Simplified masses retain plausible material response."],
+    "phaseDirectives": {
+      "blockout": ["Keep the combined Blockout style coherent with sourceImage."],
+      "form": ["Keep the combined Form style coherent with sourceImage."],
+      "lookdev": ["Keep the combined Lookdev style coherent with sourceImage."],
+      "interaction": ["Protect the combined style in every runtime state."]
+    }
+  },
   "notes": ""
 }
 ```
@@ -51,8 +61,9 @@ operational `definition`. A custom definition must describe what must be built
 or reviewed, not merely say that the style is unique.
 
 `none` is a real assessed value for edge treatment or medium emulation. It is
-exclusive and cannot have modifiers. Synchronization owns `derivation`; authors
-edit axes and influences, then let the pipeline recompute labels.
+exclusive and cannot have modifiers. Synchronization owns `derivation` and
+`overallStyleProfile`; authors edit axes and influences, then let the pipeline
+recompute both summaries.
 
 ## Controlled axes
 
@@ -248,6 +259,13 @@ HD-2D is a scene/camera/compositing presentation style, not an intrinsic object
 style. Record it in the viewing or presentation contract rather than forcing it
 into `visualStyle`.
 
+`overallStyleProfile` combines the assessed axes and declared influences into
+one readable object-level style. `label` summarizes the family and matching
+archetypes, `signatureTraits` preserves the source-observed cues behind every
+axis, and `phaseDirectives` turns only the axes owned by each phase into build
+and review guidance. Treat it as synchronized output, not a second authored
+style source. Any mismatch is stale pipeline state; run `sculpt sync`.
+
 ## Phase execution
 
 - Blockout consumes `realism`, `formTreatment`, and `proportionTreatment`.
@@ -255,10 +273,11 @@ into `visualStyle`.
 - Lookdev consumes all nine axes.
 - Interaction protects the complete established style while testing runtime states.
 
-The phase context exposes only the cumulative relevant axes and compact
-directives. A Lookdev-only change must not invalidate Blockout/Form review
-hashes. The blind scout receives the relevant directives inside
-`phaseRubric.styleChecks`, not the raw style schema.
+The phase context exposes only the cumulative relevant axes and matching
+`styleDirectives` generated for `overallStyleProfile.phaseDirectives`. A
+Lookdev-only change must not invalidate Blockout/Form review hashes. The blind
+scout receives that guidance inside `phaseRubric.styleChecks`, not the raw style
+schema.
 
 Style is Blockout-owned because it must be assessed before geometry starts.
 Later phases may repair it through cumulative prior-phase edit authority when

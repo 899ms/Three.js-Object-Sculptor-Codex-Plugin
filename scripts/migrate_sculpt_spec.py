@@ -23,7 +23,7 @@ from new_sculpt_spec import (
     make_phase_execution_contract,
 )
 from sculpt_perception import ensure_perceptual_fields
-from sculpt_style import make_unassessed_visual_style
+from sculpt_style import make_unassessed_visual_style, sync_visual_style
 
 
 TARGET_SCHEMA = CURRENT_SCHEMA_VERSION
@@ -66,10 +66,16 @@ def add_progressive_execution_contract(spec: dict[str, Any]) -> int:
 
 def add_visual_style_scaffolding(spec: dict[str, Any]) -> int:
     assessment = spec.get("preSpecAssessment")
-    if not isinstance(assessment, dict) or "visualStyle" in assessment:
+    if not isinstance(assessment, dict):
         return 0
-    assessment["visualStyle"] = make_unassessed_visual_style()
-    return 1
+    style = assessment.get("visualStyle")
+    if not isinstance(style, dict):
+        assessment["visualStyle"] = make_unassessed_visual_style()
+        return 1
+    if "overallStyleProfile" not in style:
+        sync_visual_style(style)
+        return 1
+    return 0
 
 
 def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dict[str, Any], dict[str, Any]]:

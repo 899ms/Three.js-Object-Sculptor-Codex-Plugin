@@ -157,7 +157,14 @@ _AXIS_DIRECTIVES = {
     "mediumEmulation": "Emulate the declared medium through buildable geometry and material cues.",
 }
 
-_STYLE_FIELDS = {"status", "axes", "influences", "derivation", "notes"}
+_STYLE_FIELDS = {
+    "status",
+    "axes",
+    "influences",
+    "derivation",
+    "overallStyleProfile",
+    "notes",
+}
 _AXIS_FIELDS = {
     "primary",
     "modifiers",
@@ -187,7 +194,7 @@ def canonical_style_phase(pass_id: str) -> str:
 
 
 def make_unassessed_visual_style() -> dict[str, Any]:
-    return {
+    profile = {
         "status": "unassessed",
         "axes": {
             axis: {
@@ -208,6 +215,8 @@ def make_unassessed_visual_style() -> dict[str, Any]:
         },
         "notes": "",
     }
+    profile["overallStyleProfile"] = derive_overall_style_profile(profile)
+    return profile
 
 
 def _axis_values(profile: Mapping[str, Any], axis: str) -> set[str]:
@@ -352,6 +361,7 @@ def derive_visual_style(profile: Mapping[str, Any]) -> dict[str, Any]:
 
 def sync_visual_style(profile: dict[str, Any]) -> dict[str, Any]:
     profile["derivation"] = derive_visual_style(profile)
+    profile["overallStyleProfile"] = derive_overall_style_profile(profile)
     return profile
 
 
@@ -386,13 +396,61 @@ def visual_style_projection(profile: Any, pass_id: str) -> dict[str, Any]:
     }
 
 
+def _overall_style_label(profile: Mapping[str, Any]) -> str:
+    summary = derive_visual_style(profile)
+    family = summary.get("family")
+    if family == "unassessed":
+        return ""
+    family_label = str(family).replace("-", " ").title()
+    details = [
+        str(item)
+        for item in summary.get("archetypeLabels", [])
+        if isinstance(item, str) and item.strip()
+    ]
+    custom_label = summary.get("customLabel")
+    if isinstance(custom_label, str) and custom_label.strip():
+        details.append(custom_label.strip())
+    influences = profile.get("influences")
+    if isinstance(influences, list):
+        for item in influences:
+            label = item.get("label") if isinstance(item, Mapping) else None
+            if not isinstance(label, str) or not label.strip():
+                continue
+            normalized = label.strip().lower()
+            if not any(normalized in detail.lower() for detail in details):
+                details.append(label.strip())
+    details = list(dict.fromkeys(details))
+    return f"{family_label}: {' + '.join(details)}" if details else family_label
+
+
+def _observed_style_cues(profile: Mapping[str, Any]) -> list[str]:
+    axes = profile.get("axes")
+    if not isinstance(axes, Mapping):
+        return []
+    cues: list[str] = []
+    for value in axes.values():
+        if not isinstance(value, Mapping):
+            continue
+        observed = value.get("cues")
+        if isinstance(observed, list):
+            cues.extend(
+                item.strip()
+                for item in observed
+                if isinstance(item, str) and item.strip()
+            )
+    return list(dict.fromkeys(cues))
+
+
 def visual_style_directives(profile: Any, pass_id: str) -> list[str]:
     projected = visual_style_projection(profile, pass_id)
     if not projected:
         return []
     if projected.get("status") != "assessed":
         return ["Assess visual style from sourceImage before generating Blockout."]
-    directives: list[str] = []
+    phase_label = _overall_style_label(projected)
+    directives = [
+        f"Overall style [{phase_label}]: keep this phase coherent with sourceImage."
+    ]
     axes = projected.get("axes")
     if isinstance(axes, Mapping):
         for axis in STYLE_PHASE_AXES.get(
@@ -445,6 +503,23 @@ def visual_style_directives(profile: Any, pass_id: str) -> list[str]:
                 f"{', '.join(str(axis) for axis in item.get('affectedAxes', []))}."
             )
     return directives
+
+
+def derive_overall_style_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
+    if profile.get("status") != "assessed":
+        return {
+            "label": "",
+            "signatureTraits": [],
+            "phaseDirectives": {phase: [] for phase in STYLE_PHASE_AXES},
+        }
+    return {
+        "label": _overall_style_label(profile),
+        "signatureTraits": _observed_style_cues(profile),
+        "phaseDirectives": {
+            phase: visual_style_directives(profile, phase)
+            for phase in STYLE_PHASE_AXES
+        },
+    }
 
 
 def _is_confidence(value: Any) -> bool:
@@ -689,6 +764,32 @@ def validate_visual_style(
                 warnings.append(
                     f"quality: {path}.derivation is stale; run pipeline synchronization"
                 )
+
+    overall_path = f"{path}.overallStyleProfile"
+    overall_style = style.get("overallStyleProfile")
+    if overall_style is None:
+        warnings.append(
+            f"quality: {overall_path} is missing; run pipeline synchronization"
+        )
+    elif not isinstance(overall_style, Mapping):
+        errors.append(f"{overall_path} must be an object")
+    else:
+        expected_fields = {"label", "signatureTraits", "phaseDirectives"}
+        missing = expected_fields - set(overall_style)
+        unexpected = set(overall_style) - expected_fields
+        if missing:
+            errors.append(
+                f"{overall_path} missing fields: {', '.join(sorted(missing))}"
+            )
+        if unexpected:
+            errors.append(
+                f"{overall_path} has unexpected fields: "
+                + ", ".join(sorted(unexpected))
+            )
+        if dict(overall_style) != derive_overall_style_profile(style):
+            warnings.append(
+                f"quality: {overall_path} is stale; run pipeline synchronization"
+            )
 
     if status == "assessed" and completed_axes != len(STYLE_AXIS_VALUES):
         errors.append(f"{path}.status cannot be assessed until every axis is assessed")
