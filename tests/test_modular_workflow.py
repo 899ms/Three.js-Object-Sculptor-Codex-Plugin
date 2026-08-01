@@ -902,6 +902,31 @@ class ModularWorkflowTests(unittest.TestCase):
             ),
             [],
         )
+        at_limit = copy.deepcopy(scout)
+        at_limit["observations"] = [
+            copy.deepcopy(scout["observations"][0]) for _ in range(7)
+        ]
+        self.assertEqual(
+            blind_scout_contract_failures(
+                at_limit,
+                evidence,
+                require_approve=True,
+                expected_phase="form",
+            ),
+            [],
+        )
+        over_limit = copy.deepcopy(at_limit)
+        over_limit["observations"].append(copy.deepcopy(scout["observations"][0]))
+        self.assertTrue(
+            any(
+                "at most 7 items" in failure
+                for failure in blind_scout_contract_failures(
+                    over_limit,
+                    evidence,
+                    expected_phase="form",
+                )
+            )
+        )
         wrong_scope = copy.deepcopy(scout)
         wrong_scope["observations"][0]["phaseScope"] = "current"
         self.assertTrue(

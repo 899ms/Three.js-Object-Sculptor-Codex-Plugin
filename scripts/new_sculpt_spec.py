@@ -244,7 +244,7 @@ def make_phase_execution_contract() -> dict[str, Any]:
             ],
             "aiOverallFloor": 0.70,
             "blindScoutDecisions": ["approve", "reject"],
-            "maxBlindScoutObservations": 3,
+            "maxBlindScoutObservations": 7,
             "centroidAndAspect": "diagnostic-only",
             "humanApprovalAfterSystemPass": True,
         },

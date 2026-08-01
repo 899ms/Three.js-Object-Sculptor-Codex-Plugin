@@ -81,7 +81,7 @@ MAX_STRATEGY_RESETS = 1
 # Human approval remains the final phase gate.
 SIMPLIFIED_PHASE_EXECUTION_VERSION = 4
 SIMPLIFIED_AI_OVERALL_FLOOR = 0.70
-MAX_BLIND_SCOUT_OBSERVATIONS = 3
+MAX_BLIND_SCOUT_OBSERVATIONS = 7
 BLIND_SCOUT_ARTIFACT_VERSION = 2
 BLIND_SCOUT_PHASE_CATEGORIES: dict[str, tuple[str, ...]] = {
     "blockout": (
@@ -228,7 +228,7 @@ BLIND_SCOUT_SEVERITY_POLICY = {
     ),
 }
 BLIND_SCOUT_COVERAGE_RULE = (
-    "Inspect every mandatory check before deciding. Report only the three highest-impact "
+    "Inspect every mandatory check before deciding. Report only the seven highest-impact "
     "visible directions, but reject whenever any current or prior-phase critical or major "
     "defect exists; an empty observation list asserts that the complete mandatory scan "
     "found no reportable issue."

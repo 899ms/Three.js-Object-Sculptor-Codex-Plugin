@@ -439,7 +439,7 @@ class CompoundSchemaTests(unittest.TestCase):
             "phaseRubrics"
         ]["form"]
         self.assertTrue(refreshed["mandatoryChecks"])
-        self.assertIn("three highest-impact", refreshed["coverageRule"])
+        self.assertIn("seven highest-impact", refreshed["coverageRule"])
         self.assertEqual(migrated["reviewHistory"], original_history)
         self.assertTrue(report["changed"])
         self.assertGreater(report["phaseExecutionContractUpdates"], 0)

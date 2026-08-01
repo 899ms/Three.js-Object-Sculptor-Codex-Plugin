@@ -559,7 +559,7 @@ class PassPlanTests(unittest.TestCase):
         self.assertFalse(scout["output"]["advisoryOnly"])
         self.assertTrue(scout["output"]["gateAuthority"])
         self.assertEqual(scout["output"]["decisionValues"], ["approve", "reject"])
-        self.assertEqual(scout["output"]["maxObservations"], 3)
+        self.assertEqual(scout["output"]["maxObservations"], 7)
         self.assertEqual(scout["output"]["artifactVersion"], 2)
         self.assertTrue(scout["output"]["priorPhaseReviewRequired"])
         self.assertTrue(scout["output"]["priorPhaseImprovementAllowed"])
@@ -575,7 +575,7 @@ class PassPlanTests(unittest.TestCase):
         self.assertIn("socket", form_checks["attachment"]["inspection"])
         self.assertIn("asymmetry", form_checks["balance"]["inspection"])
         self.assertIn("invented", form_checks["signature-detail"]["inspection"])
-        self.assertIn("three highest-impact", active_rubric["coverageRule"])
+        self.assertIn("seven highest-impact", active_rubric["coverageRule"])
         self.assertIn(
             "generic realism preferences",
             active_rubric["referenceComparisonRule"],
@@ -2379,6 +2379,37 @@ class QualityGateRegressionTests(unittest.TestCase):
                 require_approve=True,
             ),
             [],
+        )
+
+        minor_observation = {
+            "visualRegion": "upper housing",
+            "category": "proportion",
+            "phaseScope": "current",
+            "direction": "slightly narrow",
+            "severity": "minor",
+            "viewIds": ["primary"],
+        }
+        at_limit = copy.deepcopy(entry)
+        at_limit["blindScout"]["observations"] = [
+            copy.deepcopy(minor_observation) for _ in range(7)
+        ]
+        self.assertEqual(
+            blind_scout_entry_failures(self.spec, at_limit, "blockout"),
+            [],
+        )
+        over_limit = copy.deepcopy(at_limit)
+        over_limit["blindScout"]["observations"].append(
+            copy.deepcopy(minor_observation)
+        )
+        self.assertTrue(
+            any(
+                "at most 7 items" in failure
+                for failure in blind_scout_entry_failures(
+                    self.spec,
+                    over_limit,
+                    "blockout",
+                )
+            )
         )
 
         missing = copy.deepcopy(entry)

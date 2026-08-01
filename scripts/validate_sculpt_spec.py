@@ -3180,7 +3180,7 @@ def validate_phase_execution_contract(
                     )
                 if output.get("maxObservations") != MAX_BLIND_SCOUT_OBSERVATIONS:
                     errors.append(
-                        "phaseExecutionContract.visualScout.output.maxObservations must be 3"
+                        "phaseExecutionContract.visualScout.output.maxObservations must be 7"
                     )
                 expected_scan_fields = [
                     "visualRegion",
@@ -3231,7 +3231,7 @@ def validate_phase_execution_contract(
                 )
             if quality_gate.get("maxBlindScoutObservations") != MAX_BLIND_SCOUT_OBSERVATIONS:
                 errors.append(
-                    "phaseExecutionContract.qualityGate.maxBlindScoutObservations must be 3"
+                    "phaseExecutionContract.qualityGate.maxBlindScoutObservations must be 7"
                 )
     human_approval = contract.get("humanApproval")
     if version in {1, 2}:
