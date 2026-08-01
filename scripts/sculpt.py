@@ -17,6 +17,7 @@ import sculpt_modules
 import sculpt_capabilities
 import sculpt_corrections
 import sculpt_pass_orchestrator
+import sculpt_tree_generator
 import sculpt_user_approval
 import sculpt_view_hypotheses
 import validate_sculpt_spec
@@ -64,6 +65,10 @@ COMMANDS: dict[str, Command] = {
     "correct": (
         "Validate and apply one typed perceptual correction batch to a challenger spec.",
         sculpt_corrections.main,
+    ),
+    "tree": (
+        "Expand one broadleaf or conifer recipe into a Form challenger spec.",
+        sculpt_tree_generator.main,
     ),
     "migrate": ("Migrate a spec explicitly without rewriting review evidence.", migrate_sculpt_spec.main),
     "module": (

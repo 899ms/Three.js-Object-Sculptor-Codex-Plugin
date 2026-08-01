@@ -28,6 +28,10 @@ Do not copy fixed segment or instance counts from examples. Select only the
 geometry density needed for the visible silhouette, curvature, and motion.
 Instancing is an implementation option, not visual-quality evidence.
 
+When a whole static tree needs an automatic first Form construction, route to
+`procedural-tree-generation.md`. Keep using this file for per-component choices
+and for any plant whose hierarchy has already been authored.
+
 ## Lookdev routing
 
 - bark: high roughness with independent meso relief and fine normal breakup;

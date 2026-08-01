@@ -285,7 +285,9 @@ extensions. Load one only after an observed component or named phase problem
 matches its trigger; never classify the whole object into one exclusive
 category or preload the library:
 
-- trunks/branches/stems/leaves/grass: `references/patterns/vegetation.md`;
+- trunks/branches/stems/leaves/grass: `references/patterns/vegetation.md`; load
+  `references/patterns/procedural-tree-generation.md` only for an automatic
+  whole-tree first Form construction;
 - rigid manufactured panels/frames/fasteners/machinery: `references/patterns/hard-surface-machinery.md`;
 - exposed organic skin/eyes/flesh: `references/patterns/organic-skin-eyes.md`;
 - visible hair/fur/bristles/fibers: `references/patterns/hair-fur-fiber.md`;
