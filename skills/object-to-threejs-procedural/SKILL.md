@@ -288,6 +288,9 @@ category or preload the library:
 - trunks/branches/stems/leaves/grass: `references/patterns/vegetation.md`; load
   `references/patterns/procedural-tree-generation.md` only for an automatic
   whole-tree first Form construction;
+- bounded terrain/ground/rocks/boulders/cliffs:
+  `references/patterns/procedural-landform-generation.md` only for an automatic
+  first Form construction;
 - rigid manufactured panels/frames/fasteners/machinery: `references/patterns/hard-surface-machinery.md`;
 - exposed organic skin/eyes/flesh: `references/patterns/organic-skin-eyes.md`;
 - visible hair/fur/bristles/fibers: `references/patterns/hair-fur-fiber.md`;

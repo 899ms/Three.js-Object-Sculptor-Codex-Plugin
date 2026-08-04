@@ -16,6 +16,7 @@ import probe_reference_image
 import sculpt_modules
 import sculpt_capabilities
 import sculpt_corrections
+import sculpt_landform_generator
 import sculpt_pass_orchestrator
 import sculpt_tree_generator
 import sculpt_user_approval
@@ -69,6 +70,10 @@ COMMANDS: dict[str, Command] = {
     "tree": (
         "Expand one broadleaf or conifer recipe into a Form challenger spec.",
         sculpt_tree_generator.main,
+    ),
+    "landform": (
+        "Expand one bounded terrain, boulder, or cliff recipe into a Form challenger spec.",
+        sculpt_landform_generator.main,
     ),
     "migrate": ("Migrate a spec explicitly without rewriting review evidence.", migrate_sculpt_spec.main),
     "module": (

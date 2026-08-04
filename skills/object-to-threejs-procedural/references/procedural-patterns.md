@@ -44,7 +44,7 @@ second column are registered primitive IDs.
 | sectional body | `section-loft` | torsos, heads, hulls, trunks, tapered shells | ordered elliptical sections, not arbitrary patches |
 | fitted layer | `conforming-shell` | static clothing, armor skins, bark, covers | requires an undeformed `section-loft` host |
 | branching graph | `branch-network` | trees, roots, antlers, horns, coral | branch tubes/junctions overlap rather than fuse |
-| controlled sheet | `deformable-surface` | static drapes, flags, membranes, fabric panels | no cloth simulation or arbitrary closed solid |
+| controlled sheet | `deformable-surface` | bounded terrain, static drapes, flags, membranes, fabric panels | no arbitrary closed solid or live simulation |
 | guided fibers | `fiber-system` | bounded hair/fur accents, bristles, feathers, grass | ribbon cards, not dense grooming |
 | implicit blend | `implicit-surface` | foam, wax, blobs, stylized liquid, soft subtraction | bounded field, not a general boolean engine |
 | semantic field sculpt | `sculpted-surface` | welded anatomy, creature masses, rocks, trunks, relief/recess | one closed connected manifold surface |
@@ -67,7 +67,7 @@ pretending that every representation is executable.
 | `representationKind` | Registered or composed route | Use `capability-gap` when |
 | --- | --- | --- |
 | solid mesh | primitive solids, `extrude`, `lathe`, sweeps, lofts, implicit surfaces, or assemblies | exact imported mesh recovery, manufacturing topology, production retopology, or unrestricted CSG is required |
-| surface shell or height field | `conforming-shell` and `deformable-surface`; compose a bounded landform from `sculpted-surface`, lofted, or extruded masses | a true height-field terrain, erosion solver, GIS-scale surface, terrain chunking, collision LOD, or streaming is required |
+| surface shell or height field | `conforming-shell` and `deformable-surface`; use the bounded landform compiler or compose sculpted, lofted, or extruded masses | true hydraulic erosion, caves/overhangs, GIS-scale terrain, chunking, collision LOD, or streaming is required |
 | curve or strand network | `tube`, `curve-sweep`, `branch-network`, `fiber-system` | dense groom curves, cyclic graph topology, automatic attachment, or dynamic strand simulation is required |
 | point cloud or particle field | `instanced-cluster` for visible discrete particles; `volume-field` for a static cloudy approximation | raw point-cloud ingestion, point rendering, dynamic particles, flocking, or fluid flow is required |
 | sprite or billboard | `plane-card` for a fixed card | camera-facing sprites, axial billboards, impostor atlases, or view-dependent replacement are required |
@@ -86,9 +86,10 @@ or `distributed system`; `branch-network` only for a rooted acyclic
 
 ## Important Composite Cases
 
-- **Terrain/environment:** build bounded rocks with `sculpted-surface`; compose
-  cliffs/spires from sculpted, lofted, or extruded masses; split vegetation,
-  props, water, and atmosphere. True terrain systems remain a capability gap.
+- **Terrain/environment:** use `procedural-landform-generation.md` for an
+  automatic first bounded terrain/boulder/cliff Form, or compose sculpted,
+  lofted, and extruded masses directly. Split vegetation, props, water, and
+  atmosphere. True terrain systems remain a capability gap.
 - **Vegetation:** combine branches/sweeps or a fused sculpted mass with
   scatter, instances, cards, or fibers for foliage.
 - **Characters:** use a lofted or sculpted host plus real separate boundaries,

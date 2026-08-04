@@ -104,6 +104,19 @@ PACKS = (
         "references/patterns/vegetation.md",
     ),
     CapabilityPack(
+        "terrain-landform",
+        (
+            "terrain", "landform", "ground-surface", "soil", "rock", "stone",
+            "boulder", "cliff", "canyon", "mountain", "pebble",
+        ),
+        ("blockout", "form", "lookdev"),
+        ("true-geometry", "material-response", "hybrid"),
+        ("deformable-surface", "sculpted-surface", "instanced-cluster", "ellipsoid"),
+        ("reshape-landform", "redistribute-rocks", "retune-earth-material"),
+        ("componentTree", "surfaceTopologyPlan", "materials"),
+        "references/patterns/procedural-landform-generation.md",
+    ),
+    CapabilityPack(
         "procedural-motion",
         ("rotor", "hinge", "slide", "wheel", "lever", "piston", "sway", "pivot", "motion"),
         ("blockout", "form", "interaction"),
