@@ -285,7 +285,7 @@ new evidence falsifies an earlier classification. Synchronize after an edit so
 derived labels and phase hashes stay current:
 
 ```bash
-python3 ../../scripts/sculpt.py sync object-sculpt.json
+python3 <plugin-root>/scripts/sculpt.py sync object-sculpt.json
 ```
 
 Keep `notes` non-executable; put every build/review instruction in an axis,

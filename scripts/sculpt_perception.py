@@ -412,6 +412,11 @@ def validate_perceptual_contract(spec: Mapping[str, Any]) -> list[str]:
         failures.append(
             "perceptualContract.enforcementMode must be advisory or strict"
         )
+    if (
+        contract.get("enforcementMode") == "strict"
+        and not str(spec.get("sourceImage") or "").strip()
+    ):
+        failures.append("strict perceptual enforcement requires a non-empty sourceImage")
 
     viewing = spec.get("viewingContract")
     if not isinstance(viewing, Mapping):

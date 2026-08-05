@@ -15,7 +15,10 @@ from sculpt_contract import (
     blind_scout_execution_contract,
     build_pass_plan,
     complexity_minimums,
+    human_approval_contract,
     parse_json,
+    primary_feature_review_policy,
+    review_governance_contract,
     sync_pipeline,
     write_spec_atomic,
 )
@@ -138,7 +141,9 @@ def make_quality_contract(
     }
 
 
-def make_phase_execution_contract() -> dict[str, Any]:
+def make_phase_execution_contract(
+    approval_mode: str = "phase-by-phase",
+) -> dict[str, Any]:
     """Describe the lean LLM-facing path and its three-signal visual gate."""
 
     return {
@@ -248,31 +253,7 @@ def make_phase_execution_contract() -> dict[str, Any]:
             "centroidAndAspect": "diagnostic-only",
             "humanApprovalAfterSystemPass": True,
         },
-        "humanApproval": {
-            "required": True,
-            "scope": "every-active-phase",
-            "order": "after-system-pass-before-next-phase",
-            "systemPassPrerequisite": True,
-            "approvalDecisions": ["approved", "changes-requested"],
-            "bindingFields": [
-                "passId",
-                "reviewKey",
-                "specHash",
-                "reviewedArtifactSha256",
-            ],
-            "changesRequestedFields": [
-                "visualRegion",
-                "problem",
-                "expectedDirection",
-            ],
-            "rules": [
-                "Never ask the user to approve before deterministic preflight, the composite AI review, and blind scout approve pass.",
-                "Show the current output and exact comparison or runtime evidence when requesting approval.",
-                "Only explicit user approval completes the phase and unlocks the next phase.",
-                "If the user requests changes, record where the problem is, what is wrong, and the expected direction; refine and rerun the composite AI review and blind scout before asking again.",
-                "The builder must never infer, fabricate, or self-record user approval.",
-            ],
-        },
+        "humanApproval": human_approval_contract(approval_mode),
         "deferredWork": {
             "form": ["recursive detail plans", "attachments", "default 2x2 turnaround"],
             "lookdev": ["PBR extraction", "surface descriptors", "lighting refinement"],
@@ -510,7 +491,6 @@ def make_spec(
     intended_use: str | None = None,
     quality_profile: str = "balanced",
     reference_background: str = "unassessed",
-    original_image: str | None = None,
     background_removal_mode: str | None = None,
     imagegen_trigger: str | None = None,
     declared_simplifications: list[str] | None = None,
@@ -584,7 +564,6 @@ def make_spec(
     if not image:
         if (
             reference_background != "unassessed"
-            or original_image
             or background_removal_mode
             or imagegen_trigger
             or declared_simplifications
@@ -813,7 +792,8 @@ def make_spec(
         "surfaceTopologyPlan": surface_topology_plan,
         "detailDecompositionContract": detail_decomposition_contract,
         "qualityContract": quality_contract,
-        "phaseExecutionContract": make_phase_execution_contract(),
+        "phaseExecutionContract": make_phase_execution_contract(approval_mode),
+        "reviewGovernance": review_governance_contract(),
         "terminologyProfile": {
             "domain": "real-time procedural Three.js asset",
             "geometryTerms": ["silhouette", "proportion", "primitive", "bevel", "taper", "attachment"],
@@ -864,23 +844,12 @@ def make_spec(
                 "codePixelDiffIsAcceptanceAuthority": False,
                 "requiredLayerScores": [],
                 "scoringRule": (
-                    "AI vision returns one composite 0-to-1 score and concrete corrections; "
-                    "the blind visual scout supplies the independent binary gate."
+                    "The primary independent reviewer returns one composite 0-to-1 score, "
+                    "reviews every critical or mustPass feature target, and supplies concrete "
+                    "corrections; the blind visual scout supplies only the independent binary "
+                    "visual gate."
                 ),
-                "featureReviewPolicy": {
-                    "enabled": False,
-                    "reviewUnit": "multi-view-contact-sheet",
-                    "maxCriticalFeaturesPerPass": 8,
-                    "maxImportantFeaturesPerPass": 3,
-                    "criticalDefaultThreshold": critical_threshold,
-                    "importantAverageThreshold": important_threshold,
-                    "adaptiveEscalation": True,
-                    "singleImagePairOnly": False,
-                    "selectionRule": (
-                        "Review a few identity-defining semantic systems, not every mesh; "
-                        "visible face and hand regions remain independent critical targets."
-                    ),
-                },
+                "featureReviewPolicy": primary_feature_review_policy(quality_profile),
             },
             "visualSanity": {
                 "enabled": True,
@@ -1074,13 +1043,6 @@ def make_spec(
             perceptual_enforcement,
         )
     )
-    if approval_mode == "final-only":
-        spec["phaseExecutionContract"]["humanApproval"].update(
-            {
-                "scope": "final-active-phase",
-                "order": "after-final-system-pass",
-            }
-        )
     if intended_use:
         spec["legacyIntent"] = {
             "value": intended_use,
@@ -1094,7 +1056,7 @@ def make_spec(
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target_name")
-    parser.add_argument("--image")
+    parser.add_argument("--image", required=True)
     parser.add_argument(
         "--reference-separation",
         "--reference-background",
@@ -1105,10 +1067,6 @@ def main(argv: list[str]) -> int:
             "Classify subject/background separation. Use clear for white or contrasting "
             "backgrounds; mixed requires an ImageGen white-background output. present is a legacy alias for mixed."
         ),
-    )
-    parser.add_argument(
-        "--original-image",
-        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--imagegen-preparation-mode",
@@ -1206,7 +1164,6 @@ def main(argv: list[str]) -> int:
             args.intended_use,
             args.quality_profile,
             args.reference_background,
-            args.original_image,
             args.background_removal_mode,
             args.imagegen_trigger,
             args.declared_simplification,

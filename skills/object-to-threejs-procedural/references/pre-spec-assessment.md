@@ -118,7 +118,7 @@ Resolve `viewHypothesisPolicy` independently as required by `SKILL.md`: record `
 Validate the current pass before generation:
 
 ```bash
-python3 ../../scripts/sculpt.py validate spec.json --for-pass <current-pass> --strict-quality
+python3 <plugin-root>/scripts/sculpt.py validate spec.json --for-pass <current-pass> --strict-quality
 ```
 
 If strict validation fails:

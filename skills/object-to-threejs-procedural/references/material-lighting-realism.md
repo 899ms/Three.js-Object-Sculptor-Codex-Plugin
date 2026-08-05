@@ -27,7 +27,17 @@ Before accepting `lookdev`, the spec must contain:
 - material-specific behavior: alpha/transmission/translucency for thin or transparent parts, metalness/clearcoat for reflective parts, cloth/fiber grain for fabric-like parts.
 - explicit special response: select `materialProfile` only when `cloth`, `fiber`, `glass`, `liquid`, or `volume` behavior is needed; omitted profiles stay on the standard material path.
 - independent PBR channels: every channel that is present must be generated or authored independently; never reuse albedo as a roughness, height, normal, or AO map. Omit an unsupported channel instead of fabricating it, then use an evidence-backed scalar or an explicit smooth/unlit rule.
-- reference-derived PBR extraction: for `reference-fidelity`, crop one material region and run `python3 ../../scripts/sculpt.py pbr` with `--material-crop-confirmed` and an explicit `--url-prefix`. Never patch from a full UI/demo screenshot. Respect each channel's eligibility; below the configured suitability target, stop, omit unsafe channels, use an authored fallback, or request better material evidence.
+- reference-derived PBR extraction: for `reference-fidelity`, crop one material region and run:
+
+  ```bash
+  python3 <plugin-root>/scripts/sculpt.py pbr /absolute/path/material-crop.png \
+    --out-dir /absolute/path/pbr-output \
+    --material-id <material-id> \
+    --material-crop-confirmed \
+    --url-prefix <project-url-prefix>
+  ```
+
+  Never patch from a full UI/demo screenshot. Respect each channel's eligibility; below the configured suitability target, stop, omit unsafe channels, use an authored fallback, or request better material evidence.
 - scale hierarchy: close-up materials must describe macro, meso, and micro surface-frequency bands with object-relative frequency and amplitude.
 - projection/UV intent: use emitted `textureProjection.mode` values `uv`, `planar`, `cylindrical`, or `spherical`; `uv` preserves authored UVs. Set `axis` to `x`, `y`, or `z` when observable, otherwise let the generator infer it from effective scaled dimensions. State repeat/texel-density intent, and do not describe these modes as triplanar blending.
 - quality-first resolution: use at least 1024px procedural maps for important close-up materials and prefer 2048px when reference fidelity is the priority.

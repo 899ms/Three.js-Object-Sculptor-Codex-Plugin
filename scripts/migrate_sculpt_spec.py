@@ -13,6 +13,8 @@ from typing import Any
 from sculpt_contract import (
     CURRENT_SCHEMA_VERSION,
     parse_schema_version,
+    primary_feature_review_policy,
+    review_governance_contract,
     sync_pipeline,
     write_spec_atomic,
 )
@@ -49,18 +51,55 @@ def add_detail_decomposition_scaffolding(spec: dict[str, Any]) -> int:
     return updated
 
 
+def approval_mode(spec: dict[str, Any]) -> str:
+    perceptual = spec.get("perceptualContract")
+    mode = perceptual.get("approvalMode") if isinstance(perceptual, dict) else None
+    return str(mode) if mode in {"final-only", "phase-by-phase"} else "phase-by-phase"
+
+
 def add_progressive_execution_contract(spec: dict[str, Any]) -> int:
     existing = spec.get("phaseExecutionContract")
+    current = make_phase_execution_contract(approval_mode(spec))
     if isinstance(existing, dict) and existing.get("version") == 4:
-        current = make_phase_execution_contract()
         updates = 0
-        for field in ("visualScout", "stableCoreFields", "phaseOwnedFields"):
+        for field in (
+            "visualScout",
+            "stableCoreFields",
+            "phaseOwnedFields",
+            "cycle",
+            "humanApproval",
+        ):
             if existing.get(field) != current.get(field):
                 existing[field] = copy.deepcopy(current[field])
                 updates += 1
         return updates
-    spec["phaseExecutionContract"] = make_phase_execution_contract()
+    spec["phaseExecutionContract"] = current
     spec.setdefault("userPhaseApprovals", [])
+    return 1
+
+
+def add_review_governance(spec: dict[str, Any]) -> int:
+    expected = review_governance_contract()
+    if spec.get("reviewGovernance") == expected:
+        return 0
+    spec["reviewGovernance"] = expected
+    return 1
+
+
+def enable_primary_feature_review(spec: dict[str, Any]) -> int:
+    loop = spec.get("selfCorrectLoop")
+    acceptance = loop.get("visualAcceptance") if isinstance(loop, dict) else None
+    if not isinstance(acceptance, dict):
+        return 0
+    policy = acceptance.get("featureReviewPolicy")
+    if not isinstance(policy, dict):
+        acceptance["featureReviewPolicy"] = primary_feature_review_policy(
+            str(spec.get("qualityProfile") or "balanced")
+        )
+        return 1
+    if policy.get("enabled") is True:
+        return 0
+    policy["enabled"] = True
     return 1
 
 
@@ -91,9 +130,18 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
         migrated = copy.deepcopy(spec)
         detail_updates = add_detail_decomposition_scaffolding(migrated)
         execution_updates = add_progressive_execution_contract(migrated)
+        governance_updates = add_review_governance(migrated)
+        feature_review_updates = enable_primary_feature_review(migrated)
         perceptual_updates = ensure_perceptual_fields(migrated)
         style_updates = add_visual_style_scaffolding(migrated)
-        if detail_updates or execution_updates or perceptual_updates or style_updates:
+        if (
+            detail_updates
+            or execution_updates
+            or governance_updates
+            or feature_review_updates
+            or perceptual_updates
+            or style_updates
+        ):
             revision = migrated.get("specRevision", 0)
             migrated["specRevision"] = revision + 1 if isinstance(revision, int) else 1
             sync_pipeline(migrated)
@@ -101,6 +149,8 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
             "changed": (
                 detail_updates > 0
                 or execution_updates > 0
+                or governance_updates > 0
+                or feature_review_updates > 0
                 or perceptual_updates > 0
                 or style_updates > 0
             ),
@@ -109,6 +159,11 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
             "componentsUpdated": 0,
             "detailDecompositionUpdates": detail_updates,
             "phaseExecutionContractUpdates": execution_updates,
+            "reviewGovernanceUpdates": governance_updates,
+            "primaryFeatureReviewUpdates": feature_review_updates,
+            "freshReviewRequired": bool(
+                execution_updates or governance_updates or feature_review_updates
+            ),
             "perceptualContractUpdates": perceptual_updates,
             "visualStyleUpdates": style_updates,
             "reviewHistoryPreserved": True,
@@ -198,6 +253,8 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
                     descriptor.setdefault("parameters", {})
     detail_updates = add_detail_decomposition_scaffolding(migrated)
     execution_updates = add_progressive_execution_contract(migrated)
+    governance_updates = add_review_governance(migrated)
+    feature_review_updates = enable_primary_feature_review(migrated)
     perceptual_updates = ensure_perceptual_fields(migrated)
     style_updates = add_visual_style_scaffolding(migrated)
 
@@ -212,6 +269,11 @@ def migrate_spec(spec: dict[str, Any], target: str = TARGET_SCHEMA) -> tuple[dic
         "componentsUpdated": updated,
         "detailDecompositionUpdates": detail_updates,
         "phaseExecutionContractUpdates": execution_updates,
+        "reviewGovernanceUpdates": governance_updates,
+        "primaryFeatureReviewUpdates": feature_review_updates,
+        "freshReviewRequired": bool(
+            execution_updates or governance_updates or feature_review_updates
+        ),
         "perceptualContractUpdates": perceptual_updates,
         "visualStyleUpdates": style_updates,
         "reviewHistoryPreserved": True,

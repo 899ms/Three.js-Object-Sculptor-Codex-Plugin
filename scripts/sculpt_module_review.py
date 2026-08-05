@@ -19,6 +19,7 @@ from sculpt_contract import (
     CORRECTION_TARGET_TYPES,
     REFINEMENT_ACTIONS,
     STRATEGY_RESET_ACTION,
+    blind_scout_mapping_failures,
     blind_scout_phase_id,
     blind_scout_phase_scope,
     correction_batch_from_verdict,
@@ -425,6 +426,18 @@ def review_contract_failures(
                 require_approve=action == "continue",
                 primary_reviewer_context=primary_context,
                 expected_phase=blind_scout_phase,
+            )
+        )
+        failures.extend(
+            blind_scout_mapping_failures(
+                verdict.get("blindScout"),
+                verdict.get("blindScoutMapping"),
+                target_catalog or {},
+                main_agent_context=(
+                    builder.get("contextId")
+                    if isinstance(builder, dict)
+                    else None
+                ),
             )
         )
     summary = verdict.get("summary")
@@ -3297,6 +3310,7 @@ def review_module(
         "diagnosticScores": candidate_quality["diagnosticScores"],
         "reviewId": verdict.get("reviewId"),
         "blindScout": verdict.get("blindScout"),
+        "blindScoutMapping": verdict.get("blindScoutMapping"),
         "reviewerContextId": reviewer_context_id,
         "previewPass": quality_policy["previewPass"],
         "recordedAt": now,
@@ -3322,6 +3336,7 @@ def review_module(
         "attempt": len(attempts) + 1,
         "reviewId": verdict.get("reviewId"),
         "blindScout": verdict.get("blindScout"),
+        "blindScoutMapping": verdict.get("blindScoutMapping"),
         "action": action,
         "accepted": accepted,
         "recordedAt": now,

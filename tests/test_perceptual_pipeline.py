@@ -28,9 +28,12 @@ from sculpt_perception import (  # noqa: E402
 from sculpt_contract import (  # noqa: E402
     correction_batch_from_verdict,
     generation_validation_hash,
+    human_approval_contract,
     human_phase_approval_required,
     pass_order,
+    review_governance_contract,
 )
+from validate_sculpt_spec import validate_spec  # noqa: E402
 
 
 def downstream_impact(phase: str = "finalization") -> list[dict[str, str]]:
@@ -59,7 +62,22 @@ class PerceptualPipelineTests(unittest.TestCase):
         self.assertFalse(
             spec["evidenceAuthority"]["syntheticTurnaround"]["mayApproveFidelity"]
         )
+        self.assertEqual(spec["reviewGovernance"], review_governance_contract())
         self.assertEqual(validate_perceptual_contract(spec), [])
+
+    def test_v4_review_governance_is_required_and_canonical(self) -> None:
+        spec = make_spec("Governed Prop", None, complexity="simple")
+        missing = copy.deepcopy(spec)
+        missing.pop("reviewGovernance")
+        errors, _ = validate_spec(missing)
+        self.assertTrue(any("reviewGovernance must be an object" in item for item in errors))
+
+        tampered = copy.deepcopy(spec)
+        tampered["reviewGovernance"]["builderMayNotOverrideVerdict"] = False
+        errors, _ = validate_spec(tampered)
+        self.assertTrue(
+            any("builderMayNotOverrideVerdict must be True" in item for item in errors)
+        )
 
     def test_imagegen_prepared_target_uses_source_as_sole_authority(self) -> None:
         spec = make_spec(
@@ -78,6 +96,25 @@ class PerceptualPipelineTests(unittest.TestCase):
         self.assertTrue(authority["acceptanceTarget"]["prepared"])
         self.assertNotIn("identityGuardrail", authority)
         self.assertNotIn("originalImage", spec["referencePreparation"])
+
+    def test_v2_reference_preparation_rejects_original_identity_guardrail(self) -> None:
+        spec = make_spec(
+            "Prepared authority",
+            "prepared.png",
+            complexity="simple",
+            reference_background="clear",
+        )
+        spec["referencePreparation"]["comparisonPolicy"] = {
+            "reconstructionTarget": "sourceImage",
+            "identityGuardrail": "originalImage",
+        }
+
+        errors, _ = validate_spec(spec)
+
+        self.assertTrue(
+            any("sole reconstruction and acceptance target" in item for item in errors),
+            errors,
+        )
 
     def test_legacy_identity_guardrail_contract_remains_readable(self) -> None:
         spec = make_spec(
@@ -496,8 +533,19 @@ class PerceptualPipelineTests(unittest.TestCase):
         self.assertFalse(human_phase_approval_required(spec, phases[0]))
         self.assertTrue(human_phase_approval_required(spec, phases[-1]))
         self.assertEqual(
-            spec["phaseExecutionContract"]["humanApproval"]["scope"],
-            "final-active-phase",
+            spec["phaseExecutionContract"]["humanApproval"],
+            human_approval_contract("final-only"),
+        )
+
+        phase_by_phase = make_spec(
+            "Phase-gated Prop",
+            None,
+            complexity="simple",
+            approval_mode="phase-by-phase",
+        )
+        self.assertEqual(
+            phase_by_phase["phaseExecutionContract"]["humanApproval"],
+            human_approval_contract("phase-by-phase"),
         )
 
     def test_wrong_domain_operator_cannot_edit_machine_component(self) -> None:
@@ -556,6 +604,18 @@ class PerceptualPipelineTests(unittest.TestCase):
         failures = validate_perceptual_contract(spec)
         self.assertTrue(any("acceptanceTarget.path" in item for item in failures))
         self.assertTrue(any("mayApproveFidelity" in item for item in failures))
+
+    def test_strict_perceptual_contract_requires_source_image(self) -> None:
+        spec = make_spec(
+            "Strict source",
+            None,
+            complexity="simple",
+            perceptual_enforcement="strict",
+        )
+
+        failures = validate_perceptual_contract(spec)
+
+        self.assertTrue(any("non-empty sourceImage" in item for item in failures))
 
     def test_strict_review_requires_assessed_viewing_contract(self) -> None:
         spec = make_spec(

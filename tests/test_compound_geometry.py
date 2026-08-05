@@ -18,6 +18,7 @@ from new_sculpt_spec import make_spec  # noqa: E402
 from sculpt_contract import (  # noqa: E402
     parse_schema_version,
     pass_order,
+    review_spec_hash,
     schema_version_at_least,
 )
 from sculpt_geometry import (  # noqa: E402
@@ -418,20 +419,28 @@ class CompoundSchemaTests(unittest.TestCase):
             None,
             complexity="simple",
             intended_use="static-render",
+            approval_mode="final-only",
         )
-        spec["reviewHistory"] = [
-            {
-                "passId": "blockout",
-                "action": "refine-code",
-                "summary": "Historical review must remain untouched.",
-            }
-        ]
-        original_history = copy.deepcopy(spec["reviewHistory"])
         stale_rubric = spec["phaseExecutionContract"]["visualScout"][
             "phaseRubrics"
         ]["form"]
         stale_rubric.pop("mandatoryChecks")
         stale_rubric.pop("coverageRule")
+        spec["phaseExecutionContract"]["humanApproval"] = {"required": True}
+        spec.pop("reviewGovernance")
+        spec["selfCorrectLoop"]["visualAcceptance"]["featureReviewPolicy"][
+            "enabled"
+        ] = False
+        stale_hash = review_spec_hash(spec, "blockout")
+        spec["reviewHistory"] = [
+            {
+                "passId": "blockout",
+                "action": "refine-code",
+                "specHash": stale_hash,
+                "summary": "Historical review must remain untouched.",
+            }
+        ]
+        original_history = copy.deepcopy(spec["reviewHistory"])
 
         migrated, report = migrate_spec(spec)
 
@@ -440,9 +449,22 @@ class CompoundSchemaTests(unittest.TestCase):
         ]["form"]
         self.assertTrue(refreshed["mandatoryChecks"])
         self.assertIn("seven highest-impact", refreshed["coverageRule"])
+        self.assertEqual(
+            migrated["phaseExecutionContract"]["humanApproval"]["scope"],
+            "final-active-phase",
+        )
+        self.assertTrue(
+            migrated["selfCorrectLoop"]["visualAcceptance"][
+                "featureReviewPolicy"
+            ]["enabled"]
+        )
         self.assertEqual(migrated["reviewHistory"], original_history)
+        self.assertNotEqual(review_spec_hash(migrated, "blockout"), stale_hash)
         self.assertTrue(report["changed"])
         self.assertGreater(report["phaseExecutionContractUpdates"], 0)
+        self.assertEqual(report["reviewGovernanceUpdates"], 1)
+        self.assertEqual(report["primaryFeatureReviewUpdates"], 1)
+        self.assertTrue(report["freshReviewRequired"])
         self.assertTrue(report["reviewHistoryPreserved"])
 
 

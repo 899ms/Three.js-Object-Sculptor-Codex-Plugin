@@ -712,6 +712,15 @@ class ModularWorkflowTests(unittest.TestCase):
                 },
                 "observations": [],
             },
+            "blindScoutMapping": {
+                "artifactType": "threejs-sculpt-blind-scout-mapping",
+                "version": 1,
+                "mapper": {
+                    "role": "main-agent",
+                    "contextId": "builder-task",
+                },
+                "items": [],
+            },
             "overallScore": overall_score,
             "layerScores": {
                 "silhouetteProportion": layer_score,
@@ -958,6 +967,41 @@ class ModularWorkflowTests(unittest.TestCase):
                 expected_phase="form",
             ),
             [],
+        )
+
+    def test_v4_module_review_requires_main_agent_mapping(self) -> None:
+        self.add_visual_foundation()
+        self.make_implementation()
+        _, evidence = self.make_evidence("module-main-agent-mapping")
+        verdict_path = self.make_verdict("module-main-agent-mapping", evidence)
+        verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+
+        missing = copy.deepcopy(verdict)
+        missing.pop("blindScoutMapping")
+        failures = review_contract_failures(
+            missing,
+            evidence,
+            target_catalog={},
+            require_blind_scout=True,
+            simplified_visual_gate=True,
+            blind_scout_phase="form",
+        )
+        self.assertTrue(
+            any("blindScoutMapping is required" in failure for failure in failures),
+            failures,
+        )
+
+        valid_failures = review_contract_failures(
+            verdict,
+            evidence,
+            target_catalog={},
+            require_blind_scout=True,
+            simplified_visual_gate=True,
+            blind_scout_phase="form",
+        )
+        self.assertFalse(
+            any("blindScoutMapping" in failure for failure in valid_failures),
+            valid_failures,
         )
 
     def test_scored_verdict_requires_non_empty_layer_scores(self) -> None:
@@ -1448,6 +1492,15 @@ class ModularWorkflowTests(unittest.TestCase):
                 },
                 "observations": [],
             },
+            "blindScoutMapping": {
+                "artifactType": "threejs-sculpt-blind-scout-mapping",
+                "version": 1,
+                "mapper": {
+                    "role": "main-agent",
+                    "contextId": "builder-task",
+                },
+                "items": [],
+            },
             "overallScore": 0.95,
             "layerScores": {
                 "silhouette": 0.95,
@@ -1749,6 +1802,15 @@ class ModularWorkflowTests(unittest.TestCase):
                         "model": "test-blind-scout",
                     },
                     "observations": [],
+                },
+                "blindScoutMapping": {
+                    "artifactType": "threejs-sculpt-blind-scout-mapping",
+                    "version": 1,
+                    "mapper": {
+                        "role": "main-agent",
+                        "contextId": "pass-builder",
+                    },
+                    "items": [],
                 },
                 "overallScore": score_value,
                 "layerScores": {
@@ -2152,6 +2214,15 @@ class ModularWorkflowTests(unittest.TestCase):
                 },
                 "observations": [],
             },
+            "blindScoutMapping": {
+                "artifactType": "threejs-sculpt-blind-scout-mapping",
+                "version": 1,
+                "mapper": {
+                    "role": "main-agent",
+                    "contextId": "assembled-preflight-builder",
+                },
+                "items": [],
+            },
             "overallScore": 0.80,
             "layerScores": {
                 "silhouette": 0.80,
@@ -2396,6 +2467,8 @@ class ModularWorkflowTests(unittest.TestCase):
         modular_path = self.root / "init-modular.json"
         base_args = [
             "Init Test",
+            "--image",
+            "reference.png",
             "--complexity",
             "simple",
             "--intended-use",

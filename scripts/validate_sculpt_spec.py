@@ -25,6 +25,8 @@ from sculpt_contract import (
     complexity_minimums,
     is_stateful_complexity_contract,
     adaptive_hypothesis_views,
+    human_approval_contract,
+    blind_scout_execution_contract,
     blind_scout_phase_rubrics,
     component_type,
     detail_feature_count,
@@ -33,6 +35,7 @@ from sculpt_contract import (
     pass_order as canonical_pass_order,
     pipeline_status,
     review_failures,
+    review_governance_contract,
     schema_version_at_least,
     phase_execution_version,
 )
@@ -737,17 +740,10 @@ def validate_reference_preparation_v2(
         errors.append("referencePreparation.outputImage must equal spec.sourceImage")
 
     comparison = preparation.get("comparisonPolicy")
-    accepted_comparison_policies = (
-        {"reconstructionTarget": "sourceImage"},
-        {
-            "reconstructionTarget": "sourceImage",
-            "identityGuardrail": "originalImage",
-        },
-    )
-    if isinstance(comparison, dict) and comparison not in accepted_comparison_policies:
+    if comparison != {"reconstructionTarget": "sourceImage"}:
         errors.append(
-            "referencePreparation.comparisonPolicy must use sourceImage as its "
-            "reconstruction target"
+            "referencePreparation.comparisonPolicy must use sourceImage as its sole "
+            "reconstruction and acceptance target"
         )
 
     if not has_source:
@@ -3050,6 +3046,29 @@ def validate_quality_contract(spec: dict[str, Any], errors: list[str], warnings:
             )
 
 
+def validate_review_governance(
+    spec: dict[str, Any],
+    errors: list[str],
+) -> None:
+    """Require one canonical independent-review authority for v4 workflows."""
+
+    if phase_execution_version(spec) < 4:
+        return
+    governance = spec.get("reviewGovernance")
+    if not isinstance(governance, dict):
+        errors.append("reviewGovernance must be an object for phaseExecutionContract version 4")
+        return
+    expected = review_governance_contract()
+    unexpected = sorted(set(governance) - set(expected))
+    if unexpected:
+        errors.append(
+            "reviewGovernance contains unsupported fields: " + ", ".join(unexpected)
+        )
+    for field, value in expected.items():
+        if governance.get(field) != value:
+            errors.append(f"reviewGovernance.{field} must be {value!r}")
+
+
 def validate_phase_execution_contract(
     spec: dict[str, Any],
     errors: list[str],
@@ -3173,10 +3192,7 @@ def validate_phase_execution_contract(
                 "source-image-only",
             }
             if version == 1
-            else {
-                "prepared-target-with-original-identity-guardrail",
-                "source-image-only",
-            }
+            else {"source-image-only"}
         )
         if comparison_authority not in accepted_authorities:
             errors.append(
@@ -3198,16 +3214,13 @@ def validate_phase_execution_contract(
         errors.append("phaseExecutionContract.visualScout must be an object")
     else:
         phase_inputs = [] if version in {2, 3} else ["phaseId", "phaseRubric"]
-        accepted_allowlists = [
-            [
-                reference_name,
-                "currentRender",
-                "previousRender",
-                "sideBySideComparison",
-                *phase_inputs,
-            ]
-            for reference_name in ("sourceImage", "originalImage")
-        ]
+        accepted_allowlists = [[
+            "sourceImage",
+            "currentRender",
+            "previousRender",
+            "sideBySideComparison",
+            *phase_inputs,
+        ]]
         required_denials = {
             "spec",
             "phasePacket",
@@ -3231,8 +3244,7 @@ def validate_phase_execution_contract(
         if visual_scout.get("inputAllowlist") not in accepted_allowlists:
             errors.append(
                 "phaseExecutionContract.visualScout.inputAllowlist must contain only "
-                "sourceImage (or legacy originalImage), "
-                "the canonical image inputs"
+                "sourceImage and the canonical image inputs"
                 + (
                     ""
                     if version in {2, 3}
@@ -3247,6 +3259,13 @@ def validate_phase_execution_contract(
                 "phaseExecutionContract.visualScout.inputDenylist must exclude spec, "
                 "IDs, parameters, scores, builder defense, and primary verdict"
             )
+        if version == 4:
+            canonical_scout = blind_scout_execution_contract()
+            for field in ("inputRule", "approvalRule"):
+                if visual_scout.get(field) != canonical_scout[field]:
+                    errors.append(
+                        f"phaseExecutionContract.visualScout.{field} must match the canonical blind-input contract"
+                    )
         output = visual_scout.get("output")
         if not isinstance(output, dict):
             errors.append("phaseExecutionContract.visualScout.output must be an object")
@@ -3302,6 +3321,14 @@ def validate_phase_execution_contract(
                 if output.get("maxObservations") != MAX_BLIND_SCOUT_OBSERVATIONS:
                     errors.append(
                         "phaseExecutionContract.visualScout.output.maxObservations must be 7"
+                    )
+                if (
+                    output.get("mainAgentMapping")
+                    != blind_scout_execution_contract()["output"]["mainAgentMapping"]
+                ):
+                    errors.append(
+                        "phaseExecutionContract.visualScout.output.mainAgentMapping "
+                        "must match the canonical main-agent mapping contract"
                     )
                 expected_scan_fields = [
                     "visualRegion",
@@ -3363,53 +3390,20 @@ def validate_phase_execution_contract(
     elif not isinstance(human_approval, dict):
         errors.append("phaseExecutionContract.humanApproval must be an object")
     else:
-        if human_approval.get("required") is not True:
-            errors.append("phaseExecutionContract.humanApproval.required must be true")
-        if human_approval.get("scope") != "every-active-phase":
-            errors.append(
-                "phaseExecutionContract.humanApproval.scope must be 'every-active-phase'"
-            )
-        if human_approval.get("order") != "after-system-pass-before-next-phase":
-            errors.append(
-                "phaseExecutionContract.humanApproval.order must be "
-                "'after-system-pass-before-next-phase'"
-            )
-        if human_approval.get("systemPassPrerequisite") is not True:
-            errors.append(
-                "phaseExecutionContract.humanApproval.systemPassPrerequisite must be true"
-            )
-        if human_approval.get("approvalDecisions") != [
-            "approved",
-            "changes-requested",
-        ]:
-            errors.append(
-                "phaseExecutionContract.humanApproval.approvalDecisions must be "
-                "approved, changes-requested"
-            )
-        if human_approval.get("bindingFields") != [
-            "passId",
-            "reviewKey",
-            "specHash",
-            "reviewedArtifactSha256",
-        ]:
-            errors.append(
-                "phaseExecutionContract.humanApproval.bindingFields must bind the "
-                "phase, review, spec, and reviewed artifact"
-            )
-        if human_approval.get("changesRequestedFields") != [
-            "visualRegion",
-            "problem",
-            "expectedDirection",
-        ]:
-            errors.append(
-                "phaseExecutionContract.humanApproval.changesRequestedFields must "
-                "identify visualRegion, problem, and expectedDirection"
-            )
-        validate_string_array(
-            human_approval.get("rules"),
-            "phaseExecutionContract.humanApproval.rules",
-            errors,
+        perceptual = spec.get("perceptualContract")
+        approval_mode = (
+            perceptual.get("approvalMode")
+            if isinstance(perceptual, dict)
+            else "phase-by-phase"
         )
+        expected_human_approval = human_approval_contract(
+            str(approval_mode or "phase-by-phase")
+        )
+        if human_approval != expected_human_approval:
+            errors.append(
+                "phaseExecutionContract.humanApproval must match "
+                f"perceptualContract.approvalMode={approval_mode!r}"
+            )
     approvals = spec.get("userPhaseApprovals")
     if version in {3, 4} and not isinstance(approvals, list):
         errors.append("userPhaseApprovals must be an array")
@@ -3715,10 +3709,24 @@ def validate_self_correct_loop(spec: dict[str, Any], errors: list[str], warnings
         )
         feature_policy = visual_acceptance.get("featureReviewPolicy")
         if feature_policy is None:
-            warnings.append("quality: visualAcceptance.featureReviewPolicy is missing")
+            if phase_execution_version(spec) >= 4:
+                errors.append(
+                    "selfCorrectLoop.visualAcceptance.featureReviewPolicy is required "
+                    "for phaseExecutionContract version 4"
+                )
+            else:
+                warnings.append("quality: visualAcceptance.featureReviewPolicy is missing")
         elif not isinstance(feature_policy, dict):
             errors.append("selfCorrectLoop.visualAcceptance.featureReviewPolicy must be an object")
         else:
+            if (
+                phase_execution_version(spec) >= 4
+                and feature_policy.get("enabled") is not True
+            ):
+                errors.append(
+                    "selfCorrectLoop.visualAcceptance.featureReviewPolicy.enabled "
+                    "must be true for phaseExecutionContract version 4"
+                )
             for field in (
                 "enabled",
                 "adaptiveEscalation",
@@ -4724,6 +4732,7 @@ def validate_spec(
     validate_quality_targets(spec, errors, warnings)
     validate_quality_contract(spec, errors, warnings)
     validate_phase_execution_contract(spec, errors, warnings)
+    validate_review_governance(spec, errors)
     validate_action_readiness(spec, errors, warnings)
     validate_interaction_contract(spec, errors, warnings)
     validate_reference_preparation(spec, errors, warnings)

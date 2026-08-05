@@ -20,12 +20,17 @@ Reconstruct the reference as an editable procedural Three.js asset. Optimize fir
 
 Do not claim hidden geometry as observed fact. Record it as a bounded assumption or known risk.
 
+Resolve `<plugin-root>` from this loaded file: `SKILL.md` lives at
+`<plugin-root>/skills/object-to-threejs-procedural/SKILL.md`. Invoke every bundled
+command through the absolute `<plugin-root>/scripts/sculpt.py` path; never assume
+the target project's current working directory.
+
 ## Default architecture
 
 Use the progressive single-spec layout by default:
 
 ```bash
-python3 ../../scripts/sculpt.py init "Object Name" \
+python3 <plugin-root>/scripts/sculpt.py init "Object Name" \
   --image <usable-original-or-white-background-prepared-reference> \
   --reference-separation <clear|mixed|absent> \
   [--imagegen-preparation-mode <white-background-cleanup|white-background-simplification>] \
@@ -50,7 +55,7 @@ Require at least one inspectable image. Assess both subject/background separatio
 - ImageGen must output a clean solid-white background with strong subject contrast. Do not request or validate alpha transparency.
 - Use `white-background-cleanup` for separation/edge cleanup. Use `white-background-simplification` for reconstruction-blocking complexity, quality, or difficult real-world surface variation, and declare every intentionally simplified detail family.
 - Bounded edits may clarify ambiguous edges, remove noise, regularize minor geometry, convert difficult photoreal surface variation into clean buildable 3D masses, and merge or omit non-signature microdetail. Preserve the recognizable class, primary silhouette, macro proportions, major component layout, signature features, pose, and primary viewpoint in the generated target.
-- The generated image becomes `sourceImage` and the sole reconstruction and acceptance target. Do not retain or send the pre-generation image as an acceptance guardrail.
+- During preparation, compare the generated candidate with the pre-generation image only as a transient identity-drift check. Once accepted, the generated image becomes `sourceImage` and the sole reconstruction and acceptance target; do not store or send the pre-generation image to either reviewer.
 - `unassessed` preparation is a strict-quality blocker.
 
 Default new work to `reference-fidelity`. Use `balanced` only when the user explicitly accepts a lower visual bar.
@@ -82,7 +87,7 @@ IDs remain stable. Edit authority and review scope are cumulative: the active ph
 Use the concise current-phase packet instead of reopening the whole spec:
 
 ```bash
-python3 ../../scripts/sculpt.py context object-sculpt.json
+python3 <plugin-root>/scripts/sculpt.py context object-sculpt.json
 ```
 
 Read `workPacket.contextProjection`, edit only `specDeltaContract.editablePaths`, and leave `futurePhaseWorkForbidden` alone. Read additional files only after a named validation failure proves they are relevant.
@@ -178,9 +183,11 @@ Every visual checkpoint requires the current render and exact side-by-side compa
 Use two distinct review roles:
 
 - The blind visual scout receives only `sourceImage`, `currentRender`, `previousRender` when a prior checkpoint exists, their exact side-by-side comparison, the active `phaseId`, and that phase's compact visual rubric. It must not receive the spec, phase packet, IDs, parameters, scores, builder defense, or primary verdict. It performs a mandatory earlier-quality sweep first, then the active-phase review, and must inspect every rubric check before deciding. Those checks explicitly cover excessive reference deviation, visible assembly/contact/attachment alignment, reference-relative balance or intentional asymmetry, missing/invented/malformed signature detail, and material/surface response that is visibly simpler or less plausible than the reference. It may `reject` a major/critical issue owned by the active phase (`phaseScope: current`) or any earlier phase (`phaseScope: protected`, a backward-compatible token meaning prior quality scope, not a frozen layer). Earlier phases may also produce non-blocking improvement directions. A small numeric score drop alone is not a rejection reason; score regression must be corroborated by the visual comparison. Blockout judges silhouette/framing/macro proportion/major parts; Form adds structure/shape/attachments/balance/signature detail and can improve Blockout; Lookdev adds color/material/surface/lighting/grounding and can improve Blockout/Form; Interaction adds motion/clearance/runtime states and can improve all earlier phases. Only future-phase issues are `deferred` and cannot reject. The scout scans the full rubric but returns at most seven highest-impact directions, and assigns no scores, IDs, parameter paths, or numeric fixes.
-- The primary independent reviewer receives the raw reference, current render/comparison, phase packet, and all IDs editable in the cumulative current-or-earlier scope—never the builder's proposed score or defense. It must review in the same order: first map remaining or improvable earlier-phase geometry/structure/lookdev defects to exact IDs and corrections, then review the active phase. It supplies one composite shape-similarity score and exact component corrections. It may not approve merely because the active-phase work is good while an obvious earlier-phase defect remains. The system gate requires composite score `>=0.70` and blind-scout `approve`; explicit user approval remains the final phase gate.
+- The primary independent reviewer receives the raw reference, current render/comparison, phase packet, and all IDs editable in the cumulative current-or-earlier scope—never the builder's proposed score or defense. It must review in the same order: first map remaining or improvable earlier-phase geometry/structure/lookdev defects to exact IDs and corrections, then review the active phase. It supplies one composite shape-similarity score, independently reviews every applicable critical or `mustPass` feature target, and returns exact component corrections. It may not approve merely because the active-phase work is good while an obvious earlier-phase defect or required feature failure remains. The system gate requires composite score `>=0.70`, every critical or `mustPass` feature gate, and blind-scout `approve`; explicit user approval remains the configured final human gate.
 
-The scout supplements rather than replaces the primary reviewer. Use a fresh context distinct from both builder and primary reviewer so spec assumptions cannot contaminate its purely visual diagnosis.
+The primary reviewer must run as a separate sub-agent. After both reviewers return, the main agent maps every blind-scout observation 1:1 into the separate `blindScoutMapping` artifact using exact spec targets. It may not drop, merge, or rewrite the scout's decision/severity; an unmapped current/protected `critical|major` observation keeps the gate blocked.
+
+The scout supplements rather than replaces the primary reviewer. Use a fresh context distinct from both builder and primary reviewer so spec assumptions cannot contaminate its purely visual diagnosis. The runtime validates the emitted scout packet fields, but it cannot inspect an external orchestrator's hidden prompt or conversation history. Passing any denied context to the scout is a protocol failure; report that review and completion as `UNVERIFIED`.
 
 After both AI layers and deterministic gates pass, human approval is the final phase gate:
 
@@ -193,13 +200,21 @@ After both AI layers and deterministic gates pass, human approval is the final p
 Record the response with:
 
 ```bash
-python3 ../../scripts/sculpt.py approve object-sculpt.json \
+python3 <plugin-root>/scripts/sculpt.py approve object-sculpt.json \
   --pass-id <blockout|form|lookdev|interaction> \
   --decision approved \
   --user-statement "<exact user approval>"
 ```
 
-For a rejection, use `--decision changes-requested` plus `--feedback-json` containing an array of `{visualRegion, problem, expectedDirection}`.
+For a rejection, record both the exact user statement and structured feedback:
+
+```bash
+python3 <plugin-root>/scripts/sculpt.py approve object-sculpt.json \
+  --pass-id <blockout|form|lookdev|interaction> \
+  --decision changes-requested \
+  --user-statement "<exact user request>" \
+  --feedback-json '[{"visualRegion":"<where>","problem":"<what>","expectedDirection":"<desired change>"}]'
+```
 
 Reviewer scores use normalized `0..1` values. Suitability and complexity `scores.*` use ordinal integers `0..3`; never mix the scales.
 
@@ -260,13 +275,16 @@ approval mode is satisfied for the latest system-passed artifact, the final
 champion spec validates, generated TypeScript compiles with `three`, the real
 app loads without relevant errors, every comparison is bound to the reviewed
 artifact and its render-pipeline receipt, cumulative visual quality did not
-regress, and required interaction has real runtime proof.
+regress, and required interaction has real runtime proof. If a required external
+check or independent-review context cannot run, name the missing evidence and
+report the result as `UNVERIFIED`; do not substitute confidence for execution.
 
 Performance is an optional post-lookdev audit activated only by an explicit user/device budget. Restore the visual champion after any performance refinement that lowers visual quality.
 
 ## Reference routing
 
-Load only the reference named by the current phase packet:
+Load the mandatory reference mapped to the active phase or problem below. The
+phase packet does not carry reference filenames:
 
 - suitability/global contract: `references/pre-spec-assessment.md`;
 - visual-style axes, values, and derivation: `references/visual-style-classification.md`;
@@ -281,9 +299,11 @@ Load only the reference named by the current phase packet:
 - terminology: `references/3d-graphics-terminology.md`.
 
 Optional component-pattern references are capability modules, not schema
-extensions. Load one only after an observed component or named phase problem
-matches its trigger; never classify the whole object into one exclusive
-category or preload the library:
+extensions. Use the current `sculpt context` output
+`capabilities.packs[].reference` as the canonical path for a matched pack. Load
+one only after an observed component or named phase problem matches its trigger;
+never classify the whole object into one exclusive category or preload the
+library:
 
 - trunks/branches/stems/leaves/grass: `references/patterns/vegetation.md`; load
   `references/patterns/procedural-tree-generation.md` only for an automatic

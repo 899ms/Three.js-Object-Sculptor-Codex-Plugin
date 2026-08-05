@@ -1238,10 +1238,10 @@ def main(argv: list[str]) -> int:
             raise ValueError("--summary cannot override the independent verdict summary")
         action = verdict_action
         summary = verdict_summary
-    elif document.modular and visual_review_required:
+    elif visual_review_required and (views or args.action == "continue"):
         raise ValueError(
-            "modular visual review requires --verdict-json from a fresh independent reviewer; "
-            "manual --ai-vision-score/--reviewer-model input cannot approve or refine the pass"
+            "visual review with artifact evidence or action=continue requires --verdict-json "
+            "from a fresh independent reviewer; manual AI fields cannot approve or refine the pass"
         )
 
     if action not in VALID_ACTIONS:
@@ -1567,6 +1567,7 @@ def main(argv: list[str]) -> int:
         entry["reviewVerdict"] = str(resolved_verdict_path)
         entry["reviewVerdictSha256"] = file_sha256(resolved_verdict_path)
         entry["blindScout"] = verdict.get("blindScout")
+        entry["blindScoutMapping"] = verdict.get("blindScoutMapping")
     elif blind_scout is not None:
         entry["blindScout"] = blind_scout
     if views:

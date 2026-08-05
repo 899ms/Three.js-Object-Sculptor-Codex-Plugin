@@ -11,7 +11,7 @@ Start every review attempt from a clean diagnostic baseline: clear the Browser c
 Create a side-by-side review image after capture:
 
 ```bash
-python3 ../../scripts/sculpt.py compare \
+python3 <plugin-root>/scripts/sculpt.py compare \
   --reference reference.png \
   --render render.png \
   --render-receipt render-receipt.json \
@@ -38,12 +38,9 @@ The scout must inspect every visible component or region in two ordered passes:
 1. Re-scan all earlier-phase visual quality for remaining defects and clear improvement opportunities. A passed phase is a baseline, not a frozen result.
 2. Review the active phase's visual goals.
 
-Then return:
+Then return one v4 blind-scout artifact containing only `approve|reject` plus at most seven observations. Each observation uses only `visualRegion`, `severity`, `category`, `phaseScope`, `direction`, and `viewIds`; it contains no score, semantic ID, parameter path, or numeric fix.
 
-- a compact scan using only `visualRegion`, `status`, and `observation`;
-- a ranked list using only `priority`, `visualRegion`, `category`, `direction`, and `viewIds`.
-
-Keep the guidance visual and directional: for example, “main upper mass is too narrow; widen and rebalance it against the body.” The scout must not score, name spec IDs, or invent numeric corrections. In the v4 contract it returns only `approve` or `reject`; a major/critical observation is a reject. The builder translates its report into exact IDs and parameters, while the primary reviewer still supplies the composite score and corrections.
+Keep the guidance visual and directional: for example, “main upper mass is too narrow; widen and rebalance it against the body.” The scout must not score, name spec IDs, invent numeric corrections, or evaluate feature-target contracts. A current/protected major or critical observation requires `reject`. The builder translates its report into exact IDs and parameters, while the primary reviewer supplies the composite score, required feature reviews, and corrections. The CLI validates packet/output fields but cannot detect hidden context leaked by an external orchestrator; treat such a run as `UNVERIFIED`.
 
 Immediately after each capture/evaluate/review checkpoint, embed the current render output and this exact `comparison.png` in a user-facing commentary update. Also report the current module/pass, accepted gates versus total gates, review result or blocker, and a recalculated remaining-time range. Do this for rejected challengers as well as accepted candidates, before starting the next step. A path printed by the CLI or an image shown only to the independent reviewer does not satisfy this requirement. For two to four views, present the single 2x2 contact sheet; retain the full-resolution originals for reviewer inspection.
 

@@ -32,6 +32,7 @@ from make_visual_comparison_sheet import (  # noqa: E402
 from new_sculpt_spec import make_spec  # noqa: E402
 from sculpt_contract import (  # noqa: E402
     blind_scout_entry_failures,
+    blind_scout_mapping_failures,
     build_pass_plan,
     correction_batch_from_verdict,
     effective_pass_config,
@@ -53,7 +54,7 @@ from sculpt_contract import (  # noqa: E402
     visual_evidence_manifest_sha256,
     write_spec_atomic,
 )
-from sculpt_pass_orchestrator import pass_specific_gaps  # noqa: E402
+from sculpt_pass_orchestrator import context_payload, pass_specific_gaps  # noqa: E402
 from sculpt_view_hypotheses import register_views  # noqa: E402
 from validate_sculpt_spec import load_spec, validate_spec  # noqa: E402
 from tests.style_helpers import make_assessed_visual_style  # noqa: E402
@@ -211,6 +212,106 @@ def comparison_manifest(root: Path, label: str, view_id: str = "primary") -> dic
     return {key: value for key, value in payload.items() if key != "evidenceSet"}
 
 
+def independent_pass_verdict(
+    spec: dict,
+    pass_id: str,
+    evidence: dict,
+    review_id: str,
+    *,
+    overall_score: float = 0.84,
+    layer_scores: dict | None = None,
+    feature_ids: list[str] | None = None,
+) -> dict:
+    view_ids = [
+        view["viewId"]
+        for view in evidence.get("views", [])
+        if isinstance(view, dict)
+        and isinstance(view.get("viewId"), str)
+        and view["viewId"]
+    ]
+    primary_view = view_ids[0] if view_ids else "primary"
+    config = effective_pass_config(spec, pass_id)
+    sanity = config.get("visualSanity")
+    sanity_categories = (
+        sanity.get("requiredCategories", []) if isinstance(sanity, dict) else []
+    )
+    scores = dict(layer_scores or {})
+    for category in sanity_categories:
+        scores.setdefault(category, overall_score)
+    selected_features = feature_ids
+    if selected_features is None:
+        selected_features = [
+            target["id"]
+            for target in spec.get("featureReviewTargets", [])
+            if isinstance(target, dict)
+            and isinstance(target.get("id"), str)
+            and pass_id in target.get("passIds", [])
+        ]
+    return {
+        "artifactType": "threejs-sculpt-pass-review",
+        "version": 1,
+        "reviewId": review_id,
+        "passId": pass_id,
+        "specHash": review_spec_hash(spec, pass_id),
+        "action": "continue",
+        "builder": {"contextId": f"test-builder-{review_id}"},
+        "reviewer": {
+            "contextId": f"test-reviewer-{review_id}",
+            "role": "independent-reviewer",
+            "model": "test-vision-model",
+        },
+        "comparisonSha256": evidence["comparisonSha256"],
+        "overallScore": overall_score,
+        "layerScores": scores,
+        "sanityChecks": {
+            category: {
+                "status": "pass",
+                "summary": f"The {category} check passed in the reviewed evidence.",
+                "componentIds": ["root"],
+                "viewIds": [primary_view],
+            }
+            for category in sanity_categories
+        },
+        "featureReviews": [
+            {
+                "id": feature_id,
+                "score": max(overall_score, 0.86),
+                "visible": True,
+                "viewIds": [primary_view],
+            }
+            for feature_id in selected_features
+        ],
+        "issues": [],
+        "corrections": [],
+        "resolvedIssueIds": [],
+        "resolvedRootCauseKeys": [],
+        "blindScout": {
+            "artifactType": "threejs-sculpt-blind-scout",
+            "version": 2,
+            "phaseId": pass_id,
+            "decision": "approve",
+            "comparisonSha256": evidence["comparisonSha256"],
+            "reviewedAt": "2026-07-15T00:00:00+00:00",
+            "reviewer": {
+                "role": "blind-visual-scout",
+                "contextId": f"test-scout-{review_id}",
+                "model": "test-blind-scout",
+            },
+            "observations": [],
+        },
+        "blindScoutMapping": {
+            "artifactType": "threejs-sculpt-blind-scout-mapping",
+            "version": 1,
+            "mapper": {
+                "role": "main-agent",
+                "contextId": f"test-builder-{review_id}",
+            },
+            "items": [],
+        },
+        "summary": f"Independent reviewer verified the {pass_id} comparison evidence.",
+    }
+
+
 def visual_entry(spec: dict, pass_id: str, root: Path, view_id: str = "primary") -> dict:
     feature_ids = [
         target["id"]
@@ -257,7 +358,19 @@ def visual_entry(spec: dict, pass_id: str, root: Path, view_id: str = "primary")
     }[pass_id]
     evidence = comparison_manifest(root, pass_id, view_id)
     evidence["type"] = "visual"
+    review_id = f"{pass_id}-{view_id}-{review_spec_hash(spec, pass_id)[:12]}"
+    verdict = independent_pass_verdict(
+        spec,
+        pass_id,
+        evidence,
+        review_id,
+        layer_scores=layers,
+        feature_ids=feature_ids,
+    )
+    verdict_path = root / f"{review_id}-verdict.json"
+    write_spec_atomic(verdict_path, verdict)
     return {
+        "reviewId": review_id,
         "passId": pass_id,
         "action": "continue",
         "specHash": review_spec_hash(spec, pass_id),
@@ -275,6 +388,11 @@ def visual_entry(spec: dict, pass_id: str, root: Path, view_id: str = "primary")
             "model": "test-vision-model",
             "reviewedArtifactSha256": evidence["comparisonSha256"],
             "reviewedAt": "2026-07-15T00:00:00+00:00",
+            "builderContextId": verdict["builder"]["contextId"],
+            "reviewerContextId": verdict["reviewer"]["contextId"],
+            "role": "independent-reviewer",
+            "reviewVerdict": str(verdict_path),
+            "reviewVerdictSha256": file_sha256(verdict_path),
         },
         "blindScout": {
             "artifactType": "threejs-sculpt-blind-scout",
@@ -290,6 +408,7 @@ def visual_entry(spec: dict, pass_id: str, root: Path, view_id: str = "primary")
             },
             "observations": [],
         },
+        "blindScoutMapping": copy.deepcopy(verdict["blindScoutMapping"]),
         "aiVisionNotes": "Synthetic evidence matches the expected test silhouette.",
     }
 
@@ -561,10 +680,25 @@ class PassPlanTests(unittest.TestCase):
         self.assertEqual(scout["output"]["decisionValues"], ["approve", "reject"])
         self.assertEqual(scout["output"]["maxObservations"], 7)
         self.assertEqual(scout["output"]["artifactVersion"], 2)
+        mapping_contract = scout["output"]["mainAgentMapping"]
+        self.assertEqual(mapping_contract["storageField"], "blindScoutMapping")
+        self.assertEqual(mapping_contract["mapperRole"], "main-agent")
+        self.assertTrue(mapping_contract["oneItemPerObservation"])
+        self.assertTrue(mapping_contract["preserveScoutVerdictAndSeverity"])
         self.assertTrue(scout["output"]["priorPhaseReviewRequired"])
         self.assertTrue(scout["output"]["priorPhaseImprovementAllowed"])
         self.assertTrue(scout["output"]["priorPhaseIsNotFrozen"])
-        active_rubric = scout["activePhaseInput"]["phaseRubric"]
+        active_input = scout["activePhaseInput"]
+        self.assertEqual(set(active_input), {"phaseId", "phaseRubric"})
+        self.assertEqual(active_input["phaseId"], "form")
+        blockout_active_input = context_payload(spec)["workPacket"]["visualScout"][
+            "activePhaseInput"
+        ]
+        self.assertEqual(set(blockout_active_input), {"phaseId", "phaseRubric"})
+        self.assertEqual(blockout_active_input["phaseId"], "blockout")
+        self.assertNotIn("qualityContract", active_input)
+        self.assertNotIn("requiredFeatureTargets", active_input)
+        active_rubric = active_input["phaseRubric"]
         self.assertEqual(
             active_rubric["reviewOrder"],
             ["prior-phase-quality-sweep", "current-phase-review"],
@@ -633,6 +767,14 @@ class PassPlanTests(unittest.TestCase):
                 "canonical phase-scoped review categories" in error
                 for error in errors
             )
+        )
+        invalid_mapping = copy.deepcopy(spec)
+        invalid_mapping["phaseExecutionContract"]["visualScout"]["output"][
+            "mainAgentMapping"
+        ]["mapperRole"] = "primary-reviewer"
+        errors, _ = validate_spec(invalid_mapping)
+        self.assertTrue(
+            any("canonical main-agent mapping contract" in error for error in errors)
         )
 
         legacy = copy.deepcopy(spec)
@@ -1548,6 +1690,21 @@ class StateContractTests(unittest.TestCase):
         status = pipeline_status(self.spec)
         self.assertEqual(status["completedPasses"], ["blockout"])
         self.assertEqual(status["currentPass"], "form")
+
+    def test_review_protocol_change_stales_system_and_user_approval(self) -> None:
+        self.spec["reviewHistory"] = [
+            visual_entry(self.spec, "blockout", self.evidence_root)
+        ]
+        approve_current_phase(self.spec, "blockout")
+        self.assertEqual(pipeline_status(self.spec)["currentPass"], "form")
+
+        self.spec["phaseExecutionContract"]["visualScout"]["inputRule"] += (
+            " Changed protocol."
+        )
+
+        status = pipeline_status(self.spec)
+        self.assertEqual(status["currentPass"], "blockout")
+        self.assertNotIn("blockout", status["completedPasses"])
 
     def test_latest_refinement_invalidates_older_continue(self) -> None:
         refine_verdict = {
@@ -2693,6 +2850,107 @@ class QualityGateRegressionTests(unittest.TestCase):
             [],
         )
 
+    def test_main_agent_mapping_is_separate_one_to_one_and_blocking(self) -> None:
+        entry = visual_entry(self.spec, "blockout", self.root)
+        entry["blindScout"]["decision"] = "reject"
+        entry["blindScout"]["observations"] = [
+            {
+                "visualRegion": "upper housing",
+                "category": "proportion",
+                "phaseScope": "current",
+                "direction": "housing is too narrow",
+                "severity": "major",
+                "viewIds": ["primary"],
+            },
+            {
+                "visualRegion": "small lower seam",
+                "category": "material",
+                "phaseScope": "deferred",
+                "direction": "inspect the seam during lookdev",
+                "severity": "minor",
+                "viewIds": ["primary"],
+            },
+        ]
+        mapping = entry["blindScoutMapping"]
+        mapping["items"] = [
+            {
+                "observationIndex": 0,
+                "status": "unmapped",
+                "targets": [],
+                "reason": "The target has not been identified.",
+            }
+        ]
+        failures = blind_scout_mapping_failures(
+            entry["blindScout"],
+            mapping,
+            review_target_catalog(self.spec),
+            main_agent_context=entry["reviewerEvidence"]["builderContextId"],
+        )
+        self.assertTrue(
+            any("exactly one item" in failure for failure in failures),
+            failures,
+        )
+        self.assertTrue(
+            any("major observation" in failure for failure in failures),
+            failures,
+        )
+
+        mapping["items"] = [
+            {
+                "observationIndex": 0,
+                "status": "mapped",
+                "targets": [{"targetType": "component", "target": "root"}],
+            },
+            {
+                "observationIndex": 1,
+                "status": "deferred",
+                "targets": [],
+            },
+        ]
+        self.assertEqual(
+            blind_scout_mapping_failures(
+                entry["blindScout"],
+                mapping,
+                review_target_catalog(self.spec),
+                main_agent_context=entry["reviewerEvidence"]["builderContextId"],
+            ),
+            [],
+        )
+
+        foreign_mapper = copy.deepcopy(mapping)
+        foreign_mapper["mapper"]["contextId"] = "primary-reviewer-context"
+        self.assertTrue(
+            any(
+                "must match the main agent" in failure
+                for failure in blind_scout_mapping_failures(
+                    entry["blindScout"],
+                    foreign_mapper,
+                    review_target_catalog(self.spec),
+                    main_agent_context=entry["reviewerEvidence"]["builderContextId"],
+                )
+            )
+        )
+
+        missing = visual_entry(self.spec, "blockout", self.root)
+        missing.pop("blindScoutMapping")
+        self.assertTrue(
+            any(
+                "blindScoutMapping is required" in failure
+                for failure in review_failures(self.spec, missing, "blockout")
+            )
+        )
+
+    def test_v4_primary_reviewer_must_cover_critical_features(self) -> None:
+        entry = visual_entry(self.spec, "blockout", self.root)
+        entry["featureReviews"] = []
+
+        failures = review_failures(self.spec, entry, "blockout")
+
+        self.assertIn(
+            "critical feature 'overall-silhouette' has no AI vision review",
+            failures,
+        )
+
     def test_synthetic_side_material_is_not_treated_as_observed_truth(self) -> None:
         entry = visual_entry(self.spec, "lookdev", self.root, "reference")
         side = next(view for view in entry["evidence"]["views"] if view["viewId"] == "side")
@@ -2719,23 +2977,42 @@ class QualityGateRegressionTests(unittest.TestCase):
         spec_path = self.root / "spec.json"
         manifest_path = self.root / "manifest.json"
         write_spec_atomic(spec_path, self.spec)
-        manifest_path.write_text(
-            json.dumps(comparison_manifest(self.root, "cli")), encoding="utf-8"
+        evidence = comparison_manifest(self.root, "cli")
+        manifest_path.write_text(json.dumps(evidence), encoding="utf-8")
+        manual_args = [
+            str(spec_path),
+            "--pass-id", "blockout",
+            "--action", "continue",
+            "--summary", "Attempt manual visual approval.",
+            "--evidence-set-json", str(manifest_path),
+            "--ai-vision-score", "0.9",
+            "--reviewer-model", "test-vision-model",
+            "--ai-vision-notes", "The comparison was inspected for this regression test.",
+            "--layer-scores-json", '{"silhouette":0.9}',
+            "--feature-reviews-json", '[{"id":"overall-silhouette","score":0.9,"visible":true}]',
+        ]
+        with self.assertRaisesRegex(ValueError, "fresh independent reviewer"):
+            append_review(manual_args)
+
+        verdict = independent_pass_verdict(
+            self.spec,
+            "blockout",
+            evidence,
+            "threshold-review",
+            overall_score=0.9,
+            layer_scores={"silhouette": 0.9},
+            feature_ids=["overall-silhouette"],
         )
+        verdict_path = self.root / "threshold-verdict.json"
+        write_spec_atomic(verdict_path, verdict)
         with self.assertRaisesRegex(ValueError, "cannot lower"):
             append_review(
                 [
                     str(spec_path),
                     "--pass-id", "blockout",
-                    "--action", "continue",
-                    "--summary", "Attempt a lower threshold.",
                     "--evidence-set-json", str(manifest_path),
-                    "--ai-vision-score", "0.9",
-                    "--reviewer-model", "test-vision-model",
-                    "--ai-vision-notes", "The comparison was inspected for this regression test.",
+                    "--verdict-json", str(verdict_path),
                     "--visual-threshold", "0.1",
-                    "--layer-scores-json", '{"silhouette":0.9}',
-                    "--feature-reviews-json", '[{"id":"overall-silhouette","score":0.9,"visible":true}]',
                 ]
             )
 
@@ -2777,34 +3054,22 @@ class EndToEndReviewTests(unittest.TestCase):
                     layers.setdefault(layer, 0.84)
                 evidence = json.dumps(comparison_manifest(root, pass_id, view_id))
                 evidence_manifest = json.loads(evidence)
-                blind_scout = {
-                    "artifactType": "threejs-sculpt-blind-scout",
-                    "version": 2,
-                    "phaseId": pass_id,
-                    "decision": "approve",
-                    "comparisonSha256": evidence_manifest["comparisonSha256"],
-                    "reviewedAt": "2026-07-15T00:00:00+00:00",
-                    "reviewer": {
-                        "role": "blind-visual-scout",
-                        "contextId": f"e2e-scout-{pass_id}-{view_id}",
-                        "model": "test-blind-scout",
-                    },
-                    "observations": [],
-                }
+                verdict = independent_pass_verdict(
+                    current_spec,
+                    pass_id,
+                    evidence_manifest,
+                    f"e2e-{pass_id}-{view_id}",
+                    overall_score=0.84,
+                    layer_scores=layers,
+                    feature_ids=features,
+                )
+                verdict_path = root / f"{pass_id}-verdict.json"
+                write_spec_atomic(verdict_path, verdict)
                 argv = [
                     str(spec_path),
                     "--pass-id", pass_id,
-                    "--action", "continue",
-                    "--summary", f"{pass_id} passed",
                     "--evidence-set-json", evidence,
-                    "--ai-vision-score", "0.84",
-                    "--reviewer-model", "test-vision-model",
-                    "--ai-vision-notes", "The synthetic render matches silhouette and test layers.",
-                    "--layer-scores-json", json.dumps(layers),
-                    "--feature-reviews-json", json.dumps(
-                        [{"id": feature, "score": 0.86, "visible": True} for feature in features]
-                    ),
-                    "--blind-scout-json", json.dumps(blind_scout),
+                    "--verdict-json", str(verdict_path),
                     "--in-place",
                 ]
                 with redirect_stdout(io.StringIO()):

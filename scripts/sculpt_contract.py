@@ -17,8 +17,8 @@ from typing import Any
 
 from visual_feature_gate import (
     feature_gate_failures,
+    feature_review_policy,
     feature_targets_for_pass,
-    required_feature_targets_for_pass,
 )
 from sculpt_perception import perceptual_review_failures
 from sculpt_style import (
@@ -83,6 +83,8 @@ SIMPLIFIED_PHASE_EXECUTION_VERSION = 4
 SIMPLIFIED_AI_OVERALL_FLOOR = 0.70
 MAX_BLIND_SCOUT_OBSERVATIONS = 7
 BLIND_SCOUT_ARTIFACT_VERSION = 2
+BLIND_SCOUT_MAPPING_ARTIFACT_TYPE = "threejs-sculpt-blind-scout-mapping"
+BLIND_SCOUT_MAPPING_VERSION = 1
 BLIND_SCOUT_PHASE_CATEGORIES: dict[str, tuple[str, ...]] = {
     "blockout": (
         "silhouette",
@@ -379,6 +381,16 @@ def blind_scout_execution_contract() -> dict[str, Any]:
             "builderDefense",
             "primaryVerdict",
         ],
+        "inputRule": (
+            "Pass only sourceImage, currentRender, previousRender when available, "
+            "sideBySideComparison, phaseId, and phaseRubric. Never pass the spec, "
+            "phase packet, quality contract, feature targets, or pre-generation image."
+        ),
+        "approvalRule": (
+            "Decide only from the permitted pixels and phase rubric. The primary "
+            "independent reviewer—not the scout—evaluates exact IDs, feature targets, "
+            "scores, and contract compliance."
+        ),
         "phaseRubrics": blind_scout_phase_rubrics(),
         "scanRule": (
             "Run a mandatory two-pass scan using every phaseRubric.mandatoryChecks item: "
@@ -443,11 +455,85 @@ def blind_scout_execution_contract() -> dict[str, Any]:
                 "beforeValue",
                 "expectedValue",
             ],
-            "builderMappingRule": (
-                "The builder maps visual regions to exact spec IDs and numeric "
-                "corrections after receiving the scout report."
-            ),
+            "mainAgentMapping": {
+                "required": True,
+                "artifactType": BLIND_SCOUT_MAPPING_ARTIFACT_TYPE,
+                "version": BLIND_SCOUT_MAPPING_VERSION,
+                "storageField": "blindScoutMapping",
+                "mapperRole": "main-agent",
+                "oneItemPerObservation": True,
+                "statuses": ["mapped", "unmapped", "deferred"],
+                "targetFields": ["targetType", "target"],
+                "blockingScopes": ["current", "protected"],
+                "blockingUnmappedSeverities": ["critical", "major"],
+                "preserveScoutVerdictAndSeverity": True,
+            },
         },
+    }
+
+def human_approval_contract(approval_mode: str) -> dict[str, Any]:
+    """Return the exact post-system human gate for the configured approval mode."""
+
+    final_only = approval_mode == "final-only"
+    return {
+        "required": True,
+        "scope": "final-active-phase" if final_only else "every-active-phase",
+        "order": (
+            "after-final-system-pass"
+            if final_only
+            else "after-system-pass-before-next-phase"
+        ),
+        "systemPassPrerequisite": True,
+        "approvalDecisions": ["approved", "changes-requested"],
+        "bindingFields": [
+            "passId",
+            "reviewKey",
+            "specHash",
+            "reviewedArtifactSha256",
+        ],
+        "changesRequestedFields": [
+            "visualRegion",
+            "problem",
+            "expectedDirection",
+        ],
+        "rules": [
+            "Never ask the user to approve before deterministic preflight, the composite AI review, and blind scout approve pass.",
+            "Show the current output and exact comparison or runtime evidence when requesting approval.",
+            "Only explicit user approval completes the configured human gate.",
+            "If the user requests changes, record where the problem is, what is wrong, and the expected direction; refine and rerun the composite AI review and blind scout before asking again.",
+            "The builder must never infer, fabricate, or self-record user approval.",
+        ],
+    }
+
+
+def review_governance_contract() -> dict[str, Any]:
+    """Return the independent-review authority required for every v4 workflow."""
+
+    return {
+        "independentContextRequired": True,
+        "reviewerRole": "independent-reviewer",
+        "verdictArtifactRequired": True,
+        "builderMayNotOverrideVerdict": True,
+    }
+
+
+def primary_feature_review_policy(quality_profile: str) -> dict[str, Any]:
+    """Keep source-specific feature acceptance with the primary reviewer."""
+
+    reference_fidelity = quality_profile == "reference-fidelity"
+    return {
+        "enabled": True,
+        "reviewUnit": "multi-view-contact-sheet",
+        "maxCriticalFeaturesPerPass": 8,
+        "maxImportantFeaturesPerPass": 3,
+        "criticalDefaultThreshold": 0.85 if reference_fidelity else 0.8,
+        "importantAverageThreshold": 0.78 if reference_fidelity else 0.65,
+        "adaptiveEscalation": True,
+        "singleImagePairOnly": False,
+        "selectionRule": (
+            "Review a few identity-defining semantic systems, not every mesh; "
+            "visible face and hand regions remain independent critical targets."
+        ),
     }
 
 DERIVED_SPEC_FIELDS = {
@@ -2345,6 +2431,7 @@ def review_spec_hash(spec: dict[str, Any], pass_id: str) -> str:
         "silhouette",
         "viewEvidence",
         "reviewGovernance",
+        "phaseExecutionContract",
     )
     payload: dict[str, Any] = {key: spec.get(key) for key in base_fields}
     quality_contract = spec.get("qualityContract")
@@ -3185,7 +3272,14 @@ def _visual_review_failures(
     notes = entry.get("aiVisionNotes")
     if not isinstance(notes, str) or len(notes.strip()) < 12:
         failures.append("aiVisionNotes must explain the accepted visual result")
-    if not simplified_visual_gate_enabled(spec, pass_id):
+    if (
+        simplified_visual_gate_enabled(spec, pass_id)
+        and feature_review_policy(spec).get("enabled") is not True
+    ):
+        failures.append(
+            "v4 visual gate requires primary feature reviews to be enabled"
+        )
+    else:
         failures.extend(feature_gate_failures(spec, entry, pass_id))
     return failures
 
@@ -3484,19 +3578,6 @@ def phase_work_packet(spec: dict[str, Any], pass_id: str) -> dict[str, Any]:
         visual_scout["activePhaseInput"] = {
             "phaseId": canonical_phase,
             "phaseRubric": active_rubric,
-            "qualityContract": copy.deepcopy(spec.get("qualityContract", {})),
-            "requiredFeatureTargets": copy.deepcopy(
-                required_feature_targets_for_pass(spec, canonical_phase)
-            ),
-            "inputRule": (
-                "Pass only the allowed images (including previousRender when a prior "
-                "checkpoint exists), this phaseId, phaseRubric, qualityContract, and "
-                "requiredFeatureTargets to the blind scout."
-            ),
-            "approvalRule": (
-                "Approve only when every required feature target relevant to this phase "
-                "satisfies its source-specific criteria and no contract-blocking defect is visible."
-            ),
         }
     return {
         "passId": pass_id,
@@ -3699,8 +3780,7 @@ def blind_scout_entry_failures(
 
     The scout is deliberately forbidden from naming spec IDs, parameter paths,
     scores, or numeric fixes.  It reports only what a person can see in the
-    comparison; the primary reviewer/builder maps those observations to exact
-    component corrections.
+    comparison; the main agent maps those observations after both reviewers return.
     """
 
     if not simplified_visual_gate_enabled(spec, pass_id):
@@ -3875,6 +3955,182 @@ def blind_scout_entry_failures(
     return list(dict.fromkeys(failures))
 
 
+def blind_scout_mapping_failures(
+    scout: Any,
+    mapping: Any,
+    target_catalog: Mapping[str, Mapping[str, Any]],
+    *,
+    main_agent_context: str | None = None,
+) -> list[str]:
+    """Validate the main agent's 1:1 bridge from blind observations to spec targets."""
+
+    if not isinstance(mapping, Mapping):
+        return ["blindScoutMapping is required for the v4 visual gate"]
+
+    failures: list[str] = []
+    unexpected_fields = sorted(
+        set(mapping) - {"artifactType", "version", "mapper", "items"}
+    )
+    if unexpected_fields:
+        failures.append(
+            "blindScoutMapping contains unsupported fields: "
+            + ", ".join(str(field) for field in unexpected_fields)
+        )
+    if mapping.get("artifactType") != BLIND_SCOUT_MAPPING_ARTIFACT_TYPE:
+        failures.append(
+            f"blindScoutMapping.artifactType must be "
+            f"{BLIND_SCOUT_MAPPING_ARTIFACT_TYPE!r}"
+        )
+    if mapping.get("version") != BLIND_SCOUT_MAPPING_VERSION:
+        failures.append(
+            f"blindScoutMapping.version must be {BLIND_SCOUT_MAPPING_VERSION}"
+        )
+
+    mapper = mapping.get("mapper")
+    if not isinstance(mapper, Mapping):
+        failures.append("blindScoutMapping.mapper is required")
+    else:
+        unexpected_mapper_fields = sorted(set(mapper) - {"role", "contextId"})
+        if unexpected_mapper_fields:
+            failures.append(
+                "blindScoutMapping.mapper contains unsupported fields: "
+                + ", ".join(str(field) for field in unexpected_mapper_fields)
+            )
+        if mapper.get("role") != "main-agent":
+            failures.append("blindScoutMapping.mapper.role must be main-agent")
+        mapper_context = mapper.get("contextId")
+        if not isinstance(mapper_context, str) or not mapper_context.strip():
+            failures.append("blindScoutMapping.mapper.contextId is required")
+        elif (
+            isinstance(main_agent_context, str)
+            and main_agent_context.strip()
+            and mapper_context != main_agent_context
+        ):
+            failures.append(
+                "blindScoutMapping mapper contextId must match the main agent "
+                "builder contextId"
+            )
+
+    observations = scout.get("observations") if isinstance(scout, Mapping) else None
+    if not isinstance(observations, list):
+        failures.append("blindScoutMapping requires valid blindScout.observations")
+        observations = []
+
+    items = mapping.get("items")
+    if not isinstance(items, list):
+        failures.append("blindScoutMapping.items must be an array")
+        items = []
+
+    seen_indices: set[int] = set()
+    for item_index, item in enumerate(items):
+        label = f"blindScoutMapping.items[{item_index}]"
+        if not isinstance(item, Mapping):
+            failures.append(f"{label} must be an object")
+            continue
+        unexpected_item_fields = sorted(
+            set(item) - {"observationIndex", "status", "targets", "reason"}
+        )
+        if unexpected_item_fields:
+            failures.append(
+                f"{label} contains unsupported fields: "
+                + ", ".join(str(field) for field in unexpected_item_fields)
+            )
+        observation_index = item.get("observationIndex")
+        observation: Mapping[str, Any] | None = None
+        if not isinstance(observation_index, int) or isinstance(observation_index, bool):
+            failures.append(f"{label}.observationIndex must be an integer")
+        else:
+            if observation_index in seen_indices:
+                failures.append(f"{label}.observationIndex duplicates {observation_index}")
+            seen_indices.add(observation_index)
+            if 0 <= observation_index < len(observations):
+                candidate = observations[observation_index]
+                if isinstance(candidate, Mapping):
+                    observation = candidate
+            else:
+                failures.append(
+                    f"{label}.observationIndex does not reference a scout observation"
+                )
+
+        status = item.get("status")
+        if status not in {"mapped", "unmapped", "deferred"}:
+            failures.append(f"{label}.status must be mapped, unmapped, or deferred")
+        targets = item.get("targets")
+        if not isinstance(targets, list):
+            failures.append(f"{label}.targets must be an array")
+            targets = []
+
+        valid_target_count = 0
+        for target_index, target in enumerate(targets):
+            target_label = f"{label}.targets[{target_index}]"
+            if not isinstance(target, Mapping):
+                failures.append(f"{target_label} must be an object")
+                continue
+            unexpected_target_fields = sorted(set(target) - {"targetType", "target"})
+            if unexpected_target_fields:
+                failures.append(
+                    f"{target_label} contains unsupported fields: "
+                    + ", ".join(str(field) for field in unexpected_target_fields)
+                )
+            target_type = target.get("targetType")
+            target_id = target.get("target")
+            if target_type not in CORRECTION_TARGET_TYPES:
+                failures.append(
+                    f"{target_label}.targetType must be a canonical spec target type"
+                )
+                continue
+            if not isinstance(target_id, str) or not target_id.strip():
+                failures.append(f"{target_label}.target is required")
+                continue
+            known_targets = target_catalog.get(str(target_type), {})
+            if not isinstance(known_targets, Mapping) or target_id not in known_targets:
+                failures.append(
+                    f"{target_label} must reference an existing {target_type} id"
+                )
+                continue
+            valid_target_count += 1
+
+        if status == "mapped" and valid_target_count == 0:
+            failures.append(
+                f"{label} with status mapped must contain a valid spec target"
+            )
+        if status in {"unmapped", "deferred"} and targets:
+            failures.append(f"{label} with status {status} must not contain targets")
+        if status == "unmapped" and (
+            not isinstance(item.get("reason"), str) or not item["reason"].strip()
+        ):
+            failures.append(f"{label}.reason is required when status is unmapped")
+
+        if observation is not None:
+            phase_scope = observation.get("phaseScope")
+            severity = observation.get("severity")
+            if phase_scope == "deferred" and status != "deferred":
+                failures.append(
+                    f"{label}.status must be deferred for a future-phase observation"
+                )
+            if phase_scope != "deferred" and status == "deferred":
+                failures.append(
+                    f"{label}.status cannot defer a current/protected observation"
+                )
+            if (
+                phase_scope in {"current", "protected"}
+                and severity in {"critical", "major"}
+                and status != "mapped"
+            ):
+                failures.append(
+                    f"{label} must map the current/protected {severity} observation "
+                    "before the gate can pass"
+                )
+
+    expected_indices = set(range(len(observations)))
+    if seen_indices != expected_indices:
+        failures.append(
+            "blindScoutMapping.items must contain exactly one item for each "
+            "blindScout observation index"
+        )
+    return list(dict.fromkeys(failures))
+
+
 def review_failures(
     spec: dict[str, Any],
     entry: dict[str, Any],
@@ -3902,6 +4158,19 @@ def review_failures(
                 entry,
                 pass_id,
                 require_approve=True,
+            )
+        )
+        reviewer_evidence = entry.get("reviewerEvidence")
+        failures.extend(
+            blind_scout_mapping_failures(
+                entry.get("blindScout"),
+                entry.get("blindScoutMapping"),
+                review_target_catalog(spec),
+                main_agent_context=(
+                    reviewer_evidence.get("builderContextId")
+                    if isinstance(reviewer_evidence, Mapping)
+                    else None
+                ),
             )
         )
         failures.extend(prior_pass_regression_failures(spec, entry, config))
@@ -4016,6 +4285,7 @@ def phase_review_key(entry: Mapping[str, Any]) -> str:
         "comparisonSha256": evidence.get("comparisonSha256"),
         "reviewedArtifactSha256": reviewer.get("reviewedArtifactSha256"),
         "blindScout": entry.get("blindScout"),
+        "blindScoutMapping": entry.get("blindScoutMapping"),
         "runtimeChecks": entry.get("runtimeChecks"),
         "metrics": entry.get("metrics"),
     }
@@ -4527,6 +4797,31 @@ def sync_pipeline(spec: dict[str, Any]) -> dict[str, Any]:
             "centroidAndAspect": "diagnostic-only",
             "humanApprovalAfterSystemPass": True,
         }
+        perceptual = spec.get("perceptualContract")
+        approval_mode = (
+            perceptual.get("approvalMode")
+            if isinstance(perceptual, Mapping)
+            else "phase-by-phase"
+        )
+        execution["humanApproval"] = human_approval_contract(
+            str(approval_mode or "phase-by-phase")
+        )
+        loop = spec.get("selfCorrectLoop")
+        acceptance = loop.get("visualAcceptance") if isinstance(loop, dict) else None
+        if isinstance(acceptance, dict):
+            policy = acceptance.get("featureReviewPolicy")
+            if not isinstance(policy, dict):
+                acceptance["featureReviewPolicy"] = primary_feature_review_policy(
+                    str(spec.get("qualityProfile") or "balanced")
+                )
+            else:
+                policy["enabled"] = True
+            acceptance["scoringRule"] = (
+                "The primary independent reviewer returns one composite 0-to-1 score, "
+                "reviews every critical or mustPass feature target, and supplies concrete "
+                "corrections; the blind visual scout supplies only the independent binary "
+                "visual gate."
+            )
     targets = spec.get("qualityTargets")
     diagnostics = (
         targets.get("diagnosticTargets")

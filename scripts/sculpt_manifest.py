@@ -13,6 +13,7 @@ from sculpt_contract import (
     SIMPLIFIED_AI_OVERALL_FLOOR,
     adaptive_hypothesis_views,
     parse_json,
+    review_governance_contract,
     sync_pipeline,
     simplified_visual_gate_enabled,
     write_spec_atomic,
@@ -112,13 +113,8 @@ def make_manifest(base_spec: dict[str, Any]) -> dict[str, Any]:
             "notes": "Declare critical regions inside the module that owns their geometry.",
             "regions": [],
         }
+    global_spec["reviewGovernance"] = review_governance_contract()
     sync_pipeline(global_spec)
-    global_spec["reviewGovernance"] = {
-        "independentContextRequired": True,
-        "reviewerRole": "independent-reviewer",
-        "verdictArtifactRequired": True,
-        "builderMayNotOverrideVerdict": True,
-    }
     return {
         "schemaVersion": MANIFEST_SCHEMA_VERSION,
         "manifestRevision": 1,

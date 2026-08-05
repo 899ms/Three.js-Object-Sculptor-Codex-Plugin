@@ -213,13 +213,16 @@ class QualityContractTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            [
-                target["id"]
-                for target in packet["visualScout"]["activePhaseInput"][
-                    "requiredFeatureTargets"
-                ]
-            ],
-            ["overall-silhouette"],
+            set(packet["visualScout"]["activePhaseInput"]),
+            {"phaseId", "phaseRubric"},
+        )
+        self.assertNotIn(
+            "qualityContract",
+            packet["visualScout"]["activePhaseInput"],
+        )
+        self.assertNotIn(
+            "requiredFeatureTargets",
+            packet["visualScout"]["activePhaseInput"],
         )
         self.assertIn(
             "qualityContract",
@@ -276,6 +279,15 @@ class QualityContractTests(unittest.TestCase):
         self.assertNotEqual(
             review_spec_hash(form_target_changed, "form"),
             form_hash,
+        )
+
+        protocol_changed = copy.deepcopy(spec)
+        protocol_changed["phaseExecutionContract"]["visualScout"]["inputRule"] += (
+            " Changed protocol."
+        )
+        self.assertNotEqual(
+            review_spec_hash(protocol_changed, "blockout"),
+            blockout_hash,
         )
 
     def test_legacy_contract_shape_blocks_later_phases_and_changes_hash(self) -> None:
